@@ -612,12 +612,16 @@ build_github_profile_env_block() {
       exit 1
     fi
     upper="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
+    # shellcheck disable=SC2016
     printf -v line '    "GITHUB_TOKEN_%s": "${localEnv:GITHUB_TOKEN_%s}",\n' "$upper" "$upper"
     out+="$line"
+    # shellcheck disable=SC2016
     printf -v line '    "GITHUB_OWNER_%s": "${localEnv:GITHUB_OWNER_%s}",\n' "$upper" "$upper"
     out+="$line"
+    # shellcheck disable=SC2016
     printf -v line '    "GIT_AUTHOR_NAME_%s": "${localEnv:GIT_AUTHOR_NAME_%s}",\n' "$upper" "$upper"
     out+="$line"
+    # shellcheck disable=SC2016
     printf -v line '    "GIT_AUTHOR_EMAIL_%s": "${localEnv:GIT_AUTHOR_EMAIL_%s}",\n' "$upper" "$upper"
     out+="$line"
   done
