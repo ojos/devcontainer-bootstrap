@@ -10,6 +10,9 @@
 
 まずは最小コマンドで生成し、必要に応じて言語やテンプレートオプションを追加する使い方を推奨します。
 
+本パッケージは、AIコーディング（Copilot / Claude / Gemini など）を前提とした開発運用を想定しています。
+そのため、devcontainer 設定や補助スクリプトは「複数アカウント切替」「CLI 認証状態の確認」「再現可能な初期セットアップ」を重視した構成になっています。
+
 ## 公開リリースからの利用
 
 公開リポジトリ:
@@ -89,14 +92,27 @@ bash scripts/github-account-switch.sh use ojos
 - `features.devTools`（既定値: true）
 
 ## シークレット方針
+この方針は、トークンや API キーの平文漏えいを防ぎつつ、AIコーディング時の認証切替を安全に行うためのルールです。
+
 - 受け付けるのは環境変数名のみ（秘密値そのものは不可）
   - `GITHUB_TOKEN_<PROFILE>`（例: `GITHUB_TOKEN_WORK`, `GITHUB_TOKEN_PERSONAL`）
+    - `<PROFILE>` 切替時に `gh` 認証へ使うトークン値です。
   - `GITHUB_OWNER_<PROFILE>`（任意。トークン発行者と操作対象 owner が異なる場合）
-  - `GIT_AUTHOR_NAME_<PROFILE>` / `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
+    - `<PROFILE>` 切替時に `github.owner` として扱う owner（個人名/組織名）です。
+  - `GIT_AUTHOR_NAME_<PROFILE>`（任意）
+    - `<PROFILE>` 切替時に `git config user.name`（コミット author/committer 名）へ設定する文字列です。
+  - `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
+    - `<PROFILE>` 切替時に `git config user.email`（コミット author/committer メール）へ設定する文字列です。
   - `CLAUDE_CODE_OAUTH_TOKEN`
+    - Claude CLI の認証に使うトークンです。
   - `GEMINI_API_KEY`
+    - Gemini CLI の API 認証に使うキーです。
 - 生成される devcontainer 設定では `${localEnv:...}` 参照のみを使用する。
 - `GH_TOKEN` の常時注入は、マルチアカウント切替を阻害するため推奨しない。
+
+補足:
+- `GITHUB_TOKEN_<PROFILE>` は `scripts/github-account-switch.sh` で profile ごとに切替利用する前提です。
+- `GITHUB_OWNER_<PROFILE>` は、トークン発行者と操作対象 owner（個人/組織）が異なるときに使います。
 
 ## 検証ルール
 1. `languages` には少なくとも 1 つの対応言語（node|go|python）を含めること
