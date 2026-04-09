@@ -10,16 +10,34 @@
 
 まずは最小コマンドで生成し、必要に応じて言語やテンプレートオプションを追加する使い方を推奨します。
 
+## 公開リリースからの利用
+
+公開リポジトリ:
+- https://github.com/ojos/devcontainer-bootstrap
+
+初回リリース:
+- `v0.1.0`
+
+```bash
+TAG=v0.1.0
+curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/bootstrap.sh" -o bootstrap.sh
+curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/SHA256SUMS" -o SHA256SUMS
+sha256sum -c SHA256SUMS
+bash bootstrap.sh --project-name myapp --languages node,go --mode standard
+```
+
 ## 入力仕様
 
 ## 必須入力
-- `projectName`（文字列）
-- `languages`（CSV 形式。`node`、`go`、`python` を任意に組み合わせ）
-- `bootstrapMode`（`minimal` | `standard` | `full`）
+- `--project-name <name>`（文字列。必須）
+- `--languages <csv>`（CSV 形式。`node`、`go`、`python` を任意に組み合わせ。必須）
+- `--mode <minimal|standard|full>`（テンプレート選択。既定: `standard`）
 
 ## オプション入力
 - `--output-dir <path>`（省略時: カレントディレクトリ直下に `<project-name>/` を作成して展開）
 - `--base-image <image>`（自動判定結果を上書きして明示指定）
+- `--github-profiles <csv>`（GitHub マルチアカウント用 profile 名。既定: `primary,secondary`）
+- `--github-token-env <name>`（legacy 互換。単一トークン運用向け）
 
 ## 言語サポート
 対応ランタイム（任意の組み合わせ）:
@@ -49,6 +67,16 @@
 
 # 追加テンプレートを明示指定したい場合（暗黙ターゲットに追加で合成）
 ./bootstrap.sh --project-name myapp --languages node --mode standard --gitignore-targets macOS,Node,VisualStudioCode
+
+# GitHub マルチアカウント profile を指定する場合
+./bootstrap.sh --project-name myapp --languages node --mode full --github-profiles bascule,ojos
+```
+
+生成後の切替例:
+
+```bash
+bash scripts/github-account-switch.sh list
+bash scripts/github-account-switch.sh use ojos
 ```
 
 ## Feature フラグ
@@ -60,27 +88,25 @@
 - `features.awsCli`（`full` モードのみ）
 - `features.devTools`（既定値: true）
 
-## エージェント入力
-- `agent.enableMultiAgent`（真偽値）
-- `agent.defaultRoles`（文字列配列）
-- `agent.orchestrationMode`（`local` | `remote` | `hybrid`）
-
 ## シークレット方針
 - 受け付けるのは環境変数名のみ（秘密値そのものは不可）
-  - `secrets.githubTokenEnv`
-  - `secrets.claudeTokenEnv`
-  - `secrets.geminiKeyEnv`
-- 生成される devcontainer 設定では `${localEnv:...}` 参照を必須とする。
+  - `GITHUB_TOKEN_<PROFILE>`（例: `GITHUB_TOKEN_BASCULE`, `GITHUB_TOKEN_OJOS`）
+  - `GITHUB_OWNER_<PROFILE>`（任意。トークン発行者と操作対象 owner が異なる場合）
+  - `GIT_AUTHOR_NAME_<PROFILE>` / `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
+  - `CLAUDE_CODE_OAUTH_TOKEN`
+  - `GEMINI_API_KEY`
+- 生成される devcontainer 設定では `${localEnv:...}` 参照のみを使用する。
+- `GH_TOKEN` の常時注入は、マルチアカウント切替を阻害するため推奨しない。
 
 ## 検証ルール
 1. `languages` には少なくとも 1 つの対応言語（node|go|python）を含めること
 2. 指定した各言語に対応する feature を devcontainer.json に追加すること
-3. `bootstrapMode=minimal` では `agent.enableMultiAgent=false` を許可
-4. `bootstrapMode=full` では `agent.enableMultiAgent=true` を推奨
-5. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
+3. `--github-profiles` で指定した各 profile に対して `GITHUB_TOKEN_<PROFILE>` などの `remoteEnv` を生成すること
+4. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
 
 ## 期待される出力
 - `.devcontainer/devcontainer.json`（言語別 feature を反映）
+- `scripts/github-account-switch.sh`
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`
 - `.gitignore` の managed セクション（言語構成に応じて自動更新）
