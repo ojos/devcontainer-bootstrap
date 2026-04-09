@@ -1,0 +1,8 @@
+# local outputs
+SHA256SUMS
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.swo
