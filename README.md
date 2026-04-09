@@ -15,11 +15,11 @@
 公開リポジトリ:
 - https://github.com/ojos/devcontainer-bootstrap
 
-初回リリース:
-- `v0.1.0`
+最新安定リリース:
+- `v0.1.2`
 
 ```bash
-TAG=v0.1.0
+TAG=v0.1.2
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/SHA256SUMS" -o SHA256SUMS
 sha256sum -c SHA256SUMS
@@ -69,7 +69,7 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard
 ./bootstrap.sh --project-name myapp --languages node --mode standard --gitignore-targets macOS,Node,VisualStudioCode
 
 # GitHub マルチアカウント profile を指定する場合
-./bootstrap.sh --project-name myapp --languages node --mode full --github-profiles bascule,ojos
+./bootstrap.sh --project-name myapp --languages node --mode full --github-profiles work,personal
 ```
 
 生成後の切替例:
@@ -90,7 +90,7 @@ bash scripts/github-account-switch.sh use ojos
 
 ## シークレット方針
 - 受け付けるのは環境変数名のみ（秘密値そのものは不可）
-  - `GITHUB_TOKEN_<PROFILE>`（例: `GITHUB_TOKEN_BASCULE`, `GITHUB_TOKEN_OJOS`）
+  - `GITHUB_TOKEN_<PROFILE>`（例: `GITHUB_TOKEN_WORK`, `GITHUB_TOKEN_PERSONAL`）
   - `GITHUB_OWNER_<PROFILE>`（任意。トークン発行者と操作対象 owner が異なる場合）
   - `GIT_AUTHOR_NAME_<PROFILE>` / `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
   - `CLAUDE_CODE_OAUTH_TOKEN`

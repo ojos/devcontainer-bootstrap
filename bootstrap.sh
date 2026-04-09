@@ -109,9 +109,6 @@ detect_server_platform() {
     fi
   fi
   # Fallback for environments without docker access during bootstrap.
-      local resolved_targets
-      local target
-      local tmp
   printf '%s\n' "linux/amd64"
 }
 

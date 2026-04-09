@@ -7,7 +7,7 @@ STRICT="false"
 
 usage() {
   cat <<'EOF'
-usage: bash packages/multi-agent-package/devcontainer-bootstrap/doctor.sh [options]
+usage: bash packages/devcontainer-bootstrap/doctor.sh [options]
 
 options:
   --target-dir <path>   Target workspace path (default: current directory)
