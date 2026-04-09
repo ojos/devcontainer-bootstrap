@@ -15,7 +15,6 @@ DRY_RUN="false"
 MANAGE_GITIGNORE="true"
 GITIGNORE_TARGETS=""
 
-GITHUB_TOKEN_ENV="GITHUB_TOKEN"
 GITHUB_PROFILES="primary,secondary"
 CLAUDE_TOKEN_ENV="CLAUDE_CODE_OAUTH_TOKEN"
 GEMINI_KEY_ENV="GEMINI_API_KEY"
@@ -35,7 +34,6 @@ options:
                               Template variant (default: standard)
   --languages <csv>           Language runtimes (CSV: node,go,python) (required)
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
-  --github-token-env <name>   [legacy] Local env var name for GH token (default: GITHUB_TOKEN)
   --github-profiles <csv>     GitHub profiles for multi-account env injection
                               (default: primary,secondary)
   --claude-token-env <name>   Local env var name for Claude token (default: CLAUDE_CODE_OAUTH_TOKEN)
@@ -55,7 +53,6 @@ while [[ $# -gt 0 ]]; do
     --mode)             MODE="$2"; shift 2 ;;
     --languages)        IFS=',' read -ra LANGUAGES <<< "$2"; shift 2 ;;
     --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
-    --github-token-env) GITHUB_TOKEN_ENV="$2"; shift 2 ;;
     --github-profiles)  GITHUB_PROFILES="$2"; shift 2 ;;
     --claude-token-env) CLAUDE_TOKEN_ENV="$2"; shift 2 ;;
     --gemini-key-env)   GEMINI_KEY_ENV="$2"; shift 2 ;;
@@ -639,7 +636,6 @@ render_content() {
   escaped_base_image="${escaped_base_image//&/\\&}"
 
   sed_args+=(-e "s|__PROJECT_NAME__|$PROJECT_NAME|g")
-  sed_args+=(-e "s|__GITHUB_TOKEN_ENV__|$GITHUB_TOKEN_ENV|g")
   sed_args+=(-e "s|__CLAUDE_TOKEN_ENV__|$CLAUDE_TOKEN_ENV|g")
   sed_args+=(-e "s|__GEMINI_KEY_ENV__|$GEMINI_KEY_ENV|g")
   sed_args+=(-e "s|__BASE_IMAGE__|$escaped_base_image|g")

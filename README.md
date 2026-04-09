@@ -19,10 +19,10 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.1.2`
+- `v0.1.5`
 
 ```bash
-TAG=v0.1.2
+TAG=v0.1.5
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/SHA256SUMS" -o SHA256SUMS
 sha256sum -c SHA256SUMS
@@ -40,7 +40,6 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard
 - `--output-dir <path>`（省略時: カレントディレクトリ直下に `<project-name>/` を作成して展開）
 - `--base-image <image>`（自動判定結果を上書きして明示指定）
 - `--github-profiles <csv>`（GitHub マルチアカウント用 profile 名。既定: `primary,secondary`）
-- `--github-token-env <name>`（legacy 互換。単一トークン運用向け）
 
 ## 言語サポート
 対応ランタイム（任意の組み合わせ）:
