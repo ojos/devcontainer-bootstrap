@@ -2,7 +2,7 @@
 # bootstrap.sh — devcontainer bootstrap one-shot generator (standalone)
 # 目的: 新規作業ディレクトリに1コマンドで devcontainer 雛形を生成する
 # 使用方法:
-#   curl -sSL https://github.com/YOUR_ORG/devcontainer-bootstrap/releases/latest/download/bootstrap.sh \
+#   curl -sSL https://github.com/ojos/devcontainer-bootstrap/releases/latest/download/bootstrap.sh \
 #     -o bootstrap.sh && bash bootstrap.sh --project-name myapp --languages node,go --mode standard
 set -euo pipefail
 
