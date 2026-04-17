@@ -191,6 +191,7 @@ get_template_content() {
       "version": "latest",
       "moby": false
     },
+    "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
@@ -373,6 +374,7 @@ set -euo pipefail
 echo "[check] minimal bootstrap checks"
 command -v bash >/dev/null 2>&1 && echo "[check] bash OK"
 command -v gh   >/dev/null 2>&1 && echo "[check] gh OK" || echo "[check] gh missing"
+command -v rg   >/dev/null 2>&1 && echo "[check] rg OK" || echo "[check] rg missing"
 TMPL
       ;;
     'standard:.devcontainer/devcontainer.json')
@@ -391,7 +393,10 @@ TMPL
       "installDockerComposeSwitch": true,
       "installDockerBuildx": true
     },
+    "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/aws-cli:1": {},
+    "ghcr.io/devcontainers/features/terraform:1": {},
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1"
@@ -432,7 +437,7 @@ TMPL
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[check] standard bootstrap checks"
-for cmd in bash jq gh node go docker; do
+for cmd in bash jq gh node go docker rg; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
 TMPL
@@ -453,11 +458,14 @@ TMPL
       "installDockerComposeSwitch": true,
       "installDockerBuildx": true
     },
+    "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
-    "ghcr.io/devcontainers/features/aws-cli:1": {}
+    "ghcr.io/devcontainers/features/aws-cli:1": {},
+    "ghcr.io/devcontainers/features/terraform:1": {},
+    "truepill-tyler-benfield/vscode-feature-gcloud/google-cloud-sdk": "latest"
   },
   "remoteEnv": {
 __GITHUB_PROFILE_ENV_BLOCK__
@@ -498,7 +506,7 @@ TMPL
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[check] full bootstrap checks"
-for cmd in bash jq gh node go docker claude gemini; do
+for cmd in bash jq gh node go docker rg claude gemini; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
 TMPL
