@@ -21,12 +21,12 @@ Public repository:
 - https://github.com/ojos/devcontainer-bootstrap
 
 Latest stable release:
-- `v0.1.8`
+- `v0.1.9`
 
 ## Quick Start
 
 ```bash
-TAG=v0.1.8
+TAG=v0.1.9
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}/SHA256SUMS" -o SHA256SUMS
 sha256sum -c SHA256SUMS

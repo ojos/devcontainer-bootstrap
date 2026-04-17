@@ -465,7 +465,9 @@ TMPL
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/devcontainers/features/terraform:1": {},
-    "truepill-tyler-benfield/vscode-feature-gcloud/google-cloud-sdk": "latest"
+    "ghcr.io/dhoeric/features/google-cloud-cli:1": {
+      "version": "latest"
+    }
   },
   "remoteEnv": {
 __GITHUB_PROFILE_ENV_BLOCK__
