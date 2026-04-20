@@ -411,8 +411,11 @@ __GITHUB_PROFILE_ENV_BLOCK__
   "customizations": {
     "vscode": {
       "extensions": [
+        "github.copilot",
+        "github.copilot-chat",
         "ms-azuretools.vscode-containers",
-        "amazonwebservices.aws-toolkit-vscode"
+        "amazonwebservices.aws-toolkit-vscode",
+        "hashicorp.terraform"
       ]
     }
   }
@@ -484,8 +487,12 @@ __GITHUB_PROFILE_ENV_BLOCK__
   "customizations": {
     "vscode": {
       "extensions": [
+        "github.copilot",
+        "github.copilot-chat",
         "ms-azuretools.vscode-containers",
-        "amazonwebservices.aws-toolkit-vscode"
+        "amazonwebservices.aws-toolkit-vscode",
+        "hashicorp.terraform",
+        "GoogleCloudTools.cloudcode"
       ]
     }
   }

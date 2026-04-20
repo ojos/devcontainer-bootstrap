@@ -93,6 +93,12 @@ bash scripts/github-account-switch.sh use ojos
 - `features.googleCloudSdk`（`full` モードのみ、外部 feature を利用）
 - `features.devTools`（既定値: true）
 
+## VS Code 拡張（Remote）
+- 生成される `standard` / `full` モードでは、リビルド後の再現性確保のため `github.copilot` と `github.copilot-chat` をインストールします。
+- Terraform feature が有効な場合（`standard` / `full`）は `hashicorp.terraform` をインストールします。
+- Google Cloud CLI feature が有効な場合（`full`）は `GoogleCloudTools.cloudcode` をインストールします。
+- `ms-azuretools.vscode-containers` と `amazonwebservices.aws-toolkit-vscode` は `standard` / `full` の既定拡張として維持されます。
+
 ## シークレット方針
 この方針は、トークンや API キーの平文漏えいを防ぎつつ、AIコーディング時の認証切替を安全に行うためのルールです。
 

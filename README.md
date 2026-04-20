@@ -104,6 +104,12 @@ bash scripts/github-account-switch.sh use ojos
 - `features.googleCloudSdk` (full mode only; external feature source)
 - `features.devTools` (default: true)
 
+## VS Code Extensions (Remote)
+- `github.copilot` and `github.copilot-chat` are installed in generated `standard` and `full` modes to keep remote chat usability reproducible after rebuild.
+- `hashicorp.terraform` is installed when Terraform feature is present (`standard` and `full`).
+- `GoogleCloudTools.cloudcode` is installed when Google Cloud CLI feature is present (`full` mode).
+- `ms-azuretools.vscode-containers` and `amazonwebservices.aws-toolkit-vscode` remain default extensions in `standard` and `full`.
+
 ---
 
 ## Secret Management
