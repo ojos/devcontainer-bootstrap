@@ -164,6 +164,7 @@ mode_rel_paths() {
       printf '%s\n' \
         '.devcontainer/devcontainer.json' \
         'scripts/github-account-switch.sh' \
+        'scripts/install-ai-tools.sh' \
         'scripts/on-attach.sh' \
         'scripts/post-rebuild-check.sh'
       ;;
@@ -407,6 +408,7 @@ __GITHUB_PROFILE_ENV_BLOCK__
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:__CLAUDE_TOKEN_ENV__}",
     "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
   },
+  "postCreateCommand": "bash scripts/install-ai-tools.sh",
   "postAttachCommand": "bash scripts/on-attach.sh",
   "customizations": {
     "vscode": {
@@ -433,6 +435,40 @@ fi
 echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
 command -v go   >/dev/null 2>&1 && echo "[on-attach] go OK"   || true
 command -v node >/dev/null 2>&1 && echo "[on-attach] node OK" || true
+TMPL
+      ;;
+    'standard:scripts/install-ai-tools.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# Install AI CLI tools (claude, gemini) if API credentials are available.
+set -euo pipefail
+
+CLAUDE_PKG="@anthropic-ai/claude-code"
+GEMINI_PKG="@google/gemini-cli"
+
+install_if_missing() {
+  local cmd="$1"
+  local pkg="$2"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    echo "[install-ai-tools] $cmd already installed, skipping"
+    return 0
+  fi
+  echo "[install-ai-tools] installing $pkg ..."
+  npm install -g "$pkg"
+  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
+}
+
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  install_if_missing claude "$CLAUDE_PKG"
+else
+  echo "[install-ai-tools] SKIP claude (CLAUDE_CODE_OAUTH_TOKEN not set)"
+fi
+
+if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+  install_if_missing gemini "$GEMINI_PKG"
+else
+  echo "[install-ai-tools] SKIP gemini (GEMINI_API_KEY not set)"
+fi
 TMPL
       ;;
     'standard:scripts/post-rebuild-check.sh')
@@ -482,7 +518,7 @@ __GITHUB_PROFILE_ENV_BLOCK__
     "source=claude-storage,target=/home/node/.claude,type=volume",
     "source=gemini-storage,target=/home/node/.gemini,type=volume"
   ],
-  "postCreateCommand": "bash scripts/post-rebuild-check.sh",
+  "postCreateCommand": "bash scripts/install-ai-tools.sh && bash scripts/post-rebuild-check.sh",
   "postAttachCommand": "bash scripts/on-attach.sh",
   "customizations": {
     "vscode": {
@@ -508,6 +544,40 @@ for cmd in gh claude gemini go node docker; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[on-attach] $cmd OK" || echo "[on-attach] WARN: $cmd missing"
 done
 echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
+TMPL
+      ;;
+    'full:scripts/install-ai-tools.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# Install AI CLI tools (claude, gemini) if API credentials are available.
+set -euo pipefail
+
+CLAUDE_PKG="@anthropic-ai/claude-code"
+GEMINI_PKG="@google/gemini-cli"
+
+install_if_missing() {
+  local cmd="$1"
+  local pkg="$2"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    echo "[install-ai-tools] $cmd already installed, skipping"
+    return 0
+  fi
+  echo "[install-ai-tools] installing $pkg ..."
+  npm install -g "$pkg"
+  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
+}
+
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  install_if_missing claude "$CLAUDE_PKG"
+else
+  echo "[install-ai-tools] SKIP claude (CLAUDE_CODE_OAUTH_TOKEN not set)"
+fi
+
+if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+  install_if_missing gemini "$GEMINI_PKG"
+else
+  echo "[install-ai-tools] SKIP gemini (GEMINI_API_KEY not set)"
+fi
 TMPL
       ;;
     'full:scripts/post-rebuild-check.sh')
