@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# bootstrap.sh — devcontainer bootstrap one-shot generator (standalone)
+# bootstrap.sh — devcontainer 雛形のワンショット生成スクリプト（単体動作）
 # 目的: 新規作業ディレクトリに1コマンドで devcontainer 雛形を生成する
 # 使用方法:
 #   curl -sSL https://github.com/ojos/devcontainer-bootstrap/releases/latest/download/bootstrap.sh \
 #     -o bootstrap.sh && bash bootstrap.sh --project-name myapp --languages node,go --mode standard
 set -euo pipefail
 
-# Resolved for locating a sibling ai-playbook checkout. When this script is fetched
-# standalone (curl), no sibling exists and --playbook-from is required.
+# 同階層の ai-playbook チェックアウトを探すために解決する。curl で単体取得された
+# 場合は同階層が存在しないため、--playbook-from の指定が必須になる。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROJECT_NAME=""
@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Validation ───────────────────────────────────────────────────────────────
+# ── 検証 ───────────────────────────────────────────────────────────────
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "error: required command not found: $1" >&2; exit 1; }
@@ -103,6 +103,13 @@ require_cmd sed
 require_cmd curl
 
 [[ -n "$PROJECT_NAME" ]] || { echo "error: --project-name is required" >&2; usage; exit 1; }
+# プロジェクト名は compose のマウントパス・workspaceFolder・sed 置換に流れるため、
+# それらを壊す文字を拒否する（| & は sed、: は compose の volume 記法、/ \ はパス、
+# " は生成 JSON の文字列リテラル）。
+if [[ "$PROJECT_NAME" == *['|&:/\"']* ]]; then
+  echo "error: --project-name must not contain any of: | & : / \\ \"" >&2
+  exit 1
+fi
 [[ ${#LANGUAGES[@]} -gt 0 ]] || { echo "error: --languages is required" >&2; usage; exit 1; }
 
 for i in "${!LANGUAGES[@]}"; do
@@ -124,7 +131,7 @@ case "$PLAYBOOK_CONFLICT_POLICY" in
 esac
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$PWD/$PROJECT_NAME"
 
-# Select base image based on Docker server platform (with safe fallback)
+# Docker サーバーのプラットフォームに基づいてベースイメージを選択する（安全なフォールバック付き）
 detect_server_platform() {
   local platform
   if command -v docker >/dev/null 2>&1; then
@@ -134,7 +141,7 @@ detect_server_platform() {
       return 0
     fi
   fi
-  # Fallback for environments without docker access during bootstrap.
+  # ブートストラップ中に docker へアクセスできない環境向けのフォールバック。
   printf '%s\n' "linux/amd64"
 }
 
@@ -185,12 +192,13 @@ select_base_image() {
 
 select_base_image
 
-# ── Embedded templates (bash 3 compatible) ─────────────────────────────────
+# ── 組み込みテンプレート（bash 3 互換） ─────────────────────────────────
 
 mode_rel_paths() {
   case "$1" in
     minimal|standard|full)
       printf '%s\n' \
+        '.devcontainer/compose.yaml' \
         '.devcontainer/devcontainer.json' \
         'scripts/github-account-switch.sh' \
         'scripts/install-ai-tools.sh' \
@@ -208,11 +216,46 @@ get_template_content() {
   local mode="$1"
   local rel="$2"
   case "$mode:$rel" in
+    'minimal:.devcontainer/compose.yaml'|'standard:.devcontainer/compose.yaml')
+      cat <<'TMPL'
+services:
+  app:
+    image: __BASE_IMAGE__
+    volumes:
+      - ..:/workspaces/__PROJECT_NAME__:cached
+      # docker-outside-of-docker feature 用（compose 利用時は feature 側の mounts が適用されないため明示）
+      - /var/run/docker.sock:/var/run/docker-host.sock
+    command: sleep infinity
+TMPL
+      ;;
+    'full:.devcontainer/compose.yaml')
+      cat <<'TMPL'
+services:
+  app:
+    image: __BASE_IMAGE__
+    volumes:
+      - ..:/workspaces/__PROJECT_NAME__:cached
+      # docker-outside-of-docker feature 用（compose 利用時は feature 側の mounts が適用されないため明示）
+      - /var/run/docker.sock:/var/run/docker-host.sock
+      # AI CLI の認証・履歴を rebuild 間で保持する（compose 利用時 devcontainer.json の mounts は適用されない）
+      # ベースイメージ（devcontainers/base）の remoteUser は vscode
+      - claude-storage:/home/vscode/.claude
+      - gemini-storage:/home/vscode/.gemini
+    command: sleep infinity
+
+volumes:
+  claude-storage:
+  gemini-storage:
+TMPL
+      ;;
     'minimal:.devcontainer/devcontainer.json')
       cat <<'TMPL'
 {
   "name": "__PROJECT_NAME__ (minimal)",
-  "image": "__BASE_IMAGE__",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/__PROJECT_NAME__",
+  "shutdownAction": "stopCompose",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:1": {
       "configureZsh": true
@@ -413,7 +456,7 @@ TMPL
     'minimal:scripts/install-ai-tools.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
-# Install AI CLI tools (claude, gemini) if API credentials are available.
+# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
 set -euo pipefail
 
 CLAUDE_PKG="@anthropic-ai/claude-code"
@@ -470,7 +513,10 @@ TMPL
       cat <<'TMPL'
 {
   "name": "__PROJECT_NAME__ (standard)",
-  "image": "__BASE_IMAGE__",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/__PROJECT_NAME__",
+  "shutdownAction": "stopCompose",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:1": {
       "configureZsh": true
@@ -529,7 +575,7 @@ TMPL
     'standard:scripts/install-ai-tools.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
-# Install AI CLI tools (claude, gemini) if API credentials are available.
+# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
 set -euo pipefail
 
 CLAUDE_PKG="@anthropic-ai/claude-code"
@@ -575,7 +621,10 @@ TMPL
       cat <<'TMPL'
 {
   "name": "__PROJECT_NAME__ (full)",
-  "image": "__BASE_IMAGE__",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/__PROJECT_NAME__",
+  "shutdownAction": "stopCompose",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:1": {
       "configureZsh": true
@@ -605,10 +654,6 @@ __GITHUB_PROFILE_ENV_BLOCK__
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:__CLAUDE_TOKEN_ENV__}",
     "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
   },
-  "mounts": [
-    "source=claude-storage,target=/home/node/.claude,type=volume",
-    "source=gemini-storage,target=/home/node/.gemini,type=volume"
-  ],
   "postCreateCommand": "bash scripts/install-ai-tools.sh && bash scripts/post-rebuild-check.sh",
   "postAttachCommand": "bash scripts/on-attach.sh",
   "customizations": {
@@ -640,7 +685,7 @@ TMPL
     'full:scripts/install-ai-tools.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
-# Install AI CLI tools (claude, gemini) if API credentials are available.
+# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
 set -euo pipefail
 
 CLAUDE_PKG="@anthropic-ai/claude-code"
@@ -689,7 +734,7 @@ TMPL
   esac
 }
 
-# ── Rendering ─────────────────────────────────────────────────────────────────
+# ── 出力生成 ─────────────────────────────────────────────────────────────────
 
 has_language() {
   local target="$1" l
@@ -873,20 +918,20 @@ upsert_gitignore() {
     printf '%s\n' "$GITIGNORE_END"
   } >> "$tmp"
 
-  # mktemp creates 0600 and mv preserves it, which would clobber the mode of an existing
-  # .gitignore. Restore what was there; use 644 only for a file we created.
+  # mktemp は 0600 で作成し mv がそれを維持するため、既存 .gitignore のモードを
+  # 潰してしまう。元のモードを復元し、644 は新規作成したファイルにのみ使う。
   mv "$tmp" "$gitignore_path"
   chmod "${prev_mode:-644}" "$gitignore_path"
   echo "write: $gitignore_path (managed section)"
 }
 
-# ── Shared AI rules (ai-playbook) distribution ───────────────────────────────────
-# This script distributes the rules; the separate ai-playbook repository owns them.
+# ── 共通 AI ルール（ai-playbook）の配布 ───────────────────────────────────
+# このスクリプトはルールの配布のみを担う。内容の正本は別リポジトリ ai-playbook が持つ。
 
-# Octal permission bits of a file, or empty when they cannot be determined.
-# GNU coreutils uses -c; BSD/macOS uses -f. GNU also accepts -f, but as
-# --file-system, which prints unrelated text — so each result is validated to be
-# octal digits before it is accepted.
+# ファイルの 8 進パーミッションを返す。判定できない場合は空を返す。
+# GNU coreutils は -c、BSD/macOS は -f を使う。GNU は -f も受け付けるが
+# --file-system の意味になり無関係な出力を返すため、結果が 8 進数字で
+# あることを検証してから採用する。
 file_mode_octal() {
   local mode
   for mode in \
@@ -933,10 +978,10 @@ resolve_playbook_root() {
   fi
 }
 
-# Resolve the playbook directory, from a path, URL, or sibling checkout.
-# $2 is a caller-owned scratch dir, used only for the URL case. It must be created and
-# cleaned up by the caller: this function runs inside a command substitution, so a trap
-# registered here would fire in that subshell and delete the extracted files immediately.
+# playbook ディレクトリを、パス・URL・同階層チェックアウトのいずれかから解決する。
+# $2 は呼び出し側が所有する作業ディレクトリで、URL の場合にのみ使う。作成と後始末は
+# 呼び出し側の責務とする: この関数はコマンド置換の中で実行されるため、ここで trap を
+# 登録するとそのサブシェルで発火し、展開したファイルを即座に削除してしまう。
 detect_playbook_dir() {
   local source_hint="$1"
   local tmp_root="${2:-}"
@@ -994,13 +1039,13 @@ apply_file_with_policy() {
 
   if [[ ! -f "$dest" ]]; then
     cp "$src" "$dest"
-    # Sources come from mktemp (0600); a file we create should be readable like the rest.
+    # 取得元は mktemp 由来（0600）。新規作成するファイルは他と同様に読めるようにする。
     chmod 644 "$dest"
     echo "write: $dest"
     return 0
   fi
 
-  # Overwriting an existing file must not change its mode.
+  # 既存ファイルを上書きする場合は、そのモードを変えてはならない。
   prev_mode="$(file_mode_octal "$dest")"
   prev_mode="${prev_mode:-644}"
 
@@ -1040,9 +1085,9 @@ require_playbook_template() {
   printf '%s' "$path"
 }
 
-# Resolve once, before any file is written, so a bad source fails without side effects.
-# Called from the main shell (never inside a command substitution) so that the cleanup
-# trap belongs to the process that still needs the extracted files.
+# どのファイルも書き込む前に一度だけ解決し、不正なソースは副作用なしで失敗させる。
+# コマンド置換の中ではなく必ずメインシェルから呼ぶことで、後始末の trap が
+# 展開ファイルをまだ必要とするプロセス自身に属するようにする。
 resolve_playbook_source_or_die() {
   if [[ "$PLAYBOOK_FROM" =~ ^https?:// ]]; then
     PLAYBOOK_TMP_ROOT="$(mktemp -d)"
@@ -1056,8 +1101,8 @@ resolve_playbook_source_or_die() {
   fi
 }
 
-# Second-opinion reviewer for the cross-model gate. The norm lives in the rules
-# package (review-workflow.md); this is the executable side of it.
+# クロスモデル二段ゲートの第二意見レビュアー。規範はルールパッケージ側
+# （review-workflow.md）にあり、これはその実行側にあたる。
 install_playbook_rules() {
   local common_dir="$PLAYBOOK_DIR" rel dest tmp count=0
 
@@ -1074,8 +1119,8 @@ install_playbook_rules() {
     count=$((count + 1))
   done < <(find "$common_dir" -type f -name '*.md' | sort)
 
-  # Placing zero rules while reporting success would leave entry files pointing at
-  # files that do not exist. Treat it as a failure rather than a quiet no-op.
+  # ルールを 1 件も配置していないのに成功を報告すると、入口ファイルが存在しない
+  # ファイルを指したままになる。静かな no-op ではなく失敗として扱う。
   if [[ "$count" -eq 0 ]]; then
     echo "error: no rule files found under $common_dir" >&2
     exit 1
@@ -1116,23 +1161,23 @@ write_file() {
   else
     mv "$tmp" "$out"
   fi
-  # mktemp creates 0600 and mv preserves it; normalize so generated files are readable.
+  # mktemp は 0600 で作成し mv がそれを維持するため、生成ファイルが読めるよう正規化する。
   chmod 644 "$out"
   [[ "$out" == *.sh ]] && chmod +x "$out"
   echo "write: $out"
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── メイン処理 ──────────────────────────────────────────────────────────────────────
 
 echo "[bootstrap] mode=$MODE languages=${LANGUAGES[*]}"
 echo "[bootstrap] output=$OUTPUT_DIR"
 
-# Fail before writing anything if the rules source was requested but is unusable.
+# ルールソースが指定されたのに使用不能な場合は、何かを書き込む前に失敗させる。
 if should_install_playbook; then
   resolve_playbook_source_or_die
 fi
 
-# Collect and sort relative paths for the selected mode (bash 3 compatible)
+# 選択したモードの相対パスを収集してソートする（bash 3 互換）
 sorted_rels="$(mode_rel_paths "$MODE" | sort)"
 
 if [[ "$DRY_RUN" == "true" ]]; then

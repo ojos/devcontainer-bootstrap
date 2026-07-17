@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.1.0`
+- `v0.2.0`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.1.0
+TAG=v0.2.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -209,7 +209,8 @@ bash scripts/github-account-switch.sh use <profile>
 4. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
 
 ## 期待される出力
-- `.devcontainer/devcontainer.json`（言語別 feature を反映）
+- `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `compose.yaml` の `app` サービスを参照）
+- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket や AI CLI 用ボリューム（full のみ）を compose 側で明示）
 - `scripts/github-account-switch.sh`
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`
