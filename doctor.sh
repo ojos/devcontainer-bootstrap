@@ -60,6 +60,9 @@ section "Static structure"
 require_file ".devcontainer/devcontainer.json"
 require_file "scripts/on-attach.sh"
 require_file "scripts/post-rebuild-check.sh"
+require_file "scripts/verify.sh"
+require_file "scripts/acceptance.sh"
+require_file "scripts/loop-gate.sh"
 
 if [[ -f "$TARGET_DIR/.devcontainer/devcontainer.json" ]]; then
   if jq . "$TARGET_DIR/.devcontainer/devcontainer.json" >/dev/null 2>&1; then
@@ -114,6 +117,18 @@ if [[ -f "$TARGET_DIR/scripts/post-rebuild-check.sh" ]]; then
   fi
   require_exec "scripts/post-rebuild-check.sh"
 fi
+
+# ループコーディングの機構（受け入れゲート）。単体で動作する前提で検査する。
+for loop_script in verify.sh acceptance.sh loop-gate.sh; do
+  if [[ -f "$TARGET_DIR/scripts/$loop_script" ]]; then
+    if bash -n "$TARGET_DIR/scripts/$loop_script"; then
+      ok "$loop_script syntax OK"
+    else
+      ng "$loop_script syntax NG"
+    fi
+    require_exec "scripts/$loop_script"
+  fi
+done
 
 section "Runtime command availability"
 for cmd in bash jq perl gh; do

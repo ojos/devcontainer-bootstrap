@@ -200,10 +200,13 @@ mode_rel_paths() {
       printf '%s\n' \
         '.devcontainer/compose.yaml' \
         '.devcontainer/devcontainer.json' \
+        'scripts/acceptance.sh' \
         'scripts/github-account-switch.sh' \
         'scripts/install-ai-tools.sh' \
+        'scripts/loop-gate.sh' \
         'scripts/on-attach.sh' \
-        'scripts/post-rebuild-check.sh'
+        'scripts/post-rebuild-check.sh' \
+        'scripts/verify.sh'
       ;;
     *)
       echo "error: unsupported mode in mode_rel_paths: $1" >&2
@@ -735,6 +738,129 @@ done
 __RUNTIME_CHECK_LINES__
 TMPL
       ;;
+    'minimal:scripts/verify.sh'|'standard:scripts/verify.sh'|'full:scripts/verify.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# verify.sh — ループコーディングの接地信号（受け入れ条件の機械ゲート）
+#
+# プロジェクトが宣言した受け入れ条件（acceptance）を非対話で実行し、
+# 一意な通過信号を返す。AI エージェントの反復（実装 → 検証 → 修正 → …）が
+# 「緑」を判定するための、迂回できない決定的な信号を供給する。
+#
+# このスクリプトは単体で動作し、外部パッケージの導入を前提にしない。
+#
+# 使い方:
+#   bash scripts/verify.sh
+#
+# 受け入れ条件の定義:
+#   既定で scripts/acceptance.sh を実行する。VERIFY_ACCEPTANCE で差し替え可能。
+#
+# 終了コード:
+#   0 = VERIFY_PASS（受け入れ条件を満たす）
+#   1 = VERIFY_FAIL（未達、または受け入れ条件が未定義）
+set -euo pipefail
+
+# 受け入れ検証とテストコマンド（package.json / go.mod / Cargo.toml 等の検出）は
+# プロジェクトルート基準で実行する。scripts/ は生成先プロジェクト直下にあるため、
+# スクリプト位置の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+ACCEPTANCE="${VERIFY_ACCEPTANCE:-scripts/acceptance.sh}"
+
+if [[ ! -f "$ACCEPTANCE" ]]; then
+  echo "[verify] acceptance not found: $ACCEPTANCE" >&2
+  echo "[verify] 受け入れ条件が未定義です。実行可能な検証を用意してください。" >&2
+  echo "VERIFY_FAIL"
+  exit 1
+fi
+
+echo "[verify] running acceptance: $ACCEPTANCE"
+if bash "$ACCEPTANCE"; then
+  echo "VERIFY_PASS"
+  exit 0
+fi
+
+echo "[verify] acceptance not satisfied" >&2
+echo "VERIFY_FAIL"
+exit 1
+TMPL
+      ;;
+    'minimal:scripts/acceptance.sh'|'standard:scripts/acceptance.sh'|'full:scripts/acceptance.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# acceptance.sh — このプロジェクトの受け入れ条件（プロジェクトが所有・編集する）
+#
+# verify.sh がこのスクリプトを実行し、終了コードで合否を判定する。
+# 生成時に、選択言語の慣習的なテストコマンドを既定として配置している。
+# プロジェクトの実態（テスト・ビルド・lint・E2E など）に合わせて自由に編集すること。
+# 受け入れ条件が検証可能であるほど、ループコーディングの反復が収束しやすくなる。
+#
+# 終了コード: 0 = 合格 / 非0 = 不合格
+set -euo pipefail
+
+echo "[acceptance] project acceptance checks"
+__ACCEPTANCE_CHECK_LINES__
+TMPL
+      ;;
+    'minimal:scripts/loop-gate.sh'|'standard:scripts/loop-gate.sh'|'full:scripts/loop-gate.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# loop-gate.sh — ローカル事前ゲート（ループコーディングの収束点）
+#
+# push / PR 作成の前に、機械判定の受け入れ検証（verify.sh）と、任意の第二意見
+# レビューを直列で通す単一入口。verify が通り、第二意見があればそれも通ったときだけ
+# 通過する。
+#
+# このスクリプトは単体で動作する。第二意見レビューは存在すれば直列化し、
+# 無ければ優雅にスキップする（外部パッケージの導入を前提にしない）。
+#
+# 第二意見レビュー:
+#   既定で scripts/gemini-review.sh があれば実行する。
+#   LOOP_GATE_REVIEW_CMD で任意のコマンドへ差し替え可能。空文字でスキップする。
+#
+# 終了コード:
+#   0 = GATE_PASS（全段通過。push 可）
+#   1 = GATE_FAIL（いずれかの段が未通過、または実行不能）
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# verify・第二意見（git diff 等）はプロジェクトルート基準で実行する。
+# scripts/ の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
+cd "$(dirname "$HERE")"
+
+echo "[loop-gate] step 1: verify (acceptance)"
+if ! bash "$HERE/verify.sh"; then
+  echo "[loop-gate] verify not passed" >&2
+  echo "GATE_FAIL"
+  exit 1
+fi
+
+echo "[loop-gate] step 2: second opinion"
+if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
+  if [[ -f "$HERE/gemini-review.sh" ]]; then
+    if ! bash "$HERE/gemini-review.sh"; then
+      echo "[loop-gate] second opinion reported findings" >&2
+      echo "GATE_FAIL"
+      exit 1
+    fi
+  else
+    echo "[loop-gate] SKIP (no reviewer present)"
+  fi
+elif [[ -n "$LOOP_GATE_REVIEW_CMD" ]]; then
+  if ! bash -c "$LOOP_GATE_REVIEW_CMD"; then
+    echo "[loop-gate] second opinion reported findings" >&2
+    echo "GATE_FAIL"
+    exit 1
+  fi
+else
+  echo "[loop-gate] SKIP (disabled by LOOP_GATE_REVIEW_CMD='')"
+fi
+
+echo "GATE_PASS"
+exit 0
+TMPL
+      ;;
     *)
       echo "error: unknown template key: $mode:$rel" >&2
       exit 1
@@ -872,6 +998,20 @@ runtime_check_cmd() {
   esac
 }
 
+# 言語ごとの慣習的な受け入れ検証（acceptance）の既定コマンドを返す。
+# これは生成時の初期値であり、プロジェクトが acceptance.sh を編集して差し替える前提。
+# bash 3.2 互換のため連想配列を使わず case で分岐する。
+acceptance_check_cmd() {
+  case "$1" in
+    node)   printf 'npm test' ;;
+    go)     printf 'go test ./...' ;;
+    python) printf 'python -m pytest' ;;
+    php)    printf 'composer test' ;;
+    rust)   printf 'cargo test' ;;
+    *)      printf '%s' "$1" ;;
+  esac
+}
+
 # 言語に対応する VS Code の language server 拡張 ID を返す。
 # 拡張を持たない言語（node は JS/TS が組み込み、php は有料ティアのある
 # サードパーティを避ける）は空文字を返す。
@@ -891,6 +1031,19 @@ build_runtime_check_block() {
   for lang in "${LANGUAGES[@]}"; do
     cmd="$(runtime_check_cmd "$lang")"
     out+="command -v $cmd >/dev/null 2>&1 && echo \"[check] $cmd OK\" || echo \"[check] $cmd missing\""$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# 選択言語ごとの acceptance.sh 既定検証行を生成する。
+# 検査コマンドは acceptance_check_cmd に一元化する。プロジェクトが編集する起点であり、
+# 生成時点で緑になることは保証しない（受け入れ条件はプロジェクト固有のため）。
+build_acceptance_check_block() {
+  local lang cmd out=""
+  for lang in "${LANGUAGES[@]}"; do
+    cmd="$(acceptance_check_cmd "$lang")"
+    out+="echo \"[acceptance] ($lang) $cmd\""$'\n'
+    out+="$cmd"$'\n'
   done
   printf '%s' "$out"
 }
@@ -925,6 +1078,12 @@ render_content() {
   runtime_check_block="$(build_runtime_check_block)"
   content="$(RCB="$runtime_check_block" awk '
     $0 == "__RUNTIME_CHECK_LINES__" { printf "%s", ENVIRON["RCB"]; next }
+    { print }
+  ' <<<"$content")"
+  local acceptance_check_block
+  acceptance_check_block="$(build_acceptance_check_block)"
+  content="$(ACB="$acceptance_check_block" awk '
+    $0 == "__ACCEPTANCE_CHECK_LINES__" { printf "%s", ENVIRON["ACB"]; next }
     { print }
   ' <<<"$content")"
   language_ext_block="$(build_language_extensions_block)"

@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.3.0`
+- `v0.3.1`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.3.0
+TAG=v0.3.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -50,7 +50,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 
 ```bash
 bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
-  --with-playbook --playbook-from https://github.com/ojos/ai-playbook/archive/refs/tags/v0.1.0.tar.gz
+  --with-playbook --playbook-from https://github.com/ojos/ai-playbook/archive/refs/tags/v0.1.1.tar.gz
 ```
 
 ## 入力仕様
@@ -97,6 +97,31 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
 | `full` | あり | `bash scripts/install-ai-tools.sh && bash scripts/post-rebuild-check.sh` を実行 |
 
 `install-ai-tools.sh` は対応する認証情報が設定されている場合のみ `claude` / `gemini` を導入します（`CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`）。
+
+## ループコーディング支援
+
+AI エージェントの反復（実装 → 検証 → 修正 → …）を、**機械が緑判定できる決定的な信号**の上で収束させるための実行体を生成します。全モードで生成し、**外部パッケージの導入を前提にせず単体で動作**します。
+
+> この節は DCB 環境での**操作手順**（各スクリプトをどう回すか）を扱います。ループコーディングという**ワークフロー自体の考え方**（従来との違い・収束規律・受け入れ検証の機械ゲート化）は、規範パッケージ ai-playbook の解説ガイド `loop-coding-guide.md`（規範の正本は `loop-workflow.md`）を参照してください。`--with-playbook` を指定すると、これらの規範も生成先へ配置されます。
+
+| スクリプト | 役割 |
+|---|---|
+| `scripts/acceptance.sh` | このプロジェクトの受け入れ条件（プロジェクトが所有・編集）。選択言語の慣習的テストコマンドを既定として配置する |
+| `scripts/verify.sh` | `acceptance.sh` を非対話実行し、一意な通過信号（`VERIFY_PASS` / 終了コード 0）を返す接地信号 |
+| `scripts/loop-gate.sh` | push / PR 前のローカル事前ゲート。`verify.sh` と、任意の第二意見レビューを直列で通す単一入口（`GATE_PASS` / 終了コード 0） |
+
+- `acceptance.sh` は生成時に選択言語の既定コマンド（`node`→`npm test`、`go`→`go test ./...`、`python`→`python -m pytest`、`php`→`composer test`、`rust`→`cargo test`）を置きます。プロジェクトの実態に合わせて編集してください。受け入れ条件が検証可能であるほど、反復が収束しやすくなります。
+- `verify.sh` の受け入れ定義は `VERIFY_ACCEPTANCE` 環境変数で差し替えできます。
+- `loop-gate.sh` の第二意見は、`scripts/gemini-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
+- これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。`--with-playbook` 併用時は、第二意見の `gemini-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
+
+```bash
+# 反復のたびに接地信号を確認する
+bash scripts/verify.sh
+
+# push / PR 前のローカル事前ゲート（受け入れ検証 + 任意の第二意見）
+bash scripts/loop-gate.sh
+```
 
 ## 言語サポート
 対応ランタイム（任意の組み合わせ）:
@@ -232,6 +257,7 @@ bash scripts/github-account-switch.sh use <profile>
 - `scripts/github-account-switch.sh`
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`
+- `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
 - `.gitignore` の managed セクション（言語構成に応じて自動更新）
 - README のセットアップ節更新
 
