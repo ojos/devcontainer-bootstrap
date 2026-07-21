@@ -32,33 +32,50 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.3.1`
+- `v0.4.0`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.3.1
+TAG=v0.4.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
 curl -sSL "${BASE}/SHA256SUMS" -o SHA256SUMS
 sha256sum -c SHA256SUMS
-bash bootstrap.sh --project-name myapp --languages node,go --mode standard
+bash bootstrap.sh --project-name myapp --languages node,go --with-aws --with-claude
 ```
 
 AI 共通ルールも配置する場合は、ルールの取得元を指定します。
 
 ```bash
-bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
+bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
   --with-playbook --playbook-from https://github.com/ojos/ai-playbook/archive/refs/tags/v0.1.1.tar.gz
 ```
+
+> **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
+> `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
 
 ## 入力仕様
 
 ### 必須入力
 - `--project-name <name>`（文字列。必須）
 - `--languages <csv>`（CSV 形式。`node`、`go`、`python`、`php`、`rust` を任意に組み合わせ。必須）
-- `--mode <minimal|standard|full>`（テンプレート選択。既定: `standard`）
+
+### 装備オプション（`--with-*`）
+
+装備は `--mode` ではなく `--with-*` フラグで明示選択します（オプトイン）。未指定なら素の環境（docker + 選択言語のみ）を生成します。docker のリッチさ（buildx / compose-switch）は全生成物で標準装備です。
+
+| フラグ | 導入する装備 |
+|---|---|
+| `--with-aws` | AWS CLI feature + `amazonwebservices.aws-toolkit-vscode` 拡張 + Terraform（下記） |
+| `--with-gcp` | Google Cloud CLI feature（外部 `dhoeric`）+ `GoogleCloudTools.cloudcode` 拡張 + Terraform（下記） |
+| `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 |
+| `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
+| `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
+
+- **Terraform は cloud 随伴**: `--with-aws` または `--with-gcp` のいずれかを指定すると、Terraform feature + `hashicorp.terraform` 拡張が **1 回だけ** 同梱されます（両指定でも 1 回、cloud 無指定なら入りません）。
+- **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。認証トークンは従来どおり `remoteEnv` で受け渡します。
 
 ### オプション入力
 - `--output-dir <path>`（省略時: カレントディレクトリ直下に `<project-name>/` を作成して展開）
@@ -88,19 +105,15 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
 `curl` で `bootstrap.sh` を単体取得して実行する場合は隣接チェックアウトが存在しないため、`--playbook-from` の指定が必要です。
 取得元が解決できない場合は、**ファイルを 1 つも書き込まずに終了します**。
 
-### モード別 AI CLI 導入挙動
+### AI CLI 導入挙動
 
-| モード | `scripts/install-ai-tools.sh` 生成 | `postCreateCommand` の挙動 |
-|---|---|---|
-| `minimal` | あり | `bash scripts/install-ai-tools.sh` を実行 |
-| `standard` | あり | `bash scripts/install-ai-tools.sh` を実行 |
-| `full` | あり | `bash scripts/install-ai-tools.sh && bash scripts/post-rebuild-check.sh` を実行 |
+`scripts/install-ai-tools.sh` は常に生成され、`postCreateCommand`（`bash scripts/install-ai-tools.sh`）で実行されます。
 
-`install-ai-tools.sh` は対応する認証情報が設定されている場合のみ `claude` / `gemini` を導入します（`CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`）。
+導入するのは `--with-claude` / `--with-gemini` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
 
 ## ループコーディング支援
 
-AI エージェントの反復（実装 → 検証 → 修正 → …）を、**機械が緑判定できる決定的な信号**の上で収束させるための実行体を生成します。全モードで生成し、**外部パッケージの導入を前提にせず単体で動作**します。
+AI エージェントの反復（実装 → 検証 → 修正 → …）を、**機械が緑判定できる決定的な信号**の上で収束させるための実行体を生成します。装備の選択によらず常に生成し、**外部パッケージの導入を前提にせず単体で動作**します。
 
 > この節は DCB 環境での**操作手順**（各スクリプトをどう回すか）を扱います。ループコーディングという**ワークフロー自体の考え方**（従来との違い・収束規律・受け入れ検証の機械ゲート化）は、規範パッケージ ai-playbook の解説ガイド `loop-coding-guide.md`（規範の正本は `loop-workflow.md`）を参照してください。`--with-playbook` を指定すると、これらの規範も生成先へ配置されます。
 
@@ -147,42 +160,42 @@ bash scripts/loop-gate.sh
 
 ### 使用例:
 ```bash
-# 単一言語（カレントディレクトリ直下に myapp/ を作成して展開）
-./bootstrap.sh --project-name myapp --languages node --mode minimal
+# 素の環境（cloud も AI ツールも無し。docker + node のみ）
+./bootstrap.sh --project-name myapp --languages node
 
 # 複数言語
-./bootstrap.sh --project-name myapp --languages node,go,python,php,rust --mode standard
+./bootstrap.sh --project-name myapp --languages node,go,python,php,rust
 
-# Rust 単体
-./bootstrap.sh --project-name myapp --languages rust --mode standard
+# GCP だけ（Terraform 同梱）＋ Claude
+./bootstrap.sh --project-name myapp --languages go --with-gcp --with-claude
+
+# AWS + GCP（Terraform は 1 回）＋ Copilot
+./bootstrap.sh --project-name myapp --languages node,go --with-aws --with-gcp --with-copilot
 
 # バックエンドのみ（フロントエンドなし）
-./bootstrap.sh --project-name backend-api --languages go,python,php --mode minimal
+./bootstrap.sh --project-name backend-api --languages go,python,php
 
 # 出力先を明示指定したい場合
-./bootstrap.sh --project-name myapp --languages node --mode standard --output-dir /path/to/existing-workspace
+./bootstrap.sh --project-name myapp --languages node --output-dir /path/to/existing-workspace
 
 # .gitignore の managed セクション更新を無効化したい場合
-./bootstrap.sh --project-name myapp --languages node --mode minimal --no-gitignore
-
-# 暗黙ターゲット（macOS + 言語対応テンプレート）のみ使う場合
-./bootstrap.sh --project-name myapp --languages node,python,php --mode standard
+./bootstrap.sh --project-name myapp --languages node --no-gitignore
 
 # 追加テンプレートを明示指定したい場合（暗黙ターゲットに追加で合成）
-./bootstrap.sh --project-name myapp --languages node --mode standard --gitignore-targets macOS,Node,VisualStudioCode
+./bootstrap.sh --project-name myapp --languages node --gitignore-targets macOS,Node,VisualStudioCode
 
 # GitHub マルチアカウント profile を指定する場合
-./bootstrap.sh --project-name myapp --languages node --mode full --github-profiles work,personal
+./bootstrap.sh --project-name myapp --languages node --github-profiles work,personal
 
 # AI 共通ルールも一緒に配置する場合（隣接する ai-playbook チェックアウトから取得）
-./bootstrap.sh --project-name myapp --languages node --mode standard --with-playbook
+./bootstrap.sh --project-name myapp --languages node --with-playbook
 
 # ルールの取得元を明示する場合（単体取得して実行する場合はこちらが必要）
-./bootstrap.sh --project-name myapp --languages node --mode standard \
+./bootstrap.sh --project-name myapp --languages node \
   --with-playbook --playbook-from https://github.com/<owner>/ai-playbook/archive/refs/tags/<tag>.tar.gz
 
 # 既存プロジェクトへルールを追加し、既存ファイルは上書きしたい場合
-./bootstrap.sh --project-name myapp --languages node --mode standard \
+./bootstrap.sh --project-name myapp --languages node \
   --output-dir /path/to/existing-workspace --with-playbook --playbook-conflict-policy overwrite
 ```
 
@@ -194,23 +207,21 @@ bash scripts/github-account-switch.sh use <profile>
 ```
 
 ## Feature フラグ
-- `features.docker`（既定値: true）
-- `features.ripgrep`（既定値: true）
-- `features.githubCli`（既定値: true）
-- `features.node`（`languages` に `node` を含む場合）
-- `features.go`（`languages` に `go` を含む場合）
-- `features.python`（`languages` に `python` を含む場合）
-- `features.php`（`languages` に `php` を含む場合）
-- `features.awsCli`（`standard` または `full` モードの場合）
-- `features.terraform`（`standard` または `full` モードの場合）
-- `features.googleCloudSdk`（`full` モードのみ、外部 feature を利用）
-- `features.devTools`（既定値: true）
+
+常に導入する feature（既定）:
+- `common-utils` / `docker-outside-of-docker`（buildx + compose-switch を標準装備）/ `ripgrep` / `github-cli`
+
+条件付き feature:
+- `node` / `go` / `python` / `php` / `rust`（`--languages` に含む場合）
+- `aws-cli`（`--with-aws` の場合）
+- `google-cloud-cli`（`--with-gcp` の場合、外部 `dhoeric` feature を利用）
+- `terraform`（`--with-aws` または `--with-gcp` の場合、1 回）
 
 ## VS Code 拡張（Remote）
-- 生成される `standard` / `full` モードでは、リビルド後の再現性確保のため `github.copilot` と `github.copilot-chat` をインストールします。
-- Terraform feature が有効な場合（`standard` / `full`）は `hashicorp.terraform` をインストールします。
-- Google Cloud CLI feature が有効な場合（`full`）は `GoogleCloudTools.cloudcode` をインストールします。
-- `ms-azuretools.vscode-containers` と `amazonwebservices.aws-toolkit-vscode` は `standard` / `full` の既定拡張として維持されます。
+- `ms-azuretools.vscode-containers` は常に配線します。
+- 言語 language server 拡張は選択言語に応じて配線します（上記「言語サポート」参照）。
+- `--with-aws`: `amazonwebservices.aws-toolkit-vscode`。`--with-gcp`: `GoogleCloudTools.cloudcode`。いずれかの cloud 指定で `hashicorp.terraform`。
+- `--with-claude`: `anthropic.claude-code`。`--with-gemini`: `Google.gemini-cli-vscode-ide-companion`。`--with-copilot`: `github.copilot` / `github.copilot-chat`。
 
 ## シークレット方針
 この方針は、トークンや API キーの平文漏えいを防ぎつつ、AIコーディング時の認証切替を安全に行うためのルールです。
@@ -239,11 +250,14 @@ bash scripts/github-account-switch.sh use <profile>
 
 このパッケージが生成する環境における、AI CLI の導入・認証要件のマトリックスです。
 
-| エンジン | コマンド | 認証環境変数 | 導入経路 (モード) | 未導入・未認証時の挙動 |
+| エンジン | コマンド | 認証環境変数 | 導入経路 | 未導入・未認証時の挙動 |
 |----------|----------|--------------|-------------------|------------------------|
-| Claude | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `minimal` / `standard` / `full` で生成される `scripts/install-ai-tools.sh` を `postCreateCommand` で実行 | トークン/認証不足時はログインプロンプト表示またはエラー終了 |
-| Gemini | `gemini` | `GEMINI_API_KEY` | `minimal` / `standard` / `full` で生成される `scripts/install-ai-tools.sh` を `postCreateCommand` で実行 | API キー不足または API/認証エラーで失敗 |
-| Codex  | `codex` | `OPENAI_API_KEY` | すべてのモードで手動導入のみ（DCB による自動導入なし） | バイナリ未導入または API キー未設定で失敗 |
+| Claude | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | トークン/認証不足時はログインプロンプト表示またはエラー終了 |
+| Gemini | `gemini` | `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
+| Copilot | `copilot` | GitHub 認証（`gh` / OAuth） | `--with-copilot` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時はログインプロンプト表示またはエラー終了 |
+| Codex  | `codex` | `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
+
+各 AI ツールを `--with-<ai>` で選ぶと、CLI に加えて対応 VS Code 拡張が入り、設定ディレクトリ（`~/.claude` / `~/.gemini` / `~/.copilot`）が compose の named volume でリビルド間に保持されます。
 
 ## 検証ルール
 1. `languages` には少なくとも 1 つの対応言語（node|go|python|php）を含めること
@@ -253,7 +267,7 @@ bash scripts/github-account-switch.sh use <profile>
 
 ## 期待される出力
 - `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `compose.yaml` の `app` サービスを参照）
-- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket や AI CLI 用ボリューム（full のみ）を compose 側で明示）
+- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。AI CLI 用の永続 volume は `--with-<ai>` 選択時に随伴して compose 側へ配置）
 - `scripts/github-account-switch.sh`
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`
@@ -281,5 +295,25 @@ bash scripts/github-account-switch.sh use <profile>
 ```bash
 ./doctor.sh --target-dir result --strict
 ```
-設定された各言語ランタイムの可用性を動的にチェックします。
+設定された各言語ランタイムの可用性を動的にチェックします。`--with-aws` / `--with-gcp` で cloud CLI（`aws` / `gcloud` / `terraform`）を配線した場合は、それらの可用性も検査します。
+
+## mode オプションからの移行
+
+`--mode <minimal|standard|full>` は廃止しました（破壊的変更）。mode が束ねていた装備を、常時標準化（docker のリッチさ・AI 認証の永続化）と `--with-*` フラグ（cloud・AI ツール）へ分解しています。
+
+旧 mode を再現するおおよその対応:
+
+| 旧指定 | 新指定（おおよその等価） |
+|---|---|
+| `--mode minimal` | フラグなし（`--with-*` を付けない） |
+| `--mode standard` | `--with-aws`（AWS CLI + Terraform + copilot 相当が必要なら `--with-copilot` も付ける） |
+| `--mode full` | `--with-aws --with-gcp --with-claude --with-gemini --with-copilot` |
+
+注意点:
+
+- **docker のリッチさ**（buildx / compose-switch）は旧 `standard` / `full` のみでしたが、**全生成物で標準装備**になりました。旧 `minimal` 利用者にも付きます。
+- **AI CLI の自動導入は廃止**しました。旧構成ではトークン（`CLAUDE_CODE_OAUTH_TOKEN` 等）があれば `claude` / `gemini` が自動導入されましたが、今後は `--with-claude` / `--with-gemini` の明示指定が必要です。
+- **AI 認証の永続化は mode 非依存**になりました。旧 `full` のみだった `~/.claude` 等の永続化は、`--with-<ai>` を選べばどの構成でも有効です。
+- **Copilot 拡張**（`github.copilot` / `github.copilot-chat`）は旧 `standard` / `full` の既定でしたが、`--with-copilot` の明示指定へ変わりました。
+- `--with-codex`（OpenAI Codex）/ `--with-sakura`（さくらのクラウド）/ `--with-cloudflare`（Cloudflare）は将来対応予定で、現時点では未対応です。
 

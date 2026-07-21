@@ -3,7 +3,7 @@
 # 目的: 新規作業ディレクトリに1コマンドで devcontainer 雛形を生成する
 # 使用方法:
 #   curl -sSL https://github.com/ojos/devcontainer-bootstrap/releases/latest/download/bootstrap.sh \
-#     -o bootstrap.sh && bash bootstrap.sh --project-name myapp --languages node,go --mode standard
+#     -o bootstrap.sh && bash bootstrap.sh --project-name myapp --languages node,go --with-aws
 set -euo pipefail
 
 # 同階層の ai-playbook チェックアウトを探すために解決する。curl で単体取得された
@@ -11,9 +11,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROJECT_NAME=""
-MODE="standard"
 OUTPUT_DIR=""
 LANGUAGES=()
+# --with-* で選択された装備（cloud / AI ツール）の集合。空既定。
+# 例: aws gcp claude gemini copilot。has_with で参照する。
+WITH_SET=()
 FORCE="false"
 DRY_RUN="false"
 MANAGE_GITIGNORE="true"
@@ -41,9 +43,12 @@ usage: bash bootstrap.sh [options]
 
 options:
   --project-name <name>       Project name for devcontainer display name (required)
-  --mode <minimal|standard|full>
-                              Template variant (default: standard)
   --languages <csv>           Language runtimes (CSV: node,go,python,php,rust) (required)
+  --with-aws                  Install AWS CLI + Terraform (feature/extension)
+  --with-gcp                  Install Google Cloud CLI + Terraform (feature/extension)
+  --with-claude               Install Claude Code CLI + extension (persisted)
+  --with-gemini               Install Gemini CLI + extension (persisted)
+  --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
   --github-profiles <csv>     GitHub profiles for multi-account env injection
                               (default: primary,secondary)
@@ -62,6 +67,12 @@ options:
   -h, --help                  Show help
 
 notes:
+  Cloud/AI tooling is opt-in via --with-* flags (no --mode). Terraform is
+  bundled automatically when --with-aws or --with-gcp is given (once).
+  AI CLIs are installed only when their --with flag is present (no token-based
+  auto-install); each --with AI tool also adds its VS Code extension and
+  persists its config across rebuilds.
+
   Shared AI rules are maintained in a separate repository. This script places
   them into the generated project; it is a distribution mechanism, not the
   source of truth.
@@ -71,8 +82,12 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-name)     PROJECT_NAME="$2"; shift 2 ;;
-    --mode)             MODE="$2"; shift 2 ;;
     --languages)        IFS=',' read -ra LANGUAGES <<< "$2"; shift 2 ;;
+    --with-aws)         WITH_SET+=("aws"); shift ;;
+    --with-gcp)         WITH_SET+=("gcp"); shift ;;
+    --with-claude)      WITH_SET+=("claude"); shift ;;
+    --with-gemini)      WITH_SET+=("gemini"); shift ;;
+    --with-copilot)     WITH_SET+=("copilot"); shift ;;
     --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
     --github-profiles)  GITHUB_PROFILES="$2"; shift 2 ;;
     --claude-token-env) CLAUDE_TOKEN_ENV="$2"; shift 2 ;;
@@ -121,10 +136,6 @@ for lang in "${LANGUAGES[@]}"; do
     *) echo "error: unsupported language: $lang (supported: node, go, python, php, rust)" >&2; exit 1 ;;
   esac
 done
-case "$MODE" in
-  minimal|standard|full) ;;
-  *) echo "error: invalid --mode: $MODE" >&2; exit 1 ;;
-esac
 case "$PLAYBOOK_CONFLICT_POLICY" in
   skip|overwrite|prompt) ;;
   *) echo "error: --playbook-conflict-policy must be one of: skip, overwrite, prompt" >&2; exit 1 ;;
@@ -194,32 +205,26 @@ select_base_image
 
 # ── 組み込みテンプレート（bash 3 互換） ─────────────────────────────────
 
-mode_rel_paths() {
-  case "$1" in
-    minimal|standard|full)
-      printf '%s\n' \
-        '.devcontainer/compose.yaml' \
-        '.devcontainer/devcontainer.json' \
-        'scripts/acceptance.sh' \
-        'scripts/github-account-switch.sh' \
-        'scripts/install-ai-tools.sh' \
-        'scripts/loop-gate.sh' \
-        'scripts/on-attach.sh' \
-        'scripts/post-rebuild-check.sh' \
-        'scripts/verify.sh'
-      ;;
-    *)
-      echo "error: unsupported mode in mode_rel_paths: $1" >&2
-      exit 1
-      ;;
-  esac
+# 生成する相対パス一覧。mode を廃したため単一の集合。
+template_rel_paths() {
+  printf '%s\n' \
+    '.devcontainer/compose.yaml' \
+    '.devcontainer/devcontainer.json' \
+    'scripts/acceptance.sh' \
+    'scripts/github-account-switch.sh' \
+    'scripts/install-ai-tools.sh' \
+    'scripts/loop-gate.sh' \
+    'scripts/on-attach.sh' \
+    'scripts/post-rebuild-check.sh' \
+    'scripts/verify.sh'
 }
 
 get_template_content() {
-  local mode="$1"
-  local rel="$2"
-  case "$mode:$rel" in
-    'minimal:.devcontainer/compose.yaml'|'standard:.devcontainer/compose.yaml')
+  local rel="$1"
+  case "$rel" in
+    '.devcontainer/compose.yaml')
+      # AI ツールの永続 volume は選択に応じて条件配線する（__AI_VOLUME_MOUNTS__ /
+      # __AI_VOLUME_SECTION__ を render_content が置換）。docker socket は常に明示。
       cat <<'TMPL'
 services:
   app:
@@ -228,33 +233,19 @@ services:
       - ..:/workspaces/__PROJECT_NAME__:cached
       # docker-outside-of-docker feature 用（compose 利用時は feature 側の mounts が適用されないため明示）
       - /var/run/docker.sock:/var/run/docker-host.sock
+__AI_VOLUME_MOUNTS__
     command: sleep infinity
+__AI_VOLUME_SECTION__
 TMPL
       ;;
-    'full:.devcontainer/compose.yaml')
-      cat <<'TMPL'
-services:
-  app:
-    image: __BASE_IMAGE__
-    volumes:
-      - ..:/workspaces/__PROJECT_NAME__:cached
-      # docker-outside-of-docker feature 用（compose 利用時は feature 側の mounts が適用されないため明示）
-      - /var/run/docker.sock:/var/run/docker-host.sock
-      # AI CLI の認証・履歴を rebuild 間で保持する（compose 利用時 devcontainer.json の mounts は適用されない）
-      # ベースイメージ（devcontainers/base）の remoteUser は vscode
-      - claude-storage:/home/vscode/.claude
-      - gemini-storage:/home/vscode/.gemini
-    command: sleep infinity
-
-volumes:
-  claude-storage:
-  gemini-storage:
-TMPL
-      ;;
-    'minimal:.devcontainer/devcontainer.json')
+    '.devcontainer/devcontainer.json')
+      # docker はリッチさ（buildx + compose-switch）を全生成物で標準化。
+      # cloud（aws/gcp/terraform）と cloud/AI の VS Code 拡張は --with-* に応じて
+      # 条件配線する（__IF_WITH_*__ / __WITH_EXTENSIONS__ を render_content が処理）。
+      # 条件行は末尾カンマ付きで置き、write_file の perl 除去 + jq 整形で末尾カンマを畳む。
       cat <<'TMPL'
 {
-  "name": "__PROJECT_NAME__ (minimal)",
+  "name": "__PROJECT_NAME__",
   "dockerComposeFile": "compose.yaml",
   "service": "app",
   "workspaceFolder": "/workspaces/__PROJECT_NAME__",
@@ -265,7 +256,10 @@ TMPL
     },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
       "version": "latest",
-      "moby": false
+      "moby": false,
+      "dockerDashComposeVersion": "latest",
+      "installDockerComposeSwitch": true,
+      "installDockerBuildx": true
     },
     "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
@@ -273,7 +267,10 @@ TMPL
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
     "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
-    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1"
+    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1",
+    "__IF_WITH_AWS__": "ghcr.io/devcontainers/features/aws-cli:1",
+    "__IF_WITH_GCP__": "ghcr.io/dhoeric/features/google-cloud-cli:1",
+    "__IF_WITH_TERRAFORM__": "ghcr.io/devcontainers/features/terraform:1"
   },
   "remoteEnv": {
 __GITHUB_PROFILE_ENV_BLOCK__
@@ -287,6 +284,7 @@ __GITHUB_PROFILE_ENV_BLOCK__
     "vscode": {
       "extensions": [
 __LANGUAGE_EXTENSIONS__
+__WITH_EXTENSIONS__
         "ms-azuretools.vscode-containers"
       ]
     }
@@ -294,7 +292,7 @@ __LANGUAGE_EXTENSIONS__
 }
 TMPL
       ;;
-    'minimal:scripts/github-account-switch.sh'|'standard:scripts/github-account-switch.sh'|'full:scripts/github-account-switch.sh')
+    'scripts/github-account-switch.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -460,14 +458,14 @@ main() {
 main "$@"
 TMPL
       ;;
-    'minimal:scripts/install-ai-tools.sh')
+    'scripts/install-ai-tools.sh')
+      # 選択された AI CLI のみを無条件に導入する（--with-* による明示 opt-in）。
+      # トークン有無での自動インストールは行わない。__AI_INSTALL_LINES__ は
+      # render_content が選択 AI ツール分の install 行に置換する（未選択なら空）。
       cat <<'TMPL'
 #!/usr/bin/env bash
-# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
+# 選択された AI CLI ツールを導入する（--with-claude / --with-gemini / --with-copilot）。
 set -euo pipefail
-
-CLAUDE_PKG="@anthropic-ai/claude-code"
-GEMINI_PKG="@google/gemini-cli"
 
 install_if_missing() {
   local cmd="$1"
@@ -481,264 +479,36 @@ install_if_missing() {
   echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
 }
 
-if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-  install_if_missing claude "$CLAUDE_PKG"
-else
-  echo "[install-ai-tools] SKIP claude (CLAUDE_CODE_OAUTH_TOKEN not set)"
-fi
-
-if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-  install_if_missing gemini "$GEMINI_PKG"
-else
-  echo "[install-ai-tools] SKIP gemini (GEMINI_API_KEY not set)"
-fi
+__AI_INSTALL_LINES__
+echo "[install-ai-tools] done"
 TMPL
       ;;
-    'minimal:scripts/on-attach.sh')
+    'scripts/on-attach.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "[on-attach] minimal bootstrap active"
+echo "[on-attach] bootstrap active"
 if command -v gh >/dev/null 2>&1; then
   gh auth status >/dev/null 2>&1 && echo "[on-attach] gh auth OK" || echo "[on-attach] WARN: gh auth missing"
 fi
 echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
 TMPL
       ;;
-    'minimal:scripts/post-rebuild-check.sh')
+    'scripts/post-rebuild-check.sh')
+      # 基本コマンド + 選択言語（__RUNTIME_CHECK_LINES__）+ 選択装備
+      # （__WITH_CHECK_LINES__: 選択した cloud/AI ツールの CLI）の存在を検査する。
       cat <<'TMPL'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "[check] minimal bootstrap checks"
-command -v bash >/dev/null 2>&1 && echo "[check] bash OK"
-command -v gh   >/dev/null 2>&1 && echo "[check] gh OK" || echo "[check] gh missing"
-command -v rg   >/dev/null 2>&1 && echo "[check] rg OK" || echo "[check] rg missing"
-__RUNTIME_CHECK_LINES__
-TMPL
-      ;;
-    'standard:.devcontainer/devcontainer.json')
-      cat <<'TMPL'
-{
-  "name": "__PROJECT_NAME__ (standard)",
-  "dockerComposeFile": "compose.yaml",
-  "service": "app",
-  "workspaceFolder": "/workspaces/__PROJECT_NAME__",
-  "shutdownAction": "stopCompose",
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils:1": {
-      "configureZsh": true
-    },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-      "version": "latest",
-      "moby": false,
-      "dockerDashComposeVersion": "latest",
-      "installDockerComposeSwitch": true,
-      "installDockerBuildx": true
-    },
-    "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {},
-    "ghcr.io/devcontainers/features/aws-cli:1": {},
-    "ghcr.io/devcontainers/features/terraform:1": {},
-    "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
-    "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
-    "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
-    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
-    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1"
-  },
-  "remoteEnv": {
-__GITHUB_PROFILE_ENV_BLOCK__
-    "GEMINI_API_KEY": "${localEnv:__GEMINI_KEY_ENV__}",
-    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:__CLAUDE_TOKEN_ENV__}",
-    "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
-  },
-  "postCreateCommand": "bash scripts/install-ai-tools.sh",
-  "postAttachCommand": "bash scripts/on-attach.sh",
-  "customizations": {
-    "vscode": {
-      "extensions": [
-__LANGUAGE_EXTENSIONS__
-        "github.copilot",
-        "github.copilot-chat",
-        "ms-azuretools.vscode-containers",
-        "amazonwebservices.aws-toolkit-vscode",
-        "hashicorp.terraform"
-      ]
-    }
-  }
-}
-TMPL
-      ;;
-    'standard:scripts/on-attach.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "[on-attach] standard bootstrap active"
-if command -v gh >/dev/null 2>&1; then
-  gh auth status >/dev/null 2>&1 && echo "[on-attach] gh auth OK" || echo "[on-attach] WARN: gh auth missing"
-fi
-echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
-command -v go   >/dev/null 2>&1 && echo "[on-attach] go OK"   || true
-command -v node >/dev/null 2>&1 && echo "[on-attach] node OK" || true
-TMPL
-      ;;
-    'standard:scripts/install-ai-tools.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
-set -euo pipefail
-
-CLAUDE_PKG="@anthropic-ai/claude-code"
-GEMINI_PKG="@google/gemini-cli"
-
-install_if_missing() {
-  local cmd="$1"
-  local pkg="$2"
-  if command -v "$cmd" >/dev/null 2>&1; then
-    echo "[install-ai-tools] $cmd already installed, skipping"
-    return 0
-  fi
-  echo "[install-ai-tools] installing $pkg ..."
-  npm install -g "$pkg"
-  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
-}
-
-if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-  install_if_missing claude "$CLAUDE_PKG"
-else
-  echo "[install-ai-tools] SKIP claude (CLAUDE_CODE_OAUTH_TOKEN not set)"
-fi
-
-if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-  install_if_missing gemini "$GEMINI_PKG"
-else
-  echo "[install-ai-tools] SKIP gemini (GEMINI_API_KEY not set)"
-fi
-TMPL
-      ;;
-    'standard:scripts/post-rebuild-check.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "[check] standard bootstrap checks"
+echo "[check] bootstrap checks"
 for cmd in bash jq gh docker rg; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
 __RUNTIME_CHECK_LINES__
+__WITH_CHECK_LINES__
 TMPL
       ;;
-    'full:.devcontainer/devcontainer.json')
-      cat <<'TMPL'
-{
-  "name": "__PROJECT_NAME__ (full)",
-  "dockerComposeFile": "compose.yaml",
-  "service": "app",
-  "workspaceFolder": "/workspaces/__PROJECT_NAME__",
-  "shutdownAction": "stopCompose",
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils:1": {
-      "configureZsh": true
-    },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-      "version": "latest",
-      "moby": false,
-      "dockerDashComposeVersion": "latest",
-      "installDockerComposeSwitch": true,
-      "installDockerBuildx": true
-    },
-    "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {},
-    "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
-    "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
-    "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
-    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
-    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1",
-    "ghcr.io/devcontainers/features/aws-cli:1": {},
-    "ghcr.io/devcontainers/features/terraform:1": {},
-    "ghcr.io/dhoeric/features/google-cloud-cli:1": {
-      "version": "latest"
-    }
-  },
-  "remoteEnv": {
-__GITHUB_PROFILE_ENV_BLOCK__
-    "GEMINI_API_KEY": "${localEnv:__GEMINI_KEY_ENV__}",
-    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:__CLAUDE_TOKEN_ENV__}",
-    "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
-  },
-  "postCreateCommand": "bash scripts/install-ai-tools.sh && bash scripts/post-rebuild-check.sh",
-  "postAttachCommand": "bash scripts/on-attach.sh",
-  "customizations": {
-    "vscode": {
-      "extensions": [
-__LANGUAGE_EXTENSIONS__
-        "github.copilot",
-        "github.copilot-chat",
-        "ms-azuretools.vscode-containers",
-        "amazonwebservices.aws-toolkit-vscode",
-        "hashicorp.terraform",
-        "GoogleCloudTools.cloudcode"
-      ]
-    }
-  }
-}
-TMPL
-      ;;
-    'full:scripts/on-attach.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "[on-attach] full bootstrap active"
-for cmd in gh claude gemini go node docker; do
-  command -v "$cmd" >/dev/null 2>&1 && echo "[on-attach] $cmd OK" || echo "[on-attach] WARN: $cmd missing"
-done
-echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
-TMPL
-      ;;
-    'full:scripts/install-ai-tools.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-# API 認証情報がある場合に AI CLI ツール（claude, gemini）をインストールする。
-set -euo pipefail
-
-CLAUDE_PKG="@anthropic-ai/claude-code"
-GEMINI_PKG="@google/gemini-cli"
-
-install_if_missing() {
-  local cmd="$1"
-  local pkg="$2"
-  if command -v "$cmd" >/dev/null 2>&1; then
-    echo "[install-ai-tools] $cmd already installed, skipping"
-    return 0
-  fi
-  echo "[install-ai-tools] installing $pkg ..."
-  npm install -g "$pkg"
-  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
-}
-
-if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-  install_if_missing claude "$CLAUDE_PKG"
-else
-  echo "[install-ai-tools] SKIP claude (CLAUDE_CODE_OAUTH_TOKEN not set)"
-fi
-
-if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-  install_if_missing gemini "$GEMINI_PKG"
-else
-  echo "[install-ai-tools] SKIP gemini (GEMINI_API_KEY not set)"
-fi
-TMPL
-      ;;
-    'full:scripts/post-rebuild-check.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "[check] full bootstrap checks"
-for cmd in bash jq gh docker rg claude gemini; do
-  command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
-done
-__RUNTIME_CHECK_LINES__
-TMPL
-      ;;
-    'minimal:scripts/verify.sh'|'standard:scripts/verify.sh'|'full:scripts/verify.sh')
+    'scripts/verify.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
 # verify.sh — ループコーディングの接地信号（受け入れ条件の機械ゲート）
@@ -786,7 +556,7 @@ echo "VERIFY_FAIL"
 exit 1
 TMPL
       ;;
-    'minimal:scripts/acceptance.sh'|'standard:scripts/acceptance.sh'|'full:scripts/acceptance.sh')
+    'scripts/acceptance.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
 # acceptance.sh — このプロジェクトの受け入れ条件（プロジェクトが所有・編集する）
@@ -803,7 +573,7 @@ echo "[acceptance] project acceptance checks"
 __ACCEPTANCE_CHECK_LINES__
 TMPL
       ;;
-    'minimal:scripts/loop-gate.sh'|'standard:scripts/loop-gate.sh'|'full:scripts/loop-gate.sh')
+    'scripts/loop-gate.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
 # loop-gate.sh — ローカル事前ゲート（ループコーディングの収束点）
@@ -874,6 +644,64 @@ has_language() {
   local target="$1" l
   for l in "${LANGUAGES[@]}"; do [[ "$l" == "$target" ]] && return 0; done
   return 1
+}
+
+# --with-* で選択された装備に含まれるか。has_language と対になる述語。
+# WITH_SET は空になり得るため、未束縛展開を避けて空配列を安全に扱う。
+has_with() {
+  local target="$1" w
+  for w in ${WITH_SET[@]+"${WITH_SET[@]}"}; do [[ "$w" == "$target" ]] && return 0; done
+  return 1
+}
+
+# with-feature（devcontainer feature）の path を返す。cloud CLI と Terraform。
+with_feature_path() {
+  case "$1" in
+    aws)       printf 'ghcr.io/devcontainers/features/aws-cli:1' ;;
+    gcp)       printf 'ghcr.io/dhoeric/features/google-cloud-cli:1' ;;
+    terraform) printf 'ghcr.io/devcontainers/features/terraform:1' ;;
+    *)         printf '' ;;
+  esac
+}
+
+# with-feature を配線するか。Terraform は cloud（aws または gcp）の随伴で、
+# いずれかが選択されていれば 1 回だけ有効化する。
+with_feature_active() {
+  case "$1" in
+    aws)       has_with aws ;;
+    gcp)       has_with gcp ;;
+    terraform) has_with aws || has_with gcp ;;
+    *)         return 1 ;;
+  esac
+}
+
+# 選択した AI ツールの CLI 情報（コマンド名 npmパッケージ）。空行は返さない。
+# bash 3.2 互換のため連想配列を使わず case で分岐する。
+ai_cli_spec() {
+  case "$1" in
+    claude)  printf 'claude @anthropic-ai/claude-code' ;;
+    gemini)  printf 'gemini @google/gemini-cli' ;;
+    copilot) printf 'copilot @github/copilot' ;;
+    *)       printf '' ;;
+  esac
+}
+
+# 選択した AI ツールが rebuild 間で保持する設定ディレクトリ（remoteUser は vscode）。
+ai_config_dir() {
+  case "$1" in
+    claude)  printf '/home/vscode/.claude' ;;
+    gemini)  printf '/home/vscode/.gemini' ;;
+    copilot) printf '/home/vscode/.copilot' ;;
+    *)       printf '' ;;
+  esac
+}
+
+# with-set のうち AI ツールだけを選択順に列挙する。
+selected_ai_tools() {
+  local t
+  for t in claude gemini copilot; do
+    has_with "$t" && printf '%s\n' "$t"
+  done
 }
 
 build_default_gitignore_targets() {
@@ -1061,36 +889,109 @@ build_language_extensions_block() {
   printf '%s' "$out"
 }
 
+# 選択した装備の VS Code 拡張を、extensions 配列へ入れる JSON 断片として返す。
+# 各エントリは末尾カンマ付き。write_file の末尾カンマ除去（perl）+ jq 整形が畳む。
+# cloud（aws/gcp/terraform）は with_feature_active、AI ツールは has_with で判定。
+build_with_extensions_block() {
+  local out=""
+  with_feature_active aws       && out+="        \"amazonwebservices.aws-toolkit-vscode\","$'\n'
+  with_feature_active gcp       && out+="        \"GoogleCloudTools.cloudcode\","$'\n'
+  with_feature_active terraform && out+="        \"hashicorp.terraform\","$'\n'
+  has_with claude  && out+="        \"anthropic.claude-code\","$'\n'
+  has_with gemini  && out+="        \"Google.gemini-cli-vscode-ide-companion\","$'\n'
+  has_with copilot && out+="        \"github.copilot\","$'\n'
+  has_with copilot && out+="        \"github.copilot-chat\","$'\n'
+  printf '%s' "$out"
+}
+
+# 選択した AI ツールの install 行を生成する（install-ai-tools.sh の __AI_INSTALL_LINES__）。
+# トークン分岐は行わない。未選択なら空。
+build_ai_install_block() {
+  local tool spec cmd pkg out=""
+  while IFS= read -r tool; do
+    [[ -n "$tool" ]] || continue
+    spec="$(ai_cli_spec "$tool")"
+    cmd="${spec%% *}"
+    pkg="${spec#* }"
+    out+="install_if_missing $cmd \"$pkg\""$'\n'
+  done < <(selected_ai_tools)
+  printf '%s' "$out"
+}
+
+# compose の app.volumes に足す AI 永続 volume のマウント行（__AI_VOLUME_MOUNTS__）。
+# 未選択なら空（行ごと消える）。
+build_ai_volume_mounts_block() {
+  local tool dir out=""
+  while IFS= read -r tool; do
+    [[ -n "$tool" ]] || continue
+    dir="$(ai_config_dir "$tool")"
+    out+="      - ${tool}-storage:${dir}"$'\n'
+  done < <(selected_ai_tools)
+  printf '%s' "$out"
+}
+
+# compose のトップレベル volumes: セクション（__AI_VOLUME_SECTION__）。
+# AI ツールを 1 つでも選べば named volume を定義、なければ空（セクションごと消える）。
+build_ai_volume_section_block() {
+  local tool defs=""
+  while IFS= read -r tool; do
+    [[ -n "$tool" ]] || continue
+    defs+="  ${tool}-storage:"$'\n'
+  done < <(selected_ai_tools)
+  [[ -n "$defs" ]] || { printf ''; return; }
+  printf 'volumes:\n%s' "$defs"
+}
+
+# post-rebuild-check.sh の __WITH_CHECK_LINES__。選択した cloud/AI の CLI を検査する。
+build_with_check_block() {
+  local out=""
+  local checks="" name cmd
+  # 表示順: cloud（aws gcp terraform）→ AI（claude gemini copilot）
+  with_feature_active aws       && checks+="aws "
+  with_feature_active gcp       && checks+="gcloud "
+  with_feature_active terraform && checks+="terraform "
+  has_with claude  && checks+="claude "
+  has_with gemini  && checks+="gemini "
+  has_with copilot && checks+="copilot "
+  for cmd in $checks; do
+    out+="command -v $cmd >/dev/null 2>&1 && echo \"[check] $cmd OK\" || echo \"[check] $cmd missing\""$'\n'
+  done
+  printf '%s' "$out"
+}
+
 render_content() {
   local content="$1"
   local sed_args=()
   local escaped_base_image
-  local github_env_block runtime_check_block language_ext_block
+  local github_env_block
 
   github_env_block="$(build_github_profile_env_block)"
   content="${content//__GITHUB_PROFILE_ENV_BLOCK__/$github_env_block}"
 
-  # 言語別ブロックは行単位プレースホルダを awk で差し替える。sed や bash の
-  # パターン置換は使わない: 挿入内容が `&`（検査行の `2>&1` / `&&`）を含み、
-  # sed の置換記号や Bash 5.1+ の `${//}` 置換で `&` が「マッチ全体」に化けるため
-  # （`\&` エスケープは bash 3.2 で効かず非互換）。ENVIRON 経由 + printf "%s" は
-  # `&` を素通しし、gsub を使わないので安全かつ bash 3.2 互換。
-  runtime_check_block="$(build_runtime_check_block)"
-  content="$(RCB="$runtime_check_block" awk '
-    $0 == "__RUNTIME_CHECK_LINES__" { printf "%s", ENVIRON["RCB"]; next }
-    { print }
-  ' <<<"$content")"
-  local acceptance_check_block
-  acceptance_check_block="$(build_acceptance_check_block)"
-  content="$(ACB="$acceptance_check_block" awk '
-    $0 == "__ACCEPTANCE_CHECK_LINES__" { printf "%s", ENVIRON["ACB"]; next }
-    { print }
-  ' <<<"$content")"
-  language_ext_block="$(build_language_extensions_block)"
-  content="$(LEB="$language_ext_block" awk '
-    $0 == "__LANGUAGE_EXTENSIONS__" { printf "%s", ENVIRON["LEB"]; next }
-    { print }
-  ' <<<"$content")"
+  # 行単位プレースホルダを awk で差し替える。sed や bash のパターン置換は使わない:
+  # 挿入内容が `&`（検査行の `2>&1` / `&&`）を含み、sed の置換記号や Bash 5.1+ の
+  # `${//}` 置換で `&` が「マッチ全体」に化けるため（`\&` エスケープは bash 3.2 で
+  # 効かず非互換）。ENVIRON 経由 + printf は `&` を素通しし bash 3.2 互換。
+  #
+  # ブロックは $(...) を通る過程で末尾改行が剥がれる。非空なら改行を 1 つ補って出力し、
+  # 空なら行ごと消す。これをしないと、直後の行（別のプレースホルダや YAML の command:、
+  # シェルの次コマンド）が同一行へ癒着する（隣接プレースホルダは 2 つ目が一致しなくなる）。
+  subst_block() {
+    local placeholder="$1" block="$2"
+    content="$(PH="$placeholder" BLK="$block" awk '
+      $0 == ENVIRON["PH"] { if (length(ENVIRON["BLK"]) > 0) printf "%s\n", ENVIRON["BLK"]; next }
+      { print }
+    ' <<<"$content")"
+  }
+
+  subst_block __RUNTIME_CHECK_LINES__ "$(build_runtime_check_block)"
+  subst_block __ACCEPTANCE_CHECK_LINES__ "$(build_acceptance_check_block)"
+  subst_block __LANGUAGE_EXTENSIONS__ "$(build_language_extensions_block)"
+  subst_block __WITH_EXTENSIONS__ "$(build_with_extensions_block)"
+  subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
+  subst_block __AI_VOLUME_MOUNTS__ "$(build_ai_volume_mounts_block)"
+  subst_block __AI_VOLUME_SECTION__ "$(build_ai_volume_section_block)"
+  subst_block __WITH_CHECK_LINES__ "$(build_with_check_block)"
 
   escaped_base_image="$BASE_IMAGE"
   escaped_base_image="${escaped_base_image//&/\\&}"
@@ -1106,6 +1007,20 @@ render_content() {
       sed_args+=(-e "s|\"__IF_RUNTIME_${lang_upper}__\": \"ghcr.io/devcontainers/features/$lang:1\"|\"ghcr.io/devcontainers/features/$lang:1\": {}|g")
     else
       sed_args+=(-e "/\"__IF_RUNTIME_${lang_upper}__\"/d")
+    fi
+  done
+  # cloud feature（aws/gcp/terraform）を with-set に応じて配線する。言語と同型だが
+  # feature path が名前と 1 対 1 でないため with_feature_path で解決する。terraform は
+  # with_feature_active により「aws または gcp」で有効化される。sed 区切りは path に
+  # 含まれる / を避けて | を使う（path に | は無い）。
+  local wf wf_upper wf_path
+  for wf in aws gcp terraform; do
+    wf_upper=$(printf '%s' "$wf" | tr '[:lower:]' '[:upper:]')
+    wf_path="$(with_feature_path "$wf")"
+    if with_feature_active "$wf"; then
+      sed_args+=(-e "s|\"__IF_WITH_${wf_upper}__\": \"$wf_path\"|\"$wf_path\": {}|g")
+    else
+      sed_args+=(-e "/\"__IF_WITH_${wf_upper}__\"/d")
     fi
   done
   printf '%s' "$content" | sed "${sed_args[@]}"
@@ -1397,7 +1312,7 @@ write_file() {
 
 # ── メイン処理 ──────────────────────────────────────────────────────────────────────
 
-echo "[bootstrap] mode=$MODE languages=${LANGUAGES[*]}"
+echo "[bootstrap] languages=${LANGUAGES[*]} with=${WITH_SET[*]:-(none)}"
 echo "[bootstrap] output=$OUTPUT_DIR"
 
 # ルールソースが指定されたのに使用不能な場合は、何かを書き込む前に失敗させる。
@@ -1405,8 +1320,8 @@ if should_install_playbook; then
   resolve_playbook_source_or_die
 fi
 
-# 選択したモードの相対パスを収集してソートする（bash 3 互換）
-sorted_rels="$(mode_rel_paths "$MODE" | sort)"
+# 生成する相対パスを収集してソートする（bash 3 互換）
+sorted_rels="$(template_rel_paths | sort)"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "[bootstrap] dry-run: no files will be written"
@@ -1444,7 +1359,7 @@ fi
 
 while IFS= read -r rel; do
   [[ -n "$rel" ]] || continue
-  write_file "$rel" "$(get_template_content "$MODE" "$rel")"
+  write_file "$rel" "$(get_template_content "$rel")"
 done <<EOF
 $sorted_rels
 EOF
