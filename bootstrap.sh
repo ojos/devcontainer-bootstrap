@@ -43,7 +43,7 @@ options:
   --project-name <name>       Project name for devcontainer display name (required)
   --mode <minimal|standard|full>
                               Template variant (default: standard)
-  --languages <csv>           Language runtimes (CSV: node,go,python,php) (required)
+  --languages <csv>           Language runtimes (CSV: node,go,python,php,rust) (required)
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
   --github-profiles <csv>     GitHub profiles for multi-account env injection
                               (default: primary,secondary)
@@ -117,8 +117,8 @@ for i in "${!LANGUAGES[@]}"; do
 done
 for lang in "${LANGUAGES[@]}"; do
   case "$lang" in
-    node|go|python|php) ;;
-    *) echo "error: unsupported language: $lang (supported: node, go, python, php)" >&2; exit 1 ;;
+    node|go|python|php|rust) ;;
+    *) echo "error: unsupported language: $lang (supported: node, go, python, php, rust)" >&2; exit 1 ;;
   esac
 done
 case "$MODE" in
@@ -269,7 +269,8 @@ TMPL
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
-    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1"
+    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
+    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1"
   },
   "remoteEnv": {
 __GITHUB_PROFILE_ENV_BLOCK__
@@ -281,7 +282,10 @@ __GITHUB_PROFILE_ENV_BLOCK__
   "postAttachCommand": "bash scripts/on-attach.sh",
   "customizations": {
     "vscode": {
-      "extensions": ["ms-azuretools.vscode-containers"]
+      "extensions": [
+__LANGUAGE_EXTENSIONS__
+        "ms-azuretools.vscode-containers"
+      ]
     }
   }
 }
@@ -506,7 +510,7 @@ echo "[check] minimal bootstrap checks"
 command -v bash >/dev/null 2>&1 && echo "[check] bash OK"
 command -v gh   >/dev/null 2>&1 && echo "[check] gh OK" || echo "[check] gh missing"
 command -v rg   >/dev/null 2>&1 && echo "[check] rg OK" || echo "[check] rg missing"
-__IF_RUNTIME_PHP_CHECK__command -v php  >/dev/null 2>&1 && echo "[check] php OK" || echo "[check] php missing"
+__RUNTIME_CHECK_LINES__
 TMPL
       ;;
     'standard:.devcontainer/devcontainer.json')
@@ -535,7 +539,8 @@ TMPL
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
-    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1"
+    "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
+    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1"
   },
   "remoteEnv": {
 __GITHUB_PROFILE_ENV_BLOCK__
@@ -548,6 +553,7 @@ __GITHUB_PROFILE_ENV_BLOCK__
   "customizations": {
     "vscode": {
       "extensions": [
+__LANGUAGE_EXTENSIONS__
         "github.copilot",
         "github.copilot-chat",
         "ms-azuretools.vscode-containers",
@@ -611,10 +617,10 @@ TMPL
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[check] standard bootstrap checks"
-for cmd in bash jq gh node go docker rg; do
+for cmd in bash jq gh docker rg; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
-__IF_RUNTIME_PHP_CHECK__command -v php >/dev/null 2>&1 && echo "[check] php OK" || echo "[check] php missing"
+__RUNTIME_CHECK_LINES__
 TMPL
       ;;
     'full:.devcontainer/devcontainer.json')
@@ -642,6 +648,7 @@ TMPL
     "__IF_RUNTIME_GO__": "ghcr.io/devcontainers/features/go:1",
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
     "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
+    "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1",
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/devcontainers/features/terraform:1": {},
     "ghcr.io/dhoeric/features/google-cloud-cli:1": {
@@ -659,6 +666,7 @@ __GITHUB_PROFILE_ENV_BLOCK__
   "customizations": {
     "vscode": {
       "extensions": [
+__LANGUAGE_EXTENSIONS__
         "github.copilot",
         "github.copilot-chat",
         "ms-azuretools.vscode-containers",
@@ -721,10 +729,10 @@ TMPL
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[check] full bootstrap checks"
-for cmd in bash jq gh node go docker rg claude gemini; do
+for cmd in bash jq gh docker rg claude gemini; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
-__IF_RUNTIME_PHP_CHECK__command -v php >/dev/null 2>&1 && echo "[check] php OK" || echo "[check] php missing"
+__RUNTIME_CHECK_LINES__
 TMPL
       ;;
     *)
@@ -756,6 +764,9 @@ build_default_gitignore_targets() {
   fi
   if has_language "php"; then
     targets+=("PHP")
+  fi
+  if has_language "rust"; then
+    targets+=("Rust")
   fi
   printf '%s\n' "${targets[@]}" | awk '!seen[$0]++'
 }
@@ -850,14 +861,77 @@ build_github_profile_env_block() {
   printf '%b' "$out"
 }
 
+# 言語ランタイムの存在検査に使うコマンド名を返す。
+# 既定は言語名と同一だが、rust は実行ファイルが cargo/rustc に分かれ
+# 「rust」という実行ファイルが無いため、代表コマンド cargo へ写像する。
+# bash 3.2 互換のため連想配列を使わず case で分岐する。
+runtime_check_cmd() {
+  case "$1" in
+    rust) printf 'cargo' ;;
+    *)    printf '%s' "$1" ;;
+  esac
+}
+
+# 言語に対応する VS Code の language server 拡張 ID を返す。
+# 拡張を持たない言語（node は JS/TS が組み込み、php は有料ティアのある
+# サードパーティを避ける）は空文字を返す。
+language_extension() {
+  case "$1" in
+    rust)   printf 'rust-lang.rust-analyzer' ;;
+    go)     printf 'golang.go' ;;
+    python) printf 'ms-python.python' ;;
+    *)      printf '' ;;
+  esac
+}
+
+# 選択言語ごとの post-rebuild-check 検査行を生成する（配列駆動）。
+# 検査コマンドは runtime_check_cmd に一元化する。
+build_runtime_check_block() {
+  local lang cmd out=""
+  for lang in "${LANGUAGES[@]}"; do
+    cmd="$(runtime_check_cmd "$lang")"
+    out+="command -v $cmd >/dev/null 2>&1 && echo \"[check] $cmd OK\" || echo \"[check] $cmd missing\""$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# 選択言語のうち拡張を持つものだけを、extensions 配列へ入れる JSON 断片として返す。
+# 各エントリは末尾カンマ付き。後段の write_file が末尾カンマ除去（perl）+ jq 整形を
+# 行うため、直後に固定拡張が続く限り末尾カンマは安全に処理される。
+build_language_extensions_block() {
+  local lang ext out=""
+  for lang in "${LANGUAGES[@]}"; do
+    ext="$(language_extension "$lang")"
+    [[ -n "$ext" ]] || continue
+    out+="        \"$ext\","$'\n'
+  done
+  printf '%s' "$out"
+}
+
 render_content() {
   local content="$1"
   local sed_args=()
   local escaped_base_image
-  local github_env_block
+  local github_env_block runtime_check_block language_ext_block
 
   github_env_block="$(build_github_profile_env_block)"
   content="${content//__GITHUB_PROFILE_ENV_BLOCK__/$github_env_block}"
+
+  # 言語別ブロックは行単位プレースホルダを awk で差し替える。sed や bash の
+  # パターン置換は使わない: 挿入内容が `&`（検査行の `2>&1` / `&&`）を含み、
+  # sed の置換記号や Bash 5.1+ の `${//}` 置換で `&` が「マッチ全体」に化けるため
+  # （`\&` エスケープは bash 3.2 で効かず非互換）。ENVIRON 経由 + printf "%s" は
+  # `&` を素通しし、gsub を使わないので安全かつ bash 3.2 互換。
+  runtime_check_block="$(build_runtime_check_block)"
+  content="$(RCB="$runtime_check_block" awk '
+    $0 == "__RUNTIME_CHECK_LINES__" { printf "%s", ENVIRON["RCB"]; next }
+    { print }
+  ' <<<"$content")"
+  language_ext_block="$(build_language_extensions_block)"
+  content="$(LEB="$language_ext_block" awk '
+    $0 == "__LANGUAGE_EXTENSIONS__" { printf "%s", ENVIRON["LEB"]; next }
+    { print }
+  ' <<<"$content")"
 
   escaped_base_image="$BASE_IMAGE"
   escaped_base_image="${escaped_base_image//&/\\&}"
@@ -866,7 +940,7 @@ render_content() {
   sed_args+=(-e "s|__CLAUDE_TOKEN_ENV__|$CLAUDE_TOKEN_ENV|g")
   sed_args+=(-e "s|__GEMINI_KEY_ENV__|$GEMINI_KEY_ENV|g")
   sed_args+=(-e "s|__BASE_IMAGE__|$escaped_base_image|g")
-  for lang in node go python php; do
+  for lang in node go python php rust; do
     local lang_upper
     lang_upper=$(printf '%s' "$lang" | tr '[:lower:]' '[:upper:]')
     if has_language "$lang"; then
@@ -875,11 +949,6 @@ render_content() {
       sed_args+=(-e "/\"__IF_RUNTIME_${lang_upper}__\"/d")
     fi
   done
-  if has_language "php"; then
-    sed_args+=(-e "s|__IF_RUNTIME_PHP_CHECK__||g")
-  else
-    sed_args+=(-e "/__IF_RUNTIME_PHP_CHECK__/d")
-  fi
   printf '%s' "$content" | sed "${sed_args[@]}"
 }
 

@@ -1,13 +1,13 @@
 {
   "package": "devcontainer-bootstrap",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "assets": [
     "RELEASE-MANIFEST.json",
     "SHA256SUMS",
     "PACKAGE_ARCHIVE.tar.gz"
   ],
   "checksums": {
-    "PACKAGE_ARCHIVE.tar.gz": "3e127fe70412495808ec749b517e8e15ee7066471b82c64337129c85f747e01d",
-    "SHA256SUMS": "08ccdcb1242d35ef950b3782b816b8604f4ee1c177af064550a62dcf758c465c"
+    "PACKAGE_ARCHIVE.tar.gz": "8477cc3767fe936f8e1f5d0dc25af329b5529d4d4c2931f690196d8f5acf918f",
+    "SHA256SUMS": "4f57a5fdb9c51c068fcea2e98484ee0aa2274b173f30d82bf74f49d148651254"
   }
 }

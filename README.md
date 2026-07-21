@@ -24,7 +24,7 @@
 このパッケージはルールの内容も、入口ファイルの雛形も持ちません。ai-playbook の `templates/` をそのままコピーするだけです。
 
 そのため、AI ルールだけが必要な場合は、このパッケージを介さず ai-playbook を直接導入できます。
-このパッケージは devcontainer と対応言語（node / go / python / php）を前提とするため、それ以外の環境では ai-playbook 側の導入手順を使ってください。
+このパッケージは devcontainer と対応言語（node / go / python / php / rust）を前提とするため、それ以外の環境では ai-playbook 側の導入手順を使ってください。
 
 ## 公開リリースからの利用
 
@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.2.0`
+- `v0.3.0`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.2.0
+TAG=v0.3.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -57,7 +57,7 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
 
 ### 必須入力
 - `--project-name <name>`（文字列。必須）
-- `--languages <csv>`（CSV 形式。`node`、`go`、`python`、`php` を任意に組み合わせ。必須）
+- `--languages <csv>`（CSV 形式。`node`、`go`、`python`、`php`、`rust` を任意に組み合わせ。必須）
 - `--mode <minimal|standard|full>`（テンプレート選択。既定: `standard`）
 
 ### オプション入力
@@ -104,6 +104,21 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
 - `go`（Go）
 - `python`（Python 3）
 - `php`（PHP）
+- `rust`（Rust）
+
+選択した言語は devcontainer feature（`ghcr.io/devcontainers/features/<lang>:1`）として導入され、`scripts/post-rebuild-check.sh` の検査対象にもなります。`rust` は feature 名（`rust`）と実行コマンド（`cargo`）が異なるため、検査・診断は `cargo` の有無で判定します。
+
+### VS Code language server 拡張
+
+選択言語に応じて language server 拡張を条件付きで配線します（インフラ系拡張とは別に、選択時のみ追加）。
+
+| 言語 | 配線する拡張 |
+|---|---|
+| `rust` | `rust-lang.rust-analyzer` |
+| `go` | `golang.go` |
+| `python` | `ms-python.python` |
+| `node` | （なし。JS/TS は VS Code 組み込み） |
+| `php` | （サードパーティは配線しない。有料ティアのある拡張を既定に含めないため） |
 
 ### 使用例:
 ```bash
@@ -111,7 +126,10 @@ bash bootstrap.sh --project-name myapp --languages node,go --mode standard \
 ./bootstrap.sh --project-name myapp --languages node --mode minimal
 
 # 複数言語
-./bootstrap.sh --project-name myapp --languages node,go,python,php --mode standard
+./bootstrap.sh --project-name myapp --languages node,go,python,php,rust --mode standard
+
+# Rust 単体
+./bootstrap.sh --project-name myapp --languages rust --mode standard
 
 # バックエンドのみ（フロントエンドなし）
 ./bootstrap.sh --project-name backend-api --languages go,python,php --mode minimal
