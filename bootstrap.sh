@@ -1168,8 +1168,22 @@ detect_playbook_dir() {
       # ファイル数判定に playbook.tar.gz が混入し、ルート判定を誤る。
       extract_dir="$tmp_root/extract"
       mkdir -p "$extract_dir"
-      curl -fsSL "$source_hint" -o "$archive_file"
-      tar -xzf "$archive_file" -C "$extract_dir"
+      # curl / tar の失敗は明示的に検査する。この関数は
+      # PLAYBOOK_DIR="$(detect_playbook_dir ...)" の代入コマンド置換で呼ばれ、
+      # 代入 RHS のコマンド置換では set -e が発火しない（bash の既知の挙動）。
+      # 検査を省くと 404 等の取得失敗でも後続が進み、ファイルを書いてから遅れて
+      # 失敗する（README のアトミック配置の約束が破れる）。
+      if ! curl -fsSL "$source_hint" -o "$archive_file"; then
+        echo "error: failed to download playbook archive: $source_hint" >&2
+        if [[ -n "$PLAYBOOK_VERSION" ]]; then
+          echo "       指定した --playbook-version '$PLAYBOOK_VERSION' のタグが存在するか確認してください（'v' 接頭辞が要る場合があります。例: v0.1.1）。" >&2
+        fi
+        exit 1
+      fi
+      if ! tar -xzf "$archive_file" -C "$extract_dir" 2>/dev/null; then
+        echo "error: failed to extract playbook archive (not a valid .tar.gz?): $source_hint" >&2
+        exit 1
+      fi
       found="$(resolve_playbook_root "$extract_dir")"
       [[ -n "$found" ]] || {
         echo "error: no playbook directory found in archive: $source_hint" >&2
@@ -1262,9 +1276,21 @@ resolve_playbook_source_or_die() {
     trap 'rm -rf "$PLAYBOOK_TMP_ROOT"' EXIT
   fi
 
-  PLAYBOOK_DIR="$(detect_playbook_dir "$PLAYBOOK_FROM" "$PLAYBOOK_TMP_ROOT")"
+  # detect_playbook_dir の失敗（curl/tar 失敗・ソース不在）を、書き込み前に確実に
+  # 捕捉する。`if ! var="$(...)"` は代入 RHS のコマンド置換の終了コードを見るため、
+  # set -e が発火しない代入でも取りこぼさない。具体的な理由は detect 側が stderr へ出す。
+  if ! PLAYBOOK_DIR="$(detect_playbook_dir "$PLAYBOOK_FROM" "$PLAYBOOK_TMP_ROOT")"; then
+    exit 1
+  fi
   if [[ -z "$PLAYBOOK_DIR" ]]; then
-    echo "error: playbook source not found. specify --playbook-from <path|url>." >&2
+    echo "error: playbook source not found. specify --playbook-from <path|url> or --playbook-version <tag>." >&2
+    exit 1
+  fi
+  # 取得できても規範（*.md）が 0 件なら、ファイルを書く前に失敗させる。
+  # install_playbook_rules も同種の検査を持つが、そちらは書き込み後に走るため、
+  # アトミック配置の約束（取得元が解決できなければ 1 つも書かない）をここで守る。
+  if ! find "$PLAYBOOK_DIR" -type f -name '*.md' 2>/dev/null | grep -q .; then
+    echo "error: no rule files found in playbook source: ${PLAYBOOK_FROM:-<adjacent checkout>}" >&2
     exit 1
   fi
 }
