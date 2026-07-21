@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.4.0`
+- `v0.4.1`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.4.0
+TAG=v0.4.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -50,8 +50,10 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 
 ```bash
 bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
-  --with-playbook --playbook-from https://github.com/ojos/ai-playbook/archive/refs/tags/v0.1.1.tar.gz
+  --playbook-version v0.1.1
 ```
+
+`--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -82,12 +84,18 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 - `--base-image <image>`（自動判定結果を上書きして明示指定）
 - `--github-profiles <csv>`（GitHub マルチアカウント用 profile 名。既定: `primary,secondary`）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
-- `--playbook-from <path|url>`（ルールの取得元。ディレクトリまたはアーカイブ URL）
+- `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他）
+- `--playbook-from <path|url>`（ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
 - `--playbook-conflict-policy <skip|overwrite|prompt>`（既存ファイルがある場合の扱い。既定: `skip`）
 
 ### AI 共通ルールの配置
 
-`--with-playbook` を指定すると、共通ルールと入口ファイルを生成先へ配置します。**既定では配置しません**（オプトイン）。
+共通ルールと入口ファイルを生成先へ配置します。**既定では配置しません**（オプトイン）。次のいずれかで配置を有効化します。
+
+- `--playbook-version <tag>` または `--playbook-from <path|url>` で**ソースを指定する**（指定した時点で配置意図が明確なため、`--with-playbook` は不要）
+- `--with-playbook`（ソースを指定せず、**隣接する ai-playbook チェックアウト**から入れたい場合の明示スイッチ）
+
+`--without-playbook` を指定すると、ソース指定があっても配置しません（明示オプトアウトが最優先）。
 
 配置されるもの:
 
@@ -99,10 +107,11 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 
 取得元は次の順で解決します。
 
-1. `--playbook-from` に指定したディレクトリまたはアーカイブ URL
-2. 隣接する ai-playbook チェックアウト（`bootstrap.sh` から見て `../../.ai-playbook` または `../../../.ai-playbook`）
+1. `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball へ展開）
+2. `--playbook-from` に指定したディレクトリまたはアーカイブ URL
+3. 隣接する ai-playbook チェックアウト（`bootstrap.sh` から見て `../../.ai-playbook` または `../../../.ai-playbook`）
 
-`curl` で `bootstrap.sh` を単体取得して実行する場合は隣接チェックアウトが存在しないため、`--playbook-from` の指定が必要です。
+`curl` で `bootstrap.sh` を単体取得して実行する場合は隣接チェックアウトが存在しないため、`--playbook-version` または `--playbook-from` の指定が必要です。
 取得元が解決できない場合は、**ファイルを 1 つも書き込まずに終了します**。
 
 ### AI CLI 導入挙動
@@ -115,7 +124,7 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 
 AI エージェントの反復（実装 → 検証 → 修正 → …）を、**機械が緑判定できる決定的な信号**の上で収束させるための実行体を生成します。装備の選択によらず常に生成し、**外部パッケージの導入を前提にせず単体で動作**します。
 
-> この節は DCB 環境での**操作手順**（各スクリプトをどう回すか）を扱います。ループコーディングという**ワークフロー自体の考え方**（従来との違い・収束規律・受け入れ検証の機械ゲート化）は、規範パッケージ ai-playbook の解説ガイド `loop-coding-guide.md`（規範の正本は `loop-workflow.md`）を参照してください。`--with-playbook` を指定すると、これらの規範も生成先へ配置されます。
+> この節は DCB 環境での**操作手順**（各スクリプトをどう回すか）を扱います。ループコーディングという**ワークフロー自体の考え方**（従来との違い・収束規律・受け入れ検証の機械ゲート化）は、規範パッケージ ai-playbook の解説ガイド `loop-coding-guide.md`（規範の正本は `loop-workflow.md`）を参照してください。規範を配置する（`--with-playbook` / `--playbook-version` / `--playbook-from` のいずれか）と、これらの規範も生成先へ配置されます。
 
 | スクリプト | 役割 |
 |---|---|
@@ -126,7 +135,7 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 - `acceptance.sh` は生成時に選択言語の既定コマンド（`node`→`npm test`、`go`→`go test ./...`、`python`→`python -m pytest`、`php`→`composer test`、`rust`→`cargo test`）を置きます。プロジェクトの実態に合わせて編集してください。受け入れ条件が検証可能であるほど、反復が収束しやすくなります。
 - `verify.sh` の受け入れ定義は `VERIFY_ACCEPTANCE` 環境変数で差し替えできます。
 - `loop-gate.sh` の第二意見は、`scripts/gemini-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
-- これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。`--with-playbook` 併用時は、第二意見の `gemini-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
+- これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。規範を配置した場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、第二意見の `gemini-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
 
 ```bash
 # 反復のたびに接地信号を確認する
@@ -190,9 +199,13 @@ bash scripts/loop-gate.sh
 # AI 共通ルールも一緒に配置する場合（隣接する ai-playbook チェックアウトから取得）
 ./bootstrap.sh --project-name myapp --languages node --with-playbook
 
-# ルールの取得元を明示する場合（単体取得して実行する場合はこちらが必要）
+# ルールの版を指定する場合（単体取得して実行する場合はこちらが必要。既定ソース ojos/ai-playbook）
+# ソース指定があれば --with-playbook は不要
+./bootstrap.sh --project-name myapp --languages node --playbook-version <tag>
+
+# 別 owner・任意 URL・ローカルから取得する場合（--playbook-version とは排他）
 ./bootstrap.sh --project-name myapp --languages node \
-  --with-playbook --playbook-from https://github.com/<owner>/ai-playbook/archive/refs/tags/<tag>.tar.gz
+  --playbook-from https://github.com/<owner>/ai-playbook/archive/refs/tags/<tag>.tar.gz
 
 # 既存プロジェクトへルールを追加し、既存ファイルは上書きしたい場合
 ./bootstrap.sh --project-name myapp --languages node \
@@ -275,7 +288,7 @@ bash scripts/github-account-switch.sh use <profile>
 - `.gitignore` の managed セクション（言語構成に応じて自動更新）
 - README のセットアップ節更新
 
-`--with-playbook` 指定時は、加えて次を出力します。
+規範を配置する場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、加えて次を出力します。
 
 - `.ai-playbook/**`（AI 共通ルール一式）
 - `.github/project-ai-rules.md`

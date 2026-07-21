@@ -32,6 +32,7 @@ GITIGNORE_REPO_RAW_BASE="https://raw.githubusercontent.com/github/gitignore/main
 
 WITH_PLAYBOOK=""
 PLAYBOOK_FROM=""
+PLAYBOOK_VERSION=""
 PLAYBOOK_CONFLICT_POLICY="skip"
 PLAYBOOK_REL_ROOT=".ai-playbook"
 PLAYBOOK_DIR=""
@@ -62,6 +63,8 @@ options:
   --with-playbook             Install shared AI rules (ai-playbook) and entry files
   --without-playbook          Do not install shared AI rules
   --playbook-from <path|url>  Playbook source (directory path or archive URL)
+  --playbook-version <tag>    Shorthand for the ojos/ai-playbook tag tarball
+                              (mutually exclusive with --playbook-from)
   --playbook-conflict-policy <skip|overwrite|prompt>
                               Policy when a rules file already exists (default: skip)
   -h, --help                  Show help
@@ -100,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --with-playbook)    WITH_PLAYBOOK="true"; shift ;;
     --without-playbook) WITH_PLAYBOOK="false"; shift ;;
     --playbook-from)    PLAYBOOK_FROM="$2"; shift 2 ;;
+    --playbook-version) PLAYBOOK_VERSION="$2"; shift 2 ;;
     --playbook-conflict-policy) PLAYBOOK_CONFLICT_POLICY="$2"; shift 2 ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage; exit 1 ;;
@@ -140,6 +144,21 @@ case "$PLAYBOOK_CONFLICT_POLICY" in
   skip|overwrite|prompt) ;;
   *) echo "error: --playbook-conflict-policy must be one of: skip, overwrite, prompt" >&2; exit 1 ;;
 esac
+
+# --playbook-version は既定ソース ojos/ai-playbook のタグ tarball への糖衣。
+# 版だけで指定でき、長い archive URL を打たずに済む。任意ソース（別 owner・
+# ディレクトリ・任意 URL）は従来どおり --playbook-from を使う。両者は排他:
+# 同時指定は「どちらのソースか」が曖昧になるため、片方優先ではなくエラーにする。
+if [[ -n "$PLAYBOOK_VERSION" ]]; then
+  if [[ -n "$PLAYBOOK_FROM" ]]; then
+    echo "error: --playbook-version と --playbook-from は同時に指定できません" >&2
+    exit 1
+  fi
+  PLAYBOOK_FROM="https://github.com/ojos/ai-playbook/archive/refs/tags/${PLAYBOOK_VERSION}.tar.gz"
+  # 展開結果を明示する（テスト・利用者確認のため。ネットワーク取得の前に出す）。
+  echo "[bootstrap] playbook-version=$PLAYBOOK_VERSION -> $PLAYBOOK_FROM"
+fi
+
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$PWD/$PROJECT_NAME"
 
 # Docker サーバーのプラットフォームに基づいてベースイメージを選択する（安全なフォールバック付き）
@@ -1089,7 +1108,13 @@ file_mode_octal() {
 }
 
 should_install_playbook() {
-  [[ "$WITH_PLAYBOOK" == "true" ]]
+  # --with-playbook は明示 opt-in。加えて、--playbook-from / --playbook-version で
+  # ソースを指定した時点で配置意図は明確なため、--with-playbook 省略でも配置する
+  # （--playbook-version は PLAYBOOK_FROM へ展開済み）。ただし --without-playbook は
+  # 明示 opt-out として最優先で尊重する。
+  [[ "$WITH_PLAYBOOK" == "false" ]] && return 1
+  [[ "$WITH_PLAYBOOK" == "true" ]] && return 0
+  [[ -n "$PLAYBOOK_FROM" ]]
 }
 
 # 規範ルートを、規範パッケージの内部ファイル名に依存せず構造だけで決める。
