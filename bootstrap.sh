@@ -1381,6 +1381,31 @@ install_playbook_rules() {
   if [[ -f "$OUTPUT_DIR/scripts/gemini-review.sh" ]]; then
     chmod +x "$OUTPUT_DIR/scripts/gemini-review.sh"
   fi
+
+  # 導入した規範のソースを on-disk に記録する。これがないと、生成後の環境から
+  # 「どのバージョンの playbook を取り込んだか」を証跡で照合できない
+  # （自己診断の F-7）。--playbook-version 指定時はそのタグを、ローカル/URL を
+  # 直接指定した場合は解決したソースを残す。
+  write_playbook_version_file
+}
+
+# .ai-playbook/VERSION を生成する。version はタグが分かる場合のみ、source は
+# 常に解決済みソースを記録する。機械可読な key=value 形式にする。
+write_playbook_version_file() {
+  local dest="$OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION" tmp
+  local ver="${PLAYBOOK_VERSION:-(unspecified)}"
+  tmp="$(mktemp)"
+  {
+    echo "# devcontainer-bootstrap が記録した ai-playbook のソース情報。"
+    echo "# version は --playbook-version 指定時のタグ。未指定なら (unspecified)。"
+    echo "version=$ver"
+    echo "source=${PLAYBOOK_FROM:-<adjacent checkout>}"
+  } > "$tmp"
+  # 規範ファイルと同じ衝突ポリシー（skip/overwrite/prompt）に従わせる。既存を skip
+  # した規範を更新していないのに VERSION だけ無条件上書きすると、記録が実際の
+  # on-disk 規範とずれて出所が嘘になる。専用分岐を持たず既存機構を再利用する。
+  apply_file_with_policy "$tmp" "$dest"
+  rm -f "$tmp"
 }
 
 write_file() {
@@ -1449,6 +1474,7 @@ EOF
     echo "plan: $OUTPUT_DIR/CLAUDE.md"
     echo "plan: $OUTPUT_DIR/.github/copilot-instructions.md"
     echo "plan: $OUTPUT_DIR/scripts/gemini-review.sh"
+    echo "plan: $OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION"
   fi
   exit 0
 fi

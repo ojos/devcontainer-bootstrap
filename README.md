@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.5.0`
+- `v0.5.1`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.5.0
+TAG=v0.5.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -50,7 +50,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 
 ```bash
 bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
-  --playbook-version v0.1.1
+  --playbook-version v0.1.2
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -84,7 +84,7 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 - `--base-image <image>`（自動判定結果を上書きして明示指定）
 - `--github-profiles <csv>`（GitHub マルチアカウント用 profile 名。既定: `primary,secondary`）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
-- `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.1`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
+- `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.2`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
 - `--playbook-from <path|url>`（ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
 - `--playbook-conflict-policy <skip|overwrite|prompt>`（既存ファイルがある場合の扱い。既定: `skip`）
 
