@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.4.2`
+- `v0.5.0`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.4.2
+TAG=v0.5.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -248,8 +248,8 @@ bash scripts/github-account-switch.sh use <profile>
     - `<PROFILE>` 切替時に `git config user.name`（コミット author/committer 名）へ設定する文字列です。
   - `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
     - `<PROFILE>` 切替時に `git config user.email`（コミット author/committer メール）へ設定する文字列です。
-  - `CLAUDE_CODE_OAUTH_TOKEN`
-    - Claude CLI の認証に使うトークンです。
+  - `CLAUDE_CODE_OAUTH_TOKEN`（任意・既定では注入しません）
+    - Claude Code は既定では `/login` で認証します（OAuth トークンは権限スコープが限定されるため）。CI 等でトークン注入が必要な場合のみ、下記「Claude の認証」の手順で手動配線します。
   - `GEMINI_API_KEY`
     - Gemini CLI の API 認証に使うキーです。
 - 生成される devcontainer 設定では `${localEnv:...}` 参照のみを使用する。
@@ -265,12 +265,27 @@ bash scripts/github-account-switch.sh use <profile>
 
 | エンジン | コマンド | 認証環境変数 | 導入経路 | 未導入・未認証時の挙動 |
 |----------|----------|--------------|-------------------|------------------------|
-| Claude | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | トークン/認証不足時はログインプロンプト表示またはエラー終了 |
+| Claude | `claude` | `/login`（既定。トークン注入は任意） | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は `/login` プロンプト表示（トークン運用は下記「Claude の認証」参照） |
 | Gemini | `gemini` | `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
 | Copilot | `copilot` | GitHub 認証（`gh` / OAuth） | `--with-copilot` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時はログインプロンプト表示またはエラー終了 |
 | Codex  | `codex` | `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
 
 各 AI ツールを `--with-<ai>` で選ぶと、CLI に加えて対応 VS Code 拡張が入り、設定ディレクトリ（`~/.claude` / `~/.gemini` / `~/.copilot`）が compose の named volume でリビルド間に保持されます。
+
+### Claude の認証（`/login` 既定・トークン注入は任意）
+
+`--with-claude` では **`CLAUDE_CODE_OAUTH_TOKEN` を `remoteEnv` に注入しません**。OAuth トークンは権限スコープが限定され、フルスペックの操作が許可されないためです。代わりにコンテナ内で作業前に `/login` して認証します。`~/.claude` は named volume で永続するため、一度 `/login` すればリビルドをまたいで有効です。
+
+CI など非対話環境でトークン運用が必要な場合のみ、生成された `.devcontainer/devcontainer.json` の `remoteEnv` に次の行を手動で追加してください（ローカル環境変数 `CLAUDE_CODE_OAUTH_TOKEN` を参照します。別名を使う場合は右辺を差し替え）。
+
+```jsonc
+"remoteEnv": {
+  // ...既存のエントリ...
+  "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}"
+}
+```
+
+トークンが `remoteEnv` に存在すると Claude Code はそれを優先して使うため、`/login` のフルスペック認証へ戻す場合はこの行を削除します。
 
 ## 検証ルール
 1. `languages` には少なくとも 1 つの対応言語（node|go|python|php）を含めること
