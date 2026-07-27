@@ -32,12 +32,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.6.0`
+- `v0.7.0`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.6.0
+TAG=v0.7.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -77,12 +77,12 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 | `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
 
 - **Terraform は cloud 随伴**: `--with-aws` または `--with-gcp` のいずれかを指定すると、Terraform feature + `hashicorp.terraform` 拡張が **1 回だけ** 同梱されます（両指定でも 1 回、cloud 無指定なら入りません）。
-- **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。認証トークンは従来どおり `remoteEnv` で受け渡します。
+- **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
+- **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します（下記「資格情報の扱い」）。
 
 ### オプション入力
 - `--output-dir <path>`（省略時: カレントディレクトリ直下に `<project-name>/` を作成して展開）
 - `--base-image <image>`（自動判定結果を上書きして明示指定）
-- `--github-profiles <csv>`（GitHub マルチアカウント用 profile 名。既定: `primary,secondary`）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
 - `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.3`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
 - `--playbook-from <path|url>`（ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
@@ -151,11 +151,13 @@ bash scripts/loop-gate.sh
 対応ランタイム（任意の組み合わせ）:
 - `node`（Node.js / JavaScript / TypeScript）
 - `go`（Go）
-- `python`（Python 3）
+- `python`（Python 3。パッケージ/仮想環境マネージャの [uv](https://github.com/astral-sh/uv) を同梱）
 - `php`（PHP）
 - `rust`（Rust）
 
 選択した言語は devcontainer feature（`ghcr.io/devcontainers/features/<lang>:1`）として導入され、`scripts/post-rebuild-check.sh` の検査対象にもなります。`rust` は feature 名（`rust`）と実行コマンド（`cargo`）が異なるため、検査・診断は `cargo` の有無で判定します。
+
+`python` を選ぶと、uv も併せて導入されます。uv には公式の devcontainer feature が無いため、python feature の `toolsToInstall`（pipx 導入のツール列）へ `uv` を追記する形で同梱します。既定の Lint/テストツール群は維持したまま `uv` を足すため、既存の導入内容は変わりません。`python` を選ばない場合、uv は導入されません。
 
 ### VS Code language server 拡張
 
@@ -195,9 +197,6 @@ bash scripts/loop-gate.sh
 # 追加テンプレートを明示指定したい場合（暗黙ターゲットに追加で合成）
 ./bootstrap.sh --project-name myapp --languages node --gitignore-targets macOS,Node,VisualStudioCode
 
-# GitHub マルチアカウント profile を指定する場合
-./bootstrap.sh --project-name myapp --languages node --github-profiles work,personal
-
 # AI 共通ルールも一緒に配置する場合（隣接する ai-playbook チェックアウトから取得）
 ./bootstrap.sh --project-name myapp --languages node --with-playbook
 
@@ -214,11 +213,12 @@ bash scripts/loop-gate.sh
   --output-dir /path/to/existing-workspace --with-playbook --playbook-conflict-policy overwrite
 ```
 
-生成後の切替例:
+生成後、コンテナ内で 1 度だけ認証します（状態は named volume に残り、リビルドを跨ぎます）:
 
 ```bash
-bash scripts/github-account-switch.sh list
-bash scripts/github-account-switch.sh use <profile>
+gh auth login                 # GitHub（gh-storage）
+aws sso login                 # --with-aws のとき（aws-storage）
+gcloud auth login             # --with-gcp のとき（gcloud-storage）
 ```
 
 ## Feature フラグ
@@ -227,7 +227,7 @@ bash scripts/github-account-switch.sh use <profile>
 - `common-utils` / `docker-outside-of-docker`（buildx + compose-switch を標準装備）/ `ripgrep` / `tmux` / `github-cli`
 
 条件付き feature:
-- `node` / `go` / `python` / `php` / `rust`（`--languages` に含む場合）
+- `node` / `go` / `python` / `php` / `rust`（`--languages` に含む場合。`python` は uv を `toolsToInstall` に同梱）
 - `aws-cli`（`--with-aws` の場合）
 - `google-cloud-cli`（`--with-gcp` の場合、外部 `dhoeric` feature を利用）
 - `terraform`（`--with-aws` または `--with-gcp` の場合、1 回）
@@ -238,32 +238,45 @@ bash scripts/github-account-switch.sh use <profile>
 - `--with-aws`: `amazonwebservices.aws-toolkit-vscode`。`--with-gcp`: `GoogleCloudTools.cloudcode`。いずれかの cloud 指定で `hashicorp.terraform`。
 - `--with-claude`: `anthropic.claude-code`。`--with-gemini`: `Google.gemini-cli-vscode-ide-companion`。`--with-copilot`: `github.copilot` / `github.copilot-chat`。
 
-## シークレット方針
-この方針は、トークンや API キーの平文漏えいを防ぎつつ、AIコーディング時の認証切替を安全に行うためのルールです。
+## 資格情報の扱い
 
-- 受け付けるのは環境変数名のみ（秘密値そのものは不可）
-  - `GITHUB_TOKEN_<PROFILE>`（例: `GITHUB_TOKEN_WORK`, `GITHUB_TOKEN_PERSONAL`）
-    - `<PROFILE>` 切替時に `gh` 認証へ使うトークン値です。
-  - `GITHUB_OWNER_<PROFILE>`（任意。トークン発行者と操作対象 owner が異なる場合）
-    - `<PROFILE>` 切替時に `github.owner` として扱う owner（個人名/組織名）です。
-  - `GIT_AUTHOR_NAME_<PROFILE>`（任意）
-    - `<PROFILE>` 切替時に `git config user.name`（コミット author/committer 名）へ設定する文字列です。
-  - `GIT_AUTHOR_EMAIL_<PROFILE>`（任意）
-    - `<PROFILE>` 切替時に `git config user.email`（コミット author/committer メール）へ設定する文字列です。
-  - `CLAUDE_CODE_OAUTH_TOKEN`（任意・既定では注入しません）
-    - Claude Code は既定では `/login` で認証します（OAuth トークンは権限スコープが限定されるため）。CI 等でトークン注入が必要な場合のみ、下記「Claude の認証」の手順で手動配線します。
-  - `GEMINI_API_KEY`
-    - Gemini CLI の API 認証に使うキーです。
-- 生成される devcontainer 設定では `${localEnv:...}` 参照のみを使用する。
-- `GH_TOKEN` の常時注入は、マルチアカウント切替を阻害するため推奨しない。
+**ホスト OS の資格情報をコンテナへ注入しません。** 生成される `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。
 
-補足:
-- `GITHUB_TOKEN_<PROFILE>` は `scripts/github-account-switch.sh` で profile ごとに切替利用する前提です。
-- `GITHUB_OWNER_<PROFILE>` は、トークン発行者と操作対象 owner（個人/組織）が異なるときに使います。
+この方針は事故の反省から来ています。`${localEnv:...}` でトークンを注入する構造では、コンテナ内のツールが「どの資格情報を使っているか」を利用者が意識できません。ホスト側と `.env` に別の値が入っていると、`.env` を読まない文脈でだけ黙ってホスト側が使われ、別アカウントの PAT が `git credential fill` から警告なく返る、別アカウントの API キーでクォータと課金が消費される、といった形で表面化します。
+
+代わりに、次の 2 経路に限定します。
+
+| 種類 | 供給元 | 永続化 |
+|---|---|---|
+| 認証（GitHub / cloud / AI CLI） | **コンテナ内でのログイン**（`gh auth login` / `aws sso login` / `gcloud auth login` / `claude /login`） | named volume（`gh-storage` / `aws-storage` / `gcloud-storage` / `<ai>-storage`）。リビルドを跨いで残る |
+| プロジェクト固有値（API キー・コミット identity） | **プロジェクトの `.env`**（雛形: 生成される `.env.example`） | ファイルとして目に見える。`scripts/load-project-env.sh` が読む |
+
+`.env.example` が持つキー:
+
+- `GEMINI_API_KEY` — 第二意見レビュー（`scripts/gemini-review.sh`）が読みます。
+- `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` — コミット identity。`scripts/setup-git-identity.sh` が local へ適用します。
+  - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` という名前を使わないのは、それが **git 自身の読む環境変数**だからです。環境に置くと local 設定を持たないリポジトリでも identity が解決でき、`user.useConfigOnly` による保護（未設定なら commit を止める）が無効になります。
+
+`GH_TOKEN` / `GITHUB_TOKEN` を恒久的に設定しないでください。gh に登録済みのアカウントより優先され、コンテナ内のログイン状態が無視されます。
+
+### ホスト側 VS Code に必要な設定
+
+コンテナ側だけでは塞ぎきれない経路が 1 つあります。**ホスト側の VS Code 設定で塞いでください。**
+
+```jsonc
+// settings.json（ホスト側）
+{
+  "dev.containers.dockerCredentialHelper": false
+}
+```
+
+VS Code は接続のたびにコンテナの `~/.docker/config.json` へ `credsStore` を書き込みます。これが残っていると、コンテナ内の `docker login` / `docker pull` がホスト OS のキーチェーンへ問い合わせ、ホスト側の資格情報を黙って使います。
+
+生成される `scripts/on-attach.sh` は接続ごとにこの `credsStore` / `credHelpers` を除去しますが、**これは多層防御の 1 枚にすぎません**。VS Code の書き込みと `postAttachCommand` の実行順序によっては打ち消しが間に合わないことを実測で確認しています。確実に塞ぐのはホスト側の設定です。
 
 ### プロジェクト `.env` の優先読み込み
 
-`remoteEnv` はホスト OS の環境変数（`GEMINI_API_KEY` / `GITHUB_TOKEN_<PROFILE>` 等）をコンテナへ注入します。プロジェクトごとに別のキーを使いたい場合に備え、`scripts/load-project-env.sh` がプロジェクトルートの `.env` を**ホスト由来の値より後勝ちで上書き**します。
+`scripts/load-project-env.sh` がプロジェクトルートの `.env` を読み、**既存の環境変数より後勝ちで上書き**します。`.env` が唯一の供給元であることを保つため、値が既に環境にある場合も読み飛ばしません。
 
 - **`source` しません。** `KEY=VALUE` のみを安全にパースして `export` するため、`.env` の内容は任意コードとして実行されません（`FOO=$(...)` や単独の `echo` 行があっても実行されない）。壊れた `.env` がシェルの初期化ごと落とす事故を防ぎます。
 - **CWD 非依存。** スクリプト自身の位置（`scripts/` の 1 階層上）から `.env` を解決するため、サブディレクトリから呼んでも正しく読み込みます。`PROJECT_ENV_FILE` で対象ファイルを明示指定できます。
@@ -272,16 +285,17 @@ bash scripts/github-account-switch.sh use <profile>
 
 ## Git identity ガード
 
-`github-account-switch.sh` で identity を切り替えても、**local 設定を持たないリポジトリは git が黙って global へフォールバックしてコミットを通す**ため、切替前や新規リポジトリで別アカウント名義のコミットが `main` に混入する事故が起き得ます。この穴を、適用・検証・CI の 3 層で塞ぎます。
+**local 設定を持たないリポジトリは、git が黙って global へフォールバックしてコミットを通します。** 新規リポジトリを作った直後がまさにその状態で、別アカウント名義のコミットが `main` に混入する事故が起き得ます。この穴を、適用・検証・CI の 3 層で塞ぎます。
 
 - `scripts/setup-git-identity.sh`（適用。`scripts/on-attach.sh` が毎接続で再適用）
   - global の `user.name` / `user.email` を削除し、`user.useConfigOnly=true` を立てます。これにより **local 設定を持たないリポジトリでは `git commit` が exit 128 で停止**します（黙って別名義になるより止まって気づく）。
-  - 当リポジトリの local へ、先頭 profile（`--github-profiles` の 1 つ目。既定 `primary`）の `GIT_AUTHOR_NAME_<PROFILE>` / `GIT_AUTHOR_EMAIL_<PROFILE>` を適用します。未設定なら local 適用はスキップし WARN に留めます。
-  - 冪等です（2 回実行しても git config は不変）。`bash scripts/setup-git-identity.sh --check` で状態を検証できます。`github-account-switch.sh` が設定する `credential.helper` は壊しません。認証切替は引き続き `github-account-switch.sh` の役割で、このスクリプトは identity の git config 設定だけに閉じます（`gh` を呼ばずオフラインでも動く）。
+  - 当リポジトリの local へ、`.env` の `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` を適用します。未設定なら local 適用はスキップし WARN に留めます。
+  - global の `credential.helper` を「空 → `!gh auth git-credential`」の順に固定します。git はヘルパーを定義順に試し、**空文字は一覧をリセットする**ため、この順序だと `/etc/gitconfig` 側やエディタが注入したヘルパーが応答しなくなります。資格情報の供給元がコンテナ内の `gh` だけに絞られます。
+  - 冪等です（2 回実行しても git config は不変）。`bash scripts/setup-git-identity.sh --check` で状態を検証できます。`--check` は identity に加えて、上記の固定順序と「local 設定を持たない一時リポジトリでの実効ヘルパーが `gh` のみであること」も検査します。`gh` を呼ばないためオフラインでも動きます。
   - `on-attach.sh` からの呼び出しは、失敗しても **on-attach 全体を落としません**（WARN と `--check` の案内に留める）。
 - `scripts/verify-commit-identity.sh`（検証。CI と手元で共用）
   - コミット履歴の author / committer / Co-Authored-By を **email のみ**で判定します（name は表記揺れで判定に使わない）。許可外の author email を含む範囲で exit 1。
-  - 許可する author email は、環境変数 `ALLOWED_AUTHOR_EMAILS`（カンマ/空白区切り）を最優先し、無ければ先頭 profile の `GIT_AUTHOR_EMAIL_<PROFILE>` にフォールバックします。どちらでも解決できなければ fail-closed（exit 1）で止まります。
+  - 許可する author email は、環境変数 `ALLOWED_AUTHOR_EMAILS`（カンマ/空白区切り）を最優先し、無ければ `.env` の `GIT_IDENTITY_EMAIL` にフォールバックします。どちらでも解決できなければ fail-closed（exit 1）で止まります。
   - committer には `noreply@github.com`（GitHub の squash merge / web UI）、Co-Authored-By には加えて `noreply@anthropic.com`（AI コーディング規約の trailer）を許可します。
   - 使い方: 既定は `origin/main..HEAD`、範囲指定可、`--full` で HEAD の全履歴（`git rev-list --all` にはしない）。
 - `.github/workflows/identity-guard.yml`（CI）
@@ -294,7 +308,7 @@ CI に固有の email を焼き込まないため、**利用側リポジトリ�
 1. GitHub リポジトリの **Settings → Secrets and variables → Actions → Variables** を開く。
 2. `ALLOWED_AUTHOR_EMAILS` という **Repository variable** を作成し、許可する author email を設定する（複数はカンマまたは空白区切り。例: `you@example.com`）。
 
-未設定のまま CI が走ると、`verify-commit-identity.sh` は許可 email を解決できず fail-closed で失敗します（検査を素通りさせないため）。コンテナ内・手元では `GIT_AUTHOR_EMAIL_<先頭 profile>`（`remoteEnv` 経由）が自動でフォールバックとして使われるため、通常は追加設定なしで `bash scripts/verify-commit-identity.sh` を実行できます。
+未設定のまま CI が走ると、`verify-commit-identity.sh` は許可 email を解決できず fail-closed で失敗します（検査を素通りさせないため）。コンテナ内・手元では `.env` の `GIT_IDENTITY_EMAIL` が自動でフォールバックとして使われるため、通常は追加設定なしで `bash scripts/verify-commit-identity.sh` を実行できます。
 
 ## AI エンジン導入マトリックス
 
@@ -303,40 +317,32 @@ CI に固有の email を焼き込まないため、**利用側リポジトリ�
 | エンジン | コマンド | 認証環境変数 | 導入経路 | 未導入・未認証時の挙動 |
 |----------|----------|--------------|-------------------|------------------------|
 | Claude | `claude` | `/login`（既定。トークン注入は任意） | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は `/login` プロンプト表示（トークン運用は下記「Claude の認証」参照） |
-| Gemini | `gemini` | `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
+| Gemini | `gemini` | `.env` の `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
 | Copilot | `copilot` | GitHub 認証（`gh` / OAuth） | `--with-copilot` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時はログインプロンプト表示またはエラー終了 |
-| Codex  | `codex` | `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
+| Codex  | `codex` | `.env` の `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
 
 各 AI ツールを `--with-<ai>` で選ぶと、CLI に加えて対応 VS Code 拡張が入り、設定ディレクトリ（`~/.claude` / `~/.gemini` / `~/.copilot`）が compose の named volume でリビルド間に保持されます。
 
-### Claude の認証（`/login` 既定・トークン注入は任意）
+### Claude の認証（コンテナ内で `/login`）
 
-`--with-claude` では **`CLAUDE_CODE_OAUTH_TOKEN` を `remoteEnv` に注入しません**。OAuth トークンは権限スコープが限定され、フルスペックの操作が許可されないためです。代わりにコンテナ内で作業前に `/login` して認証します。`~/.claude` は named volume で永続するため、一度 `/login` すればリビルドをまたいで有効です。
+`--with-claude` では、コンテナ内で作業前に `/login` して認証します。`~/.claude` は named volume で永続するため、一度 `/login` すればリビルドをまたいで有効です。
 
-CI など非対話環境でトークン運用が必要な場合のみ、生成された `.devcontainer/devcontainer.json` の `remoteEnv` に次の行を手動で追加してください（ローカル環境変数 `CLAUDE_CODE_OAUTH_TOKEN` を参照します。別名を使う場合は右辺を差し替え）。
-
-```jsonc
-"remoteEnv": {
-  // ...既存のエントリ...
-  "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}"
-}
-```
-
-トークンが `remoteEnv` に存在すると Claude Code はそれを優先して使うため、`/login` のフルスペック認証へ戻す場合はこの行を削除します。
+OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する経路は**用意しません**。権限スコープが限定されてフルスペックの操作が許可されないうえ、opt-in で穴を残せる構造そのものが「黙って別アカウントの資格情報が使われる」事故を生んだ形だからです。
 
 ## 検証ルール
 1. `languages` には少なくとも 1 つの対応言語（node|go|python|php）を含めること
 2. 指定した各言語に対応する feature を devcontainer.json に追加すること
-3. `--github-profiles` で指定した各 profile に対して `GITHUB_TOKEN_<PROFILE>` などの `remoteEnv` を生成すること
+3. `remoteEnv` は `LOCAL_WORKSPACE_FOLDER` のみを持つこと（ホスト資格情報の注入経路を作らない）
 4. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
 
 ## 期待される出力
 - `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `compose.yaml` の `app` サービスを参照）
-- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。AI CLI 用の永続 volume は `--with-<ai>` 選択時に随伴して compose 側へ配置）
-- `scripts/github-account-switch.sh`
+- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置）
+- `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY` / `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
+- `scripts/fix-mount-owner.sh`（永続 volume のマウント先を remoteUser 所有へ戻す。`postCreateCommand` の先頭で実行）
 - `scripts/load-project-env.sh`（プロジェクト `.env` の優先読み込み。下記参照）
 - `scripts/on-attach.sh`
-- `scripts/post-rebuild-check.sh`
+- `scripts/post-rebuild-check.sh`（永続 volume の実マウント検査を含む）
 - `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh`（git identity ガード。下記参照）
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）

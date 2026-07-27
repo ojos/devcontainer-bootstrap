@@ -58,7 +58,9 @@ require_exec() {
 
 section "Static structure"
 require_file ".devcontainer/devcontainer.json"
+require_file ".env.example"
 require_file "scripts/on-attach.sh"
+require_file "scripts/fix-mount-owner.sh"
 require_file "scripts/post-rebuild-check.sh"
 require_file "scripts/verify.sh"
 require_file "scripts/acceptance.sh"
@@ -71,11 +73,14 @@ if [[ -f "$TARGET_DIR/.devcontainer/devcontainer.json" ]]; then
     ng "devcontainer.json invalid JSON"
   fi
 
+  # 資格情報のホスト注入は廃止した。remoteEnv に ${localEnv:...} が現れることは、
+  # ホスト OS の環境変数をコンテナへ流し込む経路が復活したことを意味する。
+  # 作業ディレクトリの受け渡し（localWorkspaceFolder）は localEnv ではないため対象外。
   # shellcheck disable=SC2016
   if grep -q '\${localEnv:' "$TARGET_DIR/.devcontainer/devcontainer.json"; then
-    ok "secrets policy: localEnv reference found"
+    ng "secrets policy: localEnv reference found (ホスト資格情報の注入経路)"
   else
-    warn "secrets policy: localEnv reference not found"
+    ok "secrets policy: no localEnv reference"
   fi
 
   # compose 配線の検査。dockerComposeFile が無い旧 image ベース構成は検査しない（後方互換）。
@@ -107,6 +112,15 @@ if [[ -f "$TARGET_DIR/scripts/on-attach.sh" ]]; then
     ng "on-attach.sh syntax NG"
   fi
   require_exec "scripts/on-attach.sh"
+fi
+
+if [[ -f "$TARGET_DIR/scripts/fix-mount-owner.sh" ]]; then
+  if bash -n "$TARGET_DIR/scripts/fix-mount-owner.sh"; then
+    ok "fix-mount-owner.sh syntax OK"
+  else
+    ng "fix-mount-owner.sh syntax NG"
+  fi
+  require_exec "scripts/fix-mount-owner.sh"
 fi
 
 if [[ -f "$TARGET_DIR/scripts/post-rebuild-check.sh" ]]; then

@@ -21,8 +21,6 @@ DRY_RUN="false"
 MANAGE_GITIGNORE="true"
 GITIGNORE_TARGETS=""
 
-GITHUB_PROFILES="primary,secondary"
-GEMINI_KEY_ENV="GEMINI_API_KEY"
 BASE_IMAGE_OVERRIDE=""
 BASE_IMAGE=""
 GITIGNORE_BEGIN="# >>> devcontainer-bootstrap managed section >>>"
@@ -50,9 +48,6 @@ options:
   --with-gemini               Install Gemini CLI + extension (persisted)
   --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
-  --github-profiles <csv>     GitHub profiles for multi-account env injection
-                              (default: primary,secondary)
-  --gemini-key-env <name>     Local env var name for Gemini key (default: GEMINI_API_KEY)
   --base-image <image>        Override auto-selected devcontainer base image
   --dry-run                   Show planned outputs without writing files
   --force                     Overwrite existing files
@@ -74,10 +69,13 @@ notes:
   auto-install); each --with AI tool also adds its VS Code extension and
   persists its config across rebuilds.
 
-  Claude Code authenticates at runtime via /login (not an injected OAuth token):
-  the OAuth token has a limited permission scope, and ~/.claude is persisted, so
-  a one-time /login carries across rebuilds. See README to opt back into token
-  injection if you need it (e.g. CI).
+  Credentials are never injected from the host. remoteEnv carries only
+  LOCAL_WORKSPACE_FOLDER; authenticate inside the container (gh auth login,
+  claude /login, ...). Config dirs of the AI CLIs selected with --with-* are
+  persisted in named volumes; gh/cloud logins are not persisted yet, so they
+  must be repeated after a rebuild. Project-scoped values such as
+  GEMINI_API_KEY belong in the project .env, which
+  scripts/load-project-env.sh reads.
 
   Shared AI rules are maintained in a separate repository. This script places
   them into the generated project; it is a distribution mechanism, not the
@@ -95,8 +93,15 @@ while [[ $# -gt 0 ]]; do
     --with-gemini)      WITH_SET+=("gemini"); shift ;;
     --with-copilot)     WITH_SET+=("copilot"); shift ;;
     --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
-    --github-profiles)  GITHUB_PROFILES="$2"; shift 2 ;;
-    --gemini-key-env)   GEMINI_KEY_ENV="$2"; shift 2 ;;
+    # 廃止フラグは黙殺せず、移行先を示して停止する。黙って無視すると
+    # 「指定したのに注入されない」状態を作り、資格情報の所在をふたたび曖昧にする。
+    --github-profiles|--gemini-key-env)
+      echo "error: $1 は廃止されました（資格情報のホスト注入を撤去したため）。" >&2
+      echo "       GitHub の認証はコンテナ内で 'gh auth login' を実行してください。" >&2
+      echo "       GEMINI_API_KEY などのプロジェクト固有値は生成先の .env に置いてください" >&2
+      echo "       （scripts/load-project-env.sh が読み込みます）。" >&2
+      exit 1
+      ;;
     --base-image)       BASE_IMAGE_OVERRIDE="$2"; shift 2 ;;
     --dry-run)          DRY_RUN="true"; shift ;;
     --force)            FORCE="true"; shift ;;
@@ -229,11 +234,12 @@ select_base_image
 # 生成する相対パス一覧。mode を廃したため単一の集合。
 template_rel_paths() {
   printf '%s\n' \
+    '.env.example' \
     '.devcontainer/compose.yaml' \
     '.devcontainer/devcontainer.json' \
     '.github/workflows/identity-guard.yml' \
     'scripts/acceptance.sh' \
-    'scripts/github-account-switch.sh' \
+    'scripts/fix-mount-owner.sh' \
     'scripts/install-ai-tools.sh' \
     'scripts/load-project-env.sh' \
     'scripts/loop-gate.sh' \
@@ -247,9 +253,35 @@ template_rel_paths() {
 get_template_content() {
   local rel="$1"
   case "$rel" in
+    '.env.example')
+      # プロジェクト固有値の唯一の供給元。ホストからの注入は行わないため、
+      # 利用者はこの雛形を .env へ複製して埋める。
+      cat <<'TMPL'
+# プロジェクト固有の値。.env へ複製して使う（.env は追跡しない）。
+#
+# ホスト OS の環境変数はコンテナへ注入されない。devcontainer.json の remoteEnv は
+# 作業ディレクトリの受け渡し（LOCAL_WORKSPACE_FOLDER）だけを担う。ここに書いた値が
+# 唯一の供給元になり、「どの資格情報を使っているか」がファイルとして目に見える。
+#
+# 認証そのもの（gh / cloud / AI CLI）はコンテナ内で行う。ログイン状態は named volume に
+# 残るため、rebuild しても消えない。トークンをこのファイルへ書き写す必要はない。
+
+# Gemini API キー（第二意見レビュー scripts/gemini-review.sh が読む）
+GEMINI_API_KEY=
+
+# git のコミット identity。scripts/setup-git-identity.sh が local へ適用する。
+#
+# GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL という名前を使わないのは、それが git 自身の読む
+# 環境変数だから。環境に置くと local 設定を持たないリポジトリでも identity が解決でき、
+# user.useConfigOnly による保護（未設定なら commit を止める）が無効になる。
+GIT_IDENTITY_NAME=
+GIT_IDENTITY_EMAIL=
+TMPL
+      ;;
     '.devcontainer/compose.yaml')
-      # AI ツールの永続 volume は選択に応じて条件配線する（__AI_VOLUME_MOUNTS__ /
-      # __AI_VOLUME_SECTION__ を render_content が置換）。docker socket は常に明示。
+      # 永続 volume は構成に応じて条件配線する（__VOLUME_MOUNTS__ /
+      # __VOLUME_SECTION__ を render_content が置換）。gh は常時、cloud と AI ツールは
+      # 選択時のみ。docker socket は常に明示。
       cat <<'TMPL'
 services:
   app:
@@ -258,9 +290,9 @@ services:
       - ..:/workspaces/__PROJECT_NAME__:cached
       # docker-outside-of-docker feature 用（compose 利用時は feature 側の mounts が適用されないため明示）
       - /var/run/docker.sock:/var/run/docker-host.sock
-__AI_VOLUME_MOUNTS__
+__VOLUME_MOUNTS__
     command: sleep infinity
-__AI_VOLUME_SECTION__
+__VOLUME_SECTION__
 TMPL
       ;;
     '.devcontainer/devcontainer.json')
@@ -299,11 +331,9 @@ TMPL
     "__IF_WITH_TERRAFORM__": "ghcr.io/devcontainers/features/terraform:1"
   },
   "remoteEnv": {
-__GITHUB_PROFILE_ENV_BLOCK__
-    "GEMINI_API_KEY": "${localEnv:__GEMINI_KEY_ENV__}",
     "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
   },
-  "postCreateCommand": "bash scripts/install-ai-tools.sh",
+  "postCreateCommand": "bash scripts/fix-mount-owner.sh && bash scripts/install-ai-tools.sh",
   "postAttachCommand": "bash scripts/on-attach.sh",
   "customizations": {
     "vscode": {
@@ -377,177 +407,11 @@ jobs:
           fi
 TMPL
       ;;
-    'scripts/github-account-switch.sh')
-      cat <<'TMPL'
-#!/usr/bin/env bash
-set -euo pipefail
-
-usage() {
-  cat <<'EOF'
-usage:
-  bash scripts/github-account-switch.sh list
-  bash scripts/github-account-switch.sh status
-  bash scripts/github-account-switch.sh use <profile> [--git-scope local|global]
-
-profiles:
-  GITHUB_TOKEN_<PROFILE_UPPER> を設定した profile を自動検出
-  任意で以下も profile ごとに設定可:
-    GITHUB_OWNER_<PROFILE_UPPER>
-    GIT_AUTHOR_NAME_<PROFILE_UPPER>
-    GIT_AUTHOR_EMAIL_<PROFILE_UPPER>
-EOF
-}
-
-profile_to_upper() {
-  printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
-}
-
-cmd_list() {
-  local found=0
-  while IFS='=' read -r key _; do
-    if [[ "$key" =~ ^GITHUB_TOKEN_(.+)$ ]]; then
-      local suffix="${BASH_REMATCH[1]}"
-      local profile
-      profile="$(printf '%s' "$suffix" | tr '[:upper:]' '[:lower:]')"
-      echo "  $profile  (env: GITHUB_TOKEN_${suffix})"
-      found=1
-    fi
-  done < <(env | sort)
-  if [[ "$found" -eq 0 ]]; then
-    echo "  (none — set GITHUB_TOKEN_<PROFILE> to register a profile)"
-  fi
-}
-
-cmd_status() {
-  echo "[github-account] gh auth status"
-  gh auth status -h github.com || true
-  echo
-  echo "[github-account] git identity"
-  echo "  scope=local  name=$(git config --local user.name 2>/dev/null || echo '<unset>')"
-  echo "  scope=local  email=$(git config --local user.email 2>/dev/null || echo '<unset>')"
-  echo "  scope=global name=$(git config --global user.name 2>/dev/null || echo '<unset>')"
-  echo "  scope=global email=$(git config --global user.email 2>/dev/null || echo '<unset>')"
-  echo "  github.owner(local)=$(git config --local github.owner 2>/dev/null || echo '<unset>')"
-  echo "  github.owner(global)=$(git config --global github.owner 2>/dev/null || echo '<unset>')"
-  echo
-  echo "[github-account] registered profiles"
-  cmd_list
-}
-
-# git push の認証を、いま選択した gh のアカウントへ向ける。
-#
-# gh auth login --with-token は非対話のため git を設定しない。これを補わないと、
-# gh と git identity だけが切り替わり、push の認証は既存の credential.helper
-# （エディタが仕込むものなど）が返す別アカウントのまま残る。切替えたつもりで
-# 別人として push しようとして 403 になる。
-#
-# git はヘルパーを定義順に試し、最初に応答したものを採用する。上位スコープに
-# ヘルパーがあると必ずそちらが勝つため、空文字を先に入れて一覧をリセットする。
-setup_git_credentials() {
-  local git_scope="$1"
-  command -v gh >/dev/null 2>&1 || return 0
-  git config --"$git_scope" --unset-all credential.helper 2>/dev/null || true
-  git config --"$git_scope" --add credential.helper ''
-  git config --"$git_scope" --add credential.helper '!gh auth git-credential'
-}
-
-cmd_use() {
-  local profile="$1"
-  shift
-
-  [[ "$profile" =~ ^[a-zA-Z0-9_]+$ ]] || {
-    echo "error: invalid profile" >&2
-    exit 1
-  }
-
-  local git_scope="local"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --git-scope)
-        git_scope="$2"
-        shift 2
-        ;;
-      *)
-        echo "error: unknown option: $1" >&2
-        exit 1
-        ;;
-    esac
-  done
-
-  local upper token_env name_env email_env owner_env
-  upper="$(profile_to_upper "$profile")"
-  token_env="GITHUB_TOKEN_${upper}"
-  name_env="GIT_AUTHOR_NAME_${upper}"
-  email_env="GIT_AUTHOR_EMAIL_${upper}"
-  owner_env="GITHUB_OWNER_${upper}"
-
-  local token="${!token_env:-}"
-  [[ -n "$token" ]] || {
-    echo "error: $token_env is not set" >&2
-    exit 1
-  }
-
-  local login
-  login="$(GH_TOKEN="$token" gh api user --jq .login)"
-  printf '%s' "$token" | gh auth login --hostname github.com --with-token >/dev/null
-  if gh auth switch --help >/dev/null 2>&1; then
-    gh auth switch --hostname github.com --user "$login" >/dev/null
-  fi
-
-  local owner="${!owner_env:-$login}"
-  local git_name="${!name_env:-}"
-  local git_email="${!email_env:-}"
-
-  if [[ -n "$git_name" ]]; then git config --"$git_scope" user.name "$git_name"; fi
-  if [[ -n "$git_email" ]]; then git config --"$git_scope" user.email "$git_email"; fi
-  git config --"$git_scope" github.owner "$owner"
-  git config --"$git_scope" github.account "$login"
-
-  setup_git_credentials "$git_scope"
-
-  echo "[github-account] active profile: $profile"
-  echo "[github-account] active login:   $login"
-  echo "[github-account] owner:          $owner"
-  echo "[github-account] git scope:      $git_scope"
-  echo "[github-account] git user.name:  $(git config --"$git_scope" user.name 2>/dev/null || echo '<unchanged>')"
-  echo "[github-account] git user.email: $(git config --"$git_scope" user.email 2>/dev/null || echo '<unchanged>')"
-  echo "[github-account] git push auth:  gh ($login)"
-}
-
-main() {
-  [[ $# -ge 1 ]] || {
-    usage
-    exit 1
-  }
-
-  case "$1" in
-    list) cmd_list ;;
-    status) cmd_status ;;
-    use)
-      shift
-      [[ $# -ge 1 ]] || {
-        echo "error: missing profile" >&2
-        exit 1
-      }
-      cmd_use "$@"
-      ;;
-    -h|--help|help) usage ;;
-    *)
-      echo "error: unknown subcommand: $1" >&2
-      usage
-      exit 1
-      ;;
-  esac
-}
-
-main "$@"
-TMPL
-      ;;
     'scripts/install-ai-tools.sh')
       # 選択された AI CLI のみを無条件に導入する（--with-* による明示 opt-in）。
       # トークン有無での自動インストールは行わない。__AI_INSTALL_LINES__ は
       # render_content が選択 AI ツール分の install 行に置換する（未選択なら空）。
-      # __AI_CHOWN_LINES__ は選択 AI ツールの設定ディレクトリの所有権修正行に置換する。
+      # 永続 volume の所有権修復は fix-mount-owner.sh が postCreate の先頭で行う。
       cat <<'TMPL'
 #!/usr/bin/env bash
 # 選択された AI CLI ツールを導入する（--with-claude / --with-gemini / --with-copilot）。
@@ -565,37 +429,93 @@ install_if_missing() {
   echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
 }
 
-# AI ツールの永続 named volume を空の状態で初回マウントすると、マウントポイントが
-# Docker デーモン（root）により root:root 所有で作られ、remoteUser が書き込めず
-# CLI のログインが失敗する。設定ディレクトリの所有権を現ユーザーへ戻して復旧する。
-fix_owner() {
-  local dir="$1"
-  local want owner
-  # マウントされていない設定ディレクトリは触らない。
-  [[ -d "$dir" ]] || return 0
-  want="$(id -un)"
-  # 既に現ユーザー所有なら再帰 chown を避ける（冪等・不要な再帰 I/O 回避）。
-  owner="$(stat -c %U "$dir" 2>/dev/null || stat -f %Su "$dir" 2>/dev/null || echo '')"
-  if [[ "$owner" == "$want" ]]; then
-    echo "[install-ai-tools] $dir already owned by $want, skipping chown"
-    return 0
-  fi
-  # sudo が無い環境（ベースイメージ非依存）でも set -euo pipefail 下で異常終了させない。
+__AI_INSTALL_LINES__
+echo "[install-ai-tools] done"
+TMPL
+      ;;
+    'scripts/fix-mount-owner.sh')
+      # 永続 volume のマウント先の所有権を remoteUser へ戻す。postCreate の先頭で
+      # 走らせ、CLI 導入やログインより前に書き込み可能にする。
+      # __MOUNT_OWNER_LINES__ は render_content が対象ディレクトリ分の行へ置換する。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# fix-mount-owner.sh — 永続 named volume のマウント先を remoteUser 所有へ戻す。
+#
+# 空の named volume を初回マウントすると、マウントポイントは Docker デーモン
+# （root）により root:root 所有で作られる。remoteUser が書き込めず、
+# `gh auth login` や AI CLI のログインが Permission denied で落ちる。
+#
+# 対象は AI ツールに限らない。gh / aws / gcloud の認証ディレクトリも永続化する。
+# ネストしたマウント先（~/.config/gh、~/.config/gcloud）は親 ~/.config が
+# 先に root:root で作られる経路があるため、親も対象に含める。
+#
+# 終了コードは常に 0。ここで落ちると postCreate が止まり、CLI 導入まで到達しない。
+# 「認証はできないが環境は立ち上がる」ほうが、原因の切り分けができるぶん実害が小さい。
+# 失敗は WARN として標準エラーへ出す（握りつぶさない）。
+set -uo pipefail
+
+log()  { echo "[fix-mount-owner] $*"; }
+warn() { echo "[fix-mount-owner] WARN: $*" >&2; }
+
+# sudo は -n（非対話）で使う。パスワードを要求する環境で -n を落とすと、
+# postCreate が入力待ちのまま固まり、原因が見えない形で rebuild が終わらなくなる。
+sudo_chown() {
+  local recursive="$1" target="$2"
   if ! command -v sudo >/dev/null 2>&1; then
-    echo "[install-ai-tools] WARN: sudo not available; cannot fix owner of $dir" >&2
-    return 0
+    warn "sudo not available; cannot fix owner of $target"
+    return 1
   fi
-  echo "[install-ai-tools] fixing owner of $dir -> $(id -un):$(id -gn)"
-  # chown 失敗（busy 等）でも set -euo pipefail 下で postCreate 全体を止めない。
-  # sudo 不在ブランチと挙動を揃え、CLI 導入まで到達させたうえで WARN で可視化する。
-  if ! sudo chown -R "$(id -un):$(id -gn)" "$dir"; then
-    echo "[install-ai-tools] WARN: failed to fix owner of $dir" >&2
+  if [[ "$recursive" == "recursive" ]]; then
+    sudo -n chown -R "$(id -un):$(id -gn)" "$target" 2>/dev/null
+  else
+    sudo -n chown "$(id -un):$(id -gn)" "$target" 2>/dev/null
   fi
 }
 
-__AI_CHOWN_LINES__
-__AI_INSTALL_LINES__
-echo "[install-ai-tools] done"
+owned_by_me() {
+  local owner
+  owner="$(stat -c %U "$1" 2>/dev/null || stat -f %Su "$1" 2>/dev/null || echo '')"
+  [[ "$owner" == "$(id -un)" ]]
+}
+
+# 親ディレクトリは非再帰で直す。~/.config 配下には他ツールの設定も入るため、
+# 再帰 chown で無関係なファイルの所有権まで書き換えない。
+fix_parent() {
+  local parent="$1"
+  [[ -d "$parent" ]] || return 0
+  # $HOME 自身と / は対象外。ここを再帰的に遡ると影響範囲が読めなくなる。
+  [[ "$parent" != "$HOME" && "$parent" != "/" ]] || return 0
+  owned_by_me "$parent" && return 0
+  if sudo_chown shallow "$parent"; then
+    log "fixed owner of $parent (non-recursive)"
+  else
+    warn "failed to fix owner of $parent"
+  fi
+}
+
+fix_mount() {
+  local dir="$1"
+  # マウントされていないディレクトリは触らない。
+  if [[ ! -d "$dir" ]]; then
+    log "$dir does not exist, skipping"
+    return 0
+  fi
+  fix_parent "$(dirname "$dir")"
+  # 既に現ユーザー所有なら再帰 chown を避ける（冪等・不要な再帰 I/O 回避）。
+  if owned_by_me "$dir"; then
+    log "$dir already owned by $(id -un), skipping"
+    return 0
+  fi
+  if sudo_chown recursive "$dir"; then
+    log "fixed owner of $dir -> $(id -un):$(id -gn)"
+  else
+    warn "failed to fix owner of $dir"
+  fi
+}
+
+__MOUNT_OWNER_LINES__
+log "done"
+exit 0
 TMPL
       ;;
     'scripts/load-project-env.sh')
@@ -722,17 +642,50 @@ inject_env_autoload() {
 inject_env_autoload "$HOME/.bashrc"
 inject_env_autoload "$HOME/.zshrc"
 
+# ホストの Docker 資格情報ヘルパーを打ち消す。
+#
+# VS Code の dev.containers.dockerCredentialHelper は、接続のたびにコンテナの
+# ~/.docker/config.json へ credsStore を書き込む。これが残っていると、コンテナ内の
+# docker login/pull がホスト OS のキーチェーンへ問い合わせ、ホスト側の資格情報を
+# 黙って使う。remoteEnv を絞ってもこの経路は塞がらないため、接続ごとに打ち消す。
+#
+# 接続順序の都合で VS Code の書き込みに負ける場合があるため、これは多層防御の 1 枚に
+# すぎない。確実に塞ぐにはホスト側で dev.containers.dockerCredentialHelper: false を
+# 設定する（README 参照）。
+strip_docker_creds_store() {
+  local cfg="$HOME/.docker/config.json"
+  [[ -f "$cfg" ]] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[on-attach] WARN: jq が無いため $cfg の credsStore を除去できません。" >&2
+    return 0
+  fi
+  # credsStore / credHelpers のどちらも対象にする。前者はレジストリ横断、後者は
+  # レジストリ個別にホストのヘルパーを指す。
+  if ! jq -e 'has("credsStore") or has("credHelpers")' "$cfg" >/dev/null 2>&1; then
+    return 0
+  fi
+  local tmp="$cfg.on-attach.tmp"
+  if jq 'del(.credsStore, .credHelpers)' "$cfg" > "$tmp" 2>/dev/null && mv "$tmp" "$cfg"; then
+    echo "[on-attach] removed credsStore/credHelpers from $cfg"
+  else
+    rm -f "$tmp"
+    echo "[on-attach] WARN: $cfg の credsStore を除去できませんでした。" >&2
+  fi
+}
+strip_docker_creds_store
+
 if command -v gh >/dev/null 2>&1; then
-  gh auth status >/dev/null 2>&1 && echo "[on-attach] gh auth OK" || echo "[on-attach] WARN: gh auth missing"
+  # 未認証なら、コンテナ内でのログインを案内する。ホストのトークンは注入されない。
+  gh auth status >/dev/null 2>&1 && echo "[on-attach] gh auth OK" || \
+    echo "[on-attach] WARN: gh は未認証です。コンテナ内で 'gh auth login' を実行してください。" >&2
 fi
-echo "[on-attach] profile list: bash scripts/github-account-switch.sh list"
 TMPL
       ;;
     'scripts/setup-git-identity.sh')
       # identity 未指定のコミットを「黙って通す」経路を塞ぐ適用スクリプト。
-      # 先頭 profile（__IDENTITY_PROFILE__）の GIT_AUTHOR_*_<PROFILE> を local へ適用し、
-      # global は user.useConfigOnly=true + name/email 削除で無害化する。render_content が
-      # __IDENTITY_PROFILE__ / __IDENTITY_PROFILE_UPPER__ を実際の profile 名へ置換する。
+      # .env の GIT_IDENTITY_NAME / GIT_IDENTITY_EMAIL を local へ適用し、global は
+      # user.useConfigOnly=true + name/email 削除で無害化する。あわせて credential.helper
+      # を gh へ固定し、上位スコープからの資格情報の供給を打ち切る。
       cat <<'TMPL'
 #!/usr/bin/env bash
 # setup-git-identity.sh — identity 未指定のコミットを「黙って通す」経路を塞ぐ
@@ -757,14 +710,21 @@ TMPL
 #   2. global に user.useConfigOnly=true を立てる
 #      → local 未設定のリポジトリでは commit が exit 128 で止まる。
 #         黙って別名義になるより、止まって気づくほうがよい。
-#   3. 当リポジトリの local へ先頭 profile の identity を適用する
-#      （GIT_AUTHOR_NAME_<PROFILE> / GIT_AUTHOR_EMAIL_<PROFILE> は devcontainer の
-#       remoteEnv 経由で注入される。未設定なら local 適用は行わず WARN に留める）
+#   3. 当リポジトリの local へ identity を適用する
+#      （.env の GIT_IDENTITY_NAME / GIT_IDENTITY_EMAIL を読む。
+#       未設定なら local 適用は行わず WARN に留める）
+#   4. global の credential.helper を「空 → !gh auth git-credential」に固定する
+#      → 空文字を先に置くとヘルパー一覧がリセットされ、/etc/gitconfig 側や
+#         エディタが注入したヘルパーが応答しなくなる。資格情報の供給元を
+#         コンテナ内の gh だけに絞る。
 #
-# github-account-switch.sh を呼ばないのは、あれが gh api user / gh auth login を
-# 伴うため。接続のたびにネットワークを叩くのは重く、オフラインやトークン未設定で
-# 失敗する。ここでは git identity だけを env から適用する。認証の切替えは
-# 引き続き github-account-switch.sh の役割。
+# GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL という名前を .env に使わないのは、それが git 自身の
+# 読む環境変数だから。環境に置くと local 未設定のリポジトリでも identity が解決でき、
+# user.useConfigOnly による保護が無効になる（このガードが塞ぎたい穴そのもの）。
+#
+# このスクリプトは git config だけを触り、gh を呼ばない。接続のたびにネットワークを
+# 叩くのは重く、オフラインでは失敗するため。認証（gh へのログイン）はコンテナ内で
+# 利用者が明示的に行う。
 #
 # 使い方:
 #   bash scripts/setup-git-identity.sh            # 適用
@@ -780,15 +740,16 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(dirname "$HERE")"
 
-# 先頭 profile を既定 identity とする。値は devcontainer の remoteEnv 経由で
-# GIT_AUTHOR_NAME_<PROFILE> / GIT_AUTHOR_EMAIL_<PROFILE> として注入される。
-# 固有 email はここに焼き込まない（環境変数契約から解決する）。
-IDENTITY_PROFILE="__IDENTITY_PROFILE__"
-IDENTITY_PROFILE_UPPER="__IDENTITY_PROFILE_UPPER__"
-NAME_VAR="GIT_AUTHOR_NAME_${IDENTITY_PROFILE_UPPER}"
-EMAIL_VAR="GIT_AUTHOR_EMAIL_${IDENTITY_PROFILE_UPPER}"
-EXPECTED_NAME="${!NAME_VAR:-}"
-EXPECTED_EMAIL="${!EMAIL_VAR:-}"
+# identity の供給元はプロジェクト .env に一本化する。on-attach から呼ばれる文脈では
+# 対話シェルの rc は効かないため、ここで明示的にローダーを通す（存在しなければ素通り）。
+NAME_VAR="GIT_IDENTITY_NAME"
+EMAIL_VAR="GIT_IDENTITY_EMAIL"
+if [[ -f "$HERE/load-project-env.sh" ]]; then
+  # shellcheck source=/dev/null
+  . "$HERE/load-project-env.sh"
+fi
+EXPECTED_NAME="${GIT_IDENTITY_NAME:-}"
+EXPECTED_EMAIL="${GIT_IDENTITY_EMAIL:-}"
 
 log() { echo "[git-identity] $*"; }
 err() { echo "[git-identity] $*" >&2; }
@@ -845,6 +806,35 @@ unset_global_identity_key() {
   return 0
 }
 
+# 資格情報の供給元を gh に絞る。
+#
+# git はヘルパーを定義順に試し、最初に応答したものを採用する。空文字を置くと
+# それまでの一覧が破棄されるため、「空 → gh」の順で global に固定すると、
+# /etc/gitconfig（system）側やエディタが注入したヘルパーが応答しなくなる。
+# ここが緩いと、ホスト由来の資格情報が git credential fill から警告なく返る。
+CRED_HELPER_GH='!gh auth git-credential'
+pin_credential_helper() {
+  local current
+  current="$(git config --global --get-all credential.helper 2>/dev/null | tr '\n' '|' || true)"
+  if [[ "$current" == "|${CRED_HELPER_GH}|" ]]; then
+    return 0
+  fi
+  # --unset-all は該当キーが無いと exit 5 を返す（未設定は正常系）。
+  local rc=0
+  git config --global --unset-all credential.helper || rc=$?
+  if [[ "$rc" -ne 0 && "$rc" -ne 5 ]]; then
+    err "ERROR: global の credential.helper を削除できません (exit $rc)"
+    return 1
+  fi
+  if ! git config --global --add credential.helper '' ||
+    ! git config --global --add credential.helper "$CRED_HELPER_GH"; then
+    err "ERROR: global の credential.helper を固定できません"
+    return 1
+  fi
+  log "credential.helper を「空 → gh」に固定しました"
+  return 0
+}
+
 apply() {
   # global の user.name / user.email を確実に削除する（削除失敗・残存を見逃さない）。
   if ! unset_global_identity_key user.name || ! unset_global_identity_key user.email; then
@@ -853,6 +843,10 @@ apply() {
 
   if ! git config --global user.useConfigOnly true; then
     err "ERROR: global 設定に user.useConfigOnly を書き込めません"
+    return 1
+  fi
+
+  if ! pin_credential_helper; then
     return 1
   fi
 
@@ -867,8 +861,10 @@ apply() {
     # ここで落とさない。global の無害化は済んでおり、identity 未設定のまま
     # コミットしようとすれば git 自身が exit 128 で止める。
     err "WARN: $NAME_VAR / $EMAIL_VAR が未設定のため local identity を適用しません。"
-    err "WARN: このリポジトリでコミットする前に次を実行してください:"
-    err "WARN:   bash $HERE/github-account-switch.sh use $IDENTITY_PROFILE --git-scope local"
+    err "WARN: このリポジトリでコミットする前に、プロジェクトルートの .env へ設定してください:"
+    err "WARN:   $NAME_VAR=<name>"
+    err "WARN:   $EMAIL_VAR=<email>"
+    err "WARN: 雛形は .env.example にあります。"
   fi
 
   log "global identity を無効化し user.useConfigOnly=true を設定しました"
@@ -955,10 +951,40 @@ check() {
   rm -rf "$TMP_REPO"
   TMP_REPO=""
 
-  # 6) 冪等性 + credential セクションの保全。
+  # 6) global の credential.helper が「空 → gh」に固定されていること。
+  #    空文字が先頭に無いと、system（/etc/gitconfig）側のヘルパーが先に応答し、
+  #    ホスト由来の資格情報が返り得る。
+  local helpers
+  helpers="$(git config --global --get-all credential.helper 2>/dev/null | tr '\n' '|' || true)"
+  if [[ "$helpers" == "|${CRED_HELPER_GH}|" ]]; then
+    log "OK  global credential.helper は「空 → gh」"
+  else
+    err "NG  global credential.helper が「空 → gh」でない: ${helpers:-<unset>}"
+    failures=$((failures + 1))
+  fi
+
+  # 7) local 設定を持たないリポジトリで、資格情報の供給元が gh だけであること。
+  #    ここが本題。設定を持たない新規リポジトリでも、上位スコープのヘルパーが
+  #    生き残っていないことを、実際に一時リポジトリを作って確かめる。
+  #    git は空文字で一覧をリセットするため、最後の空要素より後ろだけが実効値になる。
+  TMP_REPO="$(mktemp -d)"
+  git init -q "$TMP_REPO"
+  local effective
+  effective="$(cd "$TMP_REPO" && git config --get-all credential.helper 2>/dev/null \
+    | awk '$0 == "" { n = 0; next } { v[++n] = $0 } END { for (i = 1; i <= n; i++) print v[i] }' \
+    | tr '\n' '|' || true)"
+  if [[ "$effective" == "${CRED_HELPER_GH}|" ]]; then
+    log "OK  local 未設定のリポジトリでも資格情報の供給元は gh のみ"
+  else
+    err "NG  local 未設定のリポジトリで gh 以外の供給元が残っている: ${effective:-<none>}"
+    err "NG  → ホスト由来の資格情報が git credential fill から返り得る。"
+    failures=$((failures + 1))
+  fi
+  rm -rf "$TMP_REPO"
+  TMP_REPO=""
+
+  # 8) 冪等性。
   #    適用をもう一度走らせ、global 設定ファイルが 1 バイトも変わらないことを見る。
-  #    credential.helper は VS Code / github-account-switch.sh が注入するため、
-  #    消していないことを併せて確認する。
   #
   #    この検査は apply を伴う。未適用の状態で走らせると「失敗を報告しながら
   #    裏で直してしまう」ことになり、次回の --check が通って問題が見えなくなる。
@@ -1014,8 +1040,7 @@ TMPL
     'scripts/verify-commit-identity.sh')
       # コミット履歴の identity 検証ゲート。CI（identity-guard.yml）と手元で共用する。
       # author は email のみで判定。許可 email は env ALLOWED_AUTHOR_EMAILS（CI は
-      # リポジトリ変数から渡す）→ 無ければ先頭 profile の GIT_AUTHOR_EMAIL_<PROFILE> の
-      # 順で解決する。render_content が __IDENTITY_PROFILE_UPPER__ を置換する。
+      # リポジトリ変数から渡す）→ 無ければ .env の GIT_IDENTITY_EMAIL の順で解決する。
       cat <<'TMPL'
 #!/usr/bin/env bash
 # verify-commit-identity.sh — コミット identity の検証ゲート
@@ -1038,7 +1063,7 @@ TMPL
 #   author の許可 email は次の順で解決する。固有 email はスクリプトに焼き込まない。
 #     1. 環境変数 ALLOWED_AUTHOR_EMAILS（カンマ/空白区切り）。
 #        CI はリポジトリ変数（vars.ALLOWED_AUTHOR_EMAILS）を env 経由で渡す。
-#     2. 未設定なら先頭 profile の GIT_AUTHOR_EMAIL_<PROFILE>（コンテナの remoteEnv）。
+#     2. 未設定なら .env の GIT_IDENTITY_EMAIL（コンテナ内の唯一の供給元）。
 #   どちらでも解決できなければ「検査対象が無いので通過」にせず、fail-closed で落とす。
 #   committer には常に noreply@github.com を、Co-Authored-By には加えて
 #   noreply@anthropic.com を許可する（GitHub 上の squash merge / web UI コミットの
@@ -1061,20 +1086,23 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(dirname "$HERE")"
 
-# 先頭 profile。ALLOWED_AUTHOR_EMAILS 未設定時のフォールバック解決に使う。
-IDENTITY_PROFILE_UPPER="__IDENTITY_PROFILE_UPPER__"
-
 ALLOWED_AUTHOR_EMAILS_ARR=()
 ALLOWED_COMMITTER_EMAILS_ARR=()
 ALLOWED_COAUTHOR_EMAILS_ARR=()
 
 # author の許可 email を解決する。env ALLOWED_AUTHOR_EMAILS を最優先し、
-# 無ければ先頭 profile の GIT_AUTHOR_EMAIL_<PROFILE> を使う。
+# 無ければ .env の GIT_IDENTITY_EMAIL を使う（CI では .env が無いため前者だけが効く）。
 resolve_allowed_author_emails() {
   local raw="${ALLOWED_AUTHOR_EMAILS:-}"
   if [[ -z "$raw" ]]; then
-    local fallback_var="GIT_AUTHOR_EMAIL_${IDENTITY_PROFILE_UPPER}"
-    raw="${!fallback_var:-}"
+    # 環境に値があっても必ずローダーを通す。load-project-env.sh は .env を後勝ちで
+    # 上書きする契約であり、「.env が唯一の供給元」を保つには常に通す必要がある。
+    # 未設定のときだけ読むと、シェルへ手で export した古い値が .env に勝つ。
+    if [[ -f "$HERE/load-project-env.sh" ]]; then
+      # shellcheck source=/dev/null
+      . "$HERE/load-project-env.sh"
+    fi
+    raw="${GIT_IDENTITY_EMAIL:-}"
   fi
   # カンマ区切りも空白区切りも受ける。
   printf '%s' "${raw//,/ }"
@@ -1088,7 +1116,7 @@ init_allowlists() {
 
   if [[ "${#ALLOWED_AUTHOR_EMAILS_ARR[@]}" -eq 0 ]]; then
     echo "[identity] 許可 author email が解決できません。" >&2
-    echo "[identity] CI はリポジトリ変数 ALLOWED_AUTHOR_EMAILS を、コンテナは GIT_AUTHOR_EMAIL_${IDENTITY_PROFILE_UPPER} を設定してください。" >&2
+    echo "[identity] CI はリポジトリ変数 ALLOWED_AUTHOR_EMAILS を、コンテナは .env の GIT_IDENTITY_EMAIL を設定してください。" >&2
     echo "IDENTITY_FAIL"
     exit 1
   fi
@@ -1227,7 +1255,8 @@ TMPL
       ;;
     'scripts/post-rebuild-check.sh')
       # 基本コマンド + 選択言語（__RUNTIME_CHECK_LINES__）+ 選択装備
-      # （__WITH_CHECK_LINES__: 選択した cloud/AI ツールの CLI）の存在を検査する。
+      # （__WITH_CHECK_LINES__: 選択した cloud/AI ツールの CLI）+ 永続 volume の
+      # 実マウント（__VOLUME_CHECK_LINES__）を検査する。
       cat <<'TMPL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1235,6 +1264,27 @@ echo "[check] bootstrap checks"
 for cmd in bash jq gh docker rg; do
   command -v "$cmd" >/dev/null 2>&1 && echo "[check] $cmd OK" || echo "[check] $cmd missing"
 done
+
+# 認証状態を保持するディレクトリが named volume として実際にマウントされているかを見る。
+# 定義したのにマウントされていない状態（compose の編集ミス、devcontainer.json が別
+# サービスを指している等）は、CLI が入っていて動くぶん気づきにくく、rebuild のたびに
+# 静かにログインが消える形で表面化する。
+#
+# /proc/mounts を引くのは、mountpoint コマンドが無いベースイメージがあるため。
+# 判定できない環境（/proc/mounts を読めない等）は「不明」として素通りさせる。
+check_mounted() {
+  local dir="$1" vol="$2"
+  if [[ ! -r /proc/mounts ]]; then
+    echo "[check] $vol unknown (cannot read /proc/mounts)"
+    return 0
+  fi
+  if awk -v d="$dir" '$2 == d { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then
+    echo "[check] $vol mounted at $dir"
+  else
+    echo "[check] WARN: $vol not mounted at $dir (認証状態は rebuild で失われます)" >&2
+  fi
+}
+__VOLUME_CHECK_LINES__
 __RUNTIME_CHECK_LINES__
 __WITH_CHECK_LINES__
 TMPL
@@ -1455,6 +1505,27 @@ selected_ai_tools() {
   done
 }
 
+# rebuild を跨いで保持する認証・設定ディレクトリを "<name> <dir>" で列挙する。
+# name は named volume の接頭辞（${name}-storage）になる。
+#
+# gh は github-cli feature が構成に依らず常時入るため、常に永続化する。
+# 資格情報をホストから注入しなくなった以上、コンテナ内のログインが唯一の認証手段で
+# あり、それが rebuild のたびに消えると実用に耐えない。
+# cloud（aws / gcloud）は該当の --with-* を選んだときだけ定義する。未選択の構成に
+# 使われない volume を作らないため。
+persisted_storages() {
+  local t dir
+  printf '%s %s\n' gh /home/vscode/.config/gh
+  with_feature_active aws && printf '%s %s\n' aws /home/vscode/.aws
+  with_feature_active gcp && printf '%s %s\n' gcloud /home/vscode/.config/gcloud
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    dir="$(ai_config_dir "$t")"
+    [[ -n "$dir" ]] || continue
+    printf '%s %s\n' "$t" "$dir"
+  done < <(selected_ai_tools)
+}
+
 build_default_gitignore_targets() {
   local targets=()
   targets+=("macOS")
@@ -1533,51 +1604,6 @@ build_remote_gitignore_block() {
       rm -f "$tmp"
     done
   } | sed '/^$/N;/^\n$/D'
-}
-
-# CSV の先頭 profile 名を返す（空白除去済み）。identity ガードの既定 identity 解決に使う。
-# 未指定なら空文字を返す（呼び出し側は空でも安全に扱う）。
-first_github_profile() {
-  local csv="$GITHUB_PROFILES" item profile
-  IFS=',' read -ra items <<< "$csv"
-  for item in "${items[@]}"; do
-    profile="$(echo "$item" | xargs)"
-    [[ -n "$profile" ]] || continue
-    printf '%s' "$profile"
-    return 0
-  done
-  printf '%s' ""
-}
-
-build_github_profile_env_block() {
-  local csv="$GITHUB_PROFILES"
-  local item profile upper out=""
-  local line
-
-  IFS=',' read -ra items <<< "$csv"
-  for item in "${items[@]}"; do
-    profile="$(echo "$item" | xargs)"
-    [[ -n "$profile" ]] || continue
-    if [[ ! "$profile" =~ ^[a-zA-Z0-9_]+$ ]]; then
-      echo "error: invalid github profile name: $profile" >&2
-      exit 1
-    fi
-    upper="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
-    # shellcheck disable=SC2016
-    printf -v line '    "GITHUB_TOKEN_%s": "${localEnv:GITHUB_TOKEN_%s}",\n' "$upper" "$upper"
-    out+="$line"
-    # shellcheck disable=SC2016
-    printf -v line '    "GITHUB_OWNER_%s": "${localEnv:GITHUB_OWNER_%s}",\n' "$upper" "$upper"
-    out+="$line"
-    # shellcheck disable=SC2016
-    printf -v line '    "GIT_AUTHOR_NAME_%s": "${localEnv:GIT_AUTHOR_NAME_%s}",\n' "$upper" "$upper"
-    out+="$line"
-    # shellcheck disable=SC2016
-    printf -v line '    "GIT_AUTHOR_EMAIL_%s": "${localEnv:GIT_AUTHOR_EMAIL_%s}",\n' "$upper" "$upper"
-    out+="$line"
-  done
-
-  printf '%b' "$out"
 }
 
 # 言語ランタイムの存在検査に使うコマンド名を返す。
@@ -1749,42 +1775,55 @@ build_ai_install_block() {
   printf '%s' "$out"
 }
 
-# 選択した AI ツールの設定ディレクトリ所有権修正行を生成する
-# （install-ai-tools.sh の __AI_CHOWN_LINES__）。install 行より前に置き、
-# 空の named volume を root:root で初回マウントした際の書き込み不能を復旧する。
-# 未選択なら空。
-build_ai_chown_block() {
-  local tool dir out=""
-  while IFS= read -r tool; do
-    [[ -n "$tool" ]] || continue
-    dir="$(ai_config_dir "$tool")"
-    out+="fix_owner \"$dir\""$'\n'
-  done < <(selected_ai_tools)
+# 永続 volume のマウント先の所有権修復行を生成する
+# （fix-mount-owner.sh の __MOUNT_OWNER_LINES__）。空の named volume を root:root で
+# 初回マウントした際の書き込み不能を復旧する。対象は AI ツールに限らない。
+# gh / cloud も永続化するため、ここが漏れると 'gh auth login' が Permission denied で
+# 落ち、永続化の意味が無くなる。
+build_mount_owner_block() {
+  local name dir out=""
+  while read -r name dir; do
+    [[ -n "$name" ]] || continue
+    out+="fix_mount \"$dir\""$'\n'
+  done < <(persisted_storages)
   printf '%s' "$out"
 }
 
-# compose の app.volumes に足す AI 永続 volume のマウント行（__AI_VOLUME_MOUNTS__）。
-# 未選択なら空（行ごと消える）。
-build_ai_volume_mounts_block() {
-  local tool dir out=""
-  while IFS= read -r tool; do
-    [[ -n "$tool" ]] || continue
-    dir="$(ai_config_dir "$tool")"
-    out+="      - ${tool}-storage:${dir}"$'\n'
-  done < <(selected_ai_tools)
+# compose の app.volumes に足す永続 volume のマウント行（__VOLUME_MOUNTS__）。
+# gh は常時、cloud と AI ツールは選択に応じて並ぶ。
+build_volume_mounts_block() {
+  local name dir out=""
+  while read -r name dir; do
+    [[ -n "$name" ]] || continue
+    out+="      - ${name}-storage:${dir}"$'\n'
+  done < <(persisted_storages)
   printf '%s' "$out"
 }
 
-# compose のトップレベル volumes: セクション（__AI_VOLUME_SECTION__）。
-# AI ツールを 1 つでも選べば named volume を定義、なければ空（セクションごと消える）。
-build_ai_volume_section_block() {
-  local tool defs=""
-  while IFS= read -r tool; do
-    [[ -n "$tool" ]] || continue
-    defs+="  ${tool}-storage:"$'\n'
-  done < <(selected_ai_tools)
+# compose のトップレベル volumes: セクション（__VOLUME_SECTION__）。
+# gh-storage が常に入るため、このセクションが空になることはない。
+build_volume_section_block() {
+  local name defs=""
+  # volume 名しか使わないので、2 列目（マウント先）は読み捨てる。
+  while read -r name _; do
+    [[ -n "$name" ]] || continue
+    defs+="  ${name}-storage:"$'\n'
+  done < <(persisted_storages)
   [[ -n "$defs" ]] || { printf ''; return; }
   printf 'volumes:\n%s' "$defs"
+}
+
+# post-rebuild-check.sh の __VOLUME_CHECK_LINES__。永続 volume が実際にマウント
+# されているかを検査する。定義しただけでマウントされない（compose の編集ミス、
+# devcontainer.json が別サービスを指している等）と、ログイン状態は毎回消えるのに
+# CLI は入っているため、原因が分かりにくい形で表面化する。
+build_volume_check_block() {
+  local name dir out=""
+  while read -r name dir; do
+    [[ -n "$name" ]] || continue
+    out+="check_mounted \"$dir\" \"${name}-storage\""$'\n'
+  done < <(persisted_storages)
+  printf '%s' "$out"
 }
 
 # post-rebuild-check.sh の __WITH_CHECK_LINES__。選択した cloud/AI の CLI を検査する。
@@ -1808,10 +1847,6 @@ render_content() {
   local content="$1"
   local sed_args=()
   local escaped_base_image
-  local github_env_block
-
-  github_env_block="$(build_github_profile_env_block)"
-  content="${content//__GITHUB_PROFILE_ENV_BLOCK__/$github_env_block}"
 
   # 行単位プレースホルダを awk で差し替える。sed や bash のパターン置換は使わない:
   # 挿入内容が `&`（検査行の `2>&1` / `&&`）を含み、sed の置換記号や Bash 5.1+ の
@@ -1833,31 +1868,31 @@ render_content() {
   subst_block __ACCEPTANCE_CHECK_LINES__ "$(build_acceptance_check_block)"
   subst_block __LANGUAGE_EXTENSIONS__ "$(build_language_extensions_block)"
   subst_block __WITH_EXTENSIONS__ "$(build_with_extensions_block)"
-  subst_block __AI_CHOWN_LINES__ "$(build_ai_chown_block)"
+  subst_block __MOUNT_OWNER_LINES__ "$(build_mount_owner_block)"
   subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
-  subst_block __AI_VOLUME_MOUNTS__ "$(build_ai_volume_mounts_block)"
-  subst_block __AI_VOLUME_SECTION__ "$(build_ai_volume_section_block)"
+  subst_block __VOLUME_MOUNTS__ "$(build_volume_mounts_block)"
+  subst_block __VOLUME_SECTION__ "$(build_volume_section_block)"
+  subst_block __VOLUME_CHECK_LINES__ "$(build_volume_check_block)"
   subst_block __WITH_CHECK_LINES__ "$(build_with_check_block)"
 
   escaped_base_image="$BASE_IMAGE"
   escaped_base_image="${escaped_base_image//&/\\&}"
 
-  # identity ガード（setup-git-identity.sh / verify-commit-identity.sh）は先頭 profile を
-  # 既定 identity とする。profile 名のみを差し込み、固有 email はスクリプトに焼き込まない。
-  local identity_profile identity_profile_upper
-  identity_profile="$(first_github_profile)"
-  identity_profile_upper="$(printf '%s' "$identity_profile" | tr '[:lower:]' '[:upper:]')"
-
   sed_args+=(-e "s|__PROJECT_NAME__|$PROJECT_NAME|g")
-  sed_args+=(-e "s|__GEMINI_KEY_ENV__|$GEMINI_KEY_ENV|g")
-  sed_args+=(-e "s|__IDENTITY_PROFILE_UPPER__|$identity_profile_upper|g")
-  sed_args+=(-e "s|__IDENTITY_PROFILE__|$identity_profile|g")
   sed_args+=(-e "s|__BASE_IMAGE__|$escaped_base_image|g")
   for lang in node go python php rust; do
-    local lang_upper
+    local lang_upper lang_options
     lang_upper=$(printf '%s' "$lang" | tr '[:lower:]' '[:upper:]')
     if has_language "$lang"; then
-      sed_args+=(-e "s|\"__IF_RUNTIME_${lang_upper}__\": \"ghcr.io/devcontainers/features/$lang:1\"|\"ghcr.io/devcontainers/features/$lang:1\": {}|g")
+      # 既定は素の feature（options 無し）。python だけは uv を同梱する。
+      # python feature には uv 専用オプションが無いため、pipx 導入の toolsToInstall
+      # に uv を追記する。toolsToInstall は上書き（既定リストを置換）なので、既定
+      # ツール群を明記した上で uv を足し、既定ツールの回帰を避ける。
+      lang_options='{}'
+      if [ "$lang" = "python" ]; then
+        lang_options='{ "installTools": true, "toolsToInstall": "flake8,autopep8,black,yapf,mypy,pydocstyle,pycodestyle,bandit,pipenv,virtualenv,pytest,pylint,uv" }'
+      fi
+      sed_args+=(-e "s|\"__IF_RUNTIME_${lang_upper}__\": \"ghcr.io/devcontainers/features/$lang:1\"|\"ghcr.io/devcontainers/features/$lang:1\": $lang_options|g")
     else
       sed_args+=(-e "/\"__IF_RUNTIME_${lang_upper}__\"/d")
     fi
