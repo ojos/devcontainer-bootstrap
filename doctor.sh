@@ -5,9 +5,12 @@ set -euo pipefail
 TARGET_DIR="$PWD"
 STRICT="false"
 
+# 呼び出しに使われたパスをそのまま示す。開発リポジトリでは
+# packages/devcontainer-bootstrap/doctor.sh、公開配布物ではリポジトリ直下の
+# ./doctor.sh に置かれるため、固定パスを書くと片方のレイアウトで解決しない。
 usage() {
-  cat <<'EOF'
-usage: bash packages/devcontainer-bootstrap/doctor.sh [options]
+  cat <<EOF
+usage: bash $0 [options]
 
 options:
   --target-dir <path>   Target workspace path (default: current directory)

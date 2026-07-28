@@ -26,18 +26,35 @@
 そのため、AI ルールだけが必要な場合は、このパッケージを介さず ai-playbook を直接導入できます。
 このパッケージは devcontainer と対応言語（node / go / python / php / rust）を前提とするため、それ以外の環境では ai-playbook 側の導入手順を使ってください。
 
+## 実行前提コマンド
+
+`bootstrap.sh` は起動直後に次のコマンドの実在を検査し、**1 つでも欠けていればファイルを 1 つも書かずにエラー終了**します（`error: required command not found: <cmd>`）。
+
+| コマンド | 必要になる場面 | 用途 |
+|---|---|---|
+| `jq` | 常時 | 生成する `devcontainer.json` の整形 |
+| `perl` | 常時 | JSON テンプレートの末尾カンマ除去 |
+| `awk` | 常時 | `.gitignore` の managed セクション差し替え、テンプレート名の重複除去 |
+| `sed` | 常時 | テンプレートのプレースホルダ置換 |
+| `curl` | 常時 | github/gitignore テンプレートの取得、規範アーカイブのダウンロード |
+| `tar` | 規範の取得元に **URL** を指定した場合のみ（`--playbook-version` / URL 形式の `--playbook-from`） | アーカイブの展開 |
+
+`doctor.sh` は `jq` を使います（`devcontainer.json` の JSON 妥当性検査と `dockerComposeFile` の読み取り）。
+
+`docker` は**任意**です。あればベースイメージの `os/arch` 適合を実際のマニフェストで判定し、無ければ既定の `mcr.microsoft.com/devcontainers/base:ubuntu` へフォールバックします（警告のみで停止しません）。
+
 ## 公開リリースからの利用
 
 公開リポジトリ:
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.7.2`
+- `v0.7.3`
 
 `SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
 
 ```bash
-TAG=v0.7.2
+TAG=v0.7.3
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
@@ -50,13 +67,61 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 
 ```bash
 bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
-  --playbook-version v0.1.3
+  --playbook-version v0.1.4
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
+
+### リリース資産
+
+各リリースには次の 5 つを添付します。通常の利用に必要なのは上の 3 つだけで、残りの 2 つは「配布物そのものを検証・保全したい」場合に使います。
+
+| 資産 | 用途 |
+|---|---|
+| `bootstrap.sh` | 生成コマンド本体。単体で動作します |
+| `doctor.sh` | 生成後の自己診断コマンド。単体で動作します |
+| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS` で改ざん・取得失敗を検出します |
+| `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md`）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合に使います |
+| `RELEASE-MANIFEST.json` | パッケージ名・版・資産一覧・チェックサムを機械可読にまとめたもの。`assets` がそのリリースに添付された資産の一覧、`checksums` が `PACKAGE_ARCHIVE.tar.gz` と `SHA256SUMS` のハッシュです |
+
+検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
+
+```bash
+TAG=v0.7.3
+BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
+curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
+curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
+curl -sSL "${BASE}/SHA256SUMS" -o SHA256SUMS
+
+# 1. マニフェストが記録したハッシュと実物を突き合わせる
+jq -r '.checksums | to_entries[] | "\(.value)  \(.key)"' RELEASE-MANIFEST.json | sha256sum -c -
+
+# 2. マニフェストが検証した SHA256SUMS で、実行するスクリプトを検証する
+curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
+curl -sSL "${BASE}/doctor.sh" -o doctor.sh
+sha256sum -c SHA256SUMS
+
+# アーカイブから中身を取り出す場合
+tar -xzf PACKAGE_ARCHIVE.tar.gz
+```
+
+> 同じタグの資産は差し替えません。`PACKAGE_ARCHIVE.tar.gz` は tar がタイムスタンプを埋めるため内容が同じでもハッシュが変わり、上書きは常に別物への差し替えになるためです。タグを固定すれば内容も固定されます。
+
+### ライセンスと変更履歴
+
+公開リポジトリのルートには次の 2 ファイルを配布します（`PACKAGE_ARCHIVE.tar.gz` にも含まれます）。
+
+| ファイル | 内容 |
+|---|---|
+| `LICENSE` | MIT License |
+| `CHANGELOG.md` | 版ごとの変更点。公開しなかった版がある場合も、その事実とともに記録しています |
+
+### 貢献の受け付け
+
+**公開リポジトリは配布専用です。** 開発は別リポジトリで行い、リリースのたびに公開リポジトリの内容を全置換します。公開リポジトリへ直接 Pull Request を出しても次のリリースで失われるため、受け付けていません。不具合や要望は公開リポジトリの issue でお知らせください。
 
 ## 入力仕様
 
@@ -81,12 +146,37 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します（下記「資格情報の扱い」）。
 
 ### オプション入力
-- `--output-dir <path>`（省略時: カレントディレクトリ直下に `<project-name>/` を作成して展開）
-- `--base-image <image>`（自動判定結果を上書きして明示指定）
+- `--output-dir <path>`（既定: カレントディレクトリ直下に `<project-name>/` を作成して展開）
+- `--base-image <image>`（既定: Docker サーバーの `os/arch` から自動判定。この値で上書きして明示指定）
+- `--dry-run`（既定: 無効。生成予定のパスを `plan:` 行として並べるだけで、**ファイルを 1 つも書きません**）
+- `--force`（既定: 無効。既存ファイルの上書きを許可します。下記「再実行したときの挙動」参照）
+- `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
+- `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
-- `--playbook-version <tag>`（既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.3`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
-- `--playbook-from <path|url>`（ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
-- `--playbook-conflict-policy <skip|overwrite|prompt>`（既存ファイルがある場合の扱い。既定: `skip`）
+- `--playbook-version <tag>`（既定: 空。既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.4`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
+- `--playbook-from <path|url>`（既定: 空。ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
+- `--playbook-conflict-policy <skip|overwrite|prompt>`（既定: `skip`。**規範ファイル**に既存がある場合の扱い）
+- `-h` / `--help`（使い方を表示して終了。何も生成しません）
+
+### 廃止フラグ
+
+次のフラグは廃止済みです。いずれも**黙って無視されるのではなくエラー終了**します（指定したのに効いていない、という曖昧な状態を作らないため）。
+
+| 廃止フラグ | 移行先 |
+|---|---|
+| `--mode <minimal\|standard\|full>` | `--with-*` フラグで装備を明示選択（[mode オプションからの移行](#mode-オプションからの移行)）。未知のオプションとして拒否されます |
+| `--github-profiles` | コンテナ内で `gh auth login`（ホストからの資格情報注入は廃止） |
+| `--gemini-key-env` | 生成先の `.env` に `GEMINI_API_KEY` を置く（`scripts/load-project-env.sh` が読む） |
+
+### 再実行したときの挙動
+
+同じ出力先へ再実行しても、**既定では既存ファイルを上書きしません**。
+
+- `--force` 未指定（既定）: 既に存在するファイルは `skip (exists): <path>` と表示して**そのまま温存**します。テンプレートを更新した DCB で再実行しても、生成済みファイルは古いままになります。
+- `--force` 指定: 既存ファイルを新しいテンプレートで**上書き**します。
+- `--playbook-conflict-policy` が効くのは**規範ファイル**（`.ai-playbook/**` / 入口ファイル / `scripts/gemini-review.sh` など）だけで、`.devcontainer/` や `scripts/` のテンプレート生成物には効きません。テンプレート生成物の上書きは `--force` が唯一の手段です。
+- `.gitignore` の managed セクションだけは `--force` に依らず毎回差し替えます（セクション外の行は保持）。
+- 何が書かれるかを先に確かめたい場合は `--dry-run` を使います。
 
 ### AI 共通ルールの配置
 
@@ -102,8 +192,10 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 | 配置先 | 内容 |
 |---|---|
 | `.ai-playbook/**` | 共通規範、ロール契約、タスクプレイブック、レビュー運用、intake 規律 |
+| `.ai-playbook/VERSION` | 取り込んだ規範の出所（`version=` / `source=`）を on-disk に残す証跡。どの版の規範が入っているかを生成後の環境から照合できる |
 | `.github/project-ai-rules.md` | プロジェクト共通ルールの雛形 |
 | `CLAUDE.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線） |
+| `scripts/gemini-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
 
 取得元は次の順で解決します。
@@ -117,7 +209,11 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 
 ### AI CLI 導入挙動
 
-`scripts/install-ai-tools.sh` は常に生成され、`postCreateCommand`（`bash scripts/install-ai-tools.sh`）で実行されます。
+`scripts/install-ai-tools.sh` は常に生成され、`postCreateCommand` で実行されます。生成される `postCreateCommand` の実値は次のとおりで、永続 volume の所有者を戻してから AI CLI を導入します。
+
+```
+bash scripts/fix-mount-owner.sh && bash scripts/install-ai-tools.sh
+```
 
 導入するのは `--with-claude` / `--with-gemini` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
 
@@ -330,32 +426,39 @@ CI に固有の email を焼き込まないため、**利用側リポジトリ�
 OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する経路は**用意しません**。権限スコープが限定されてフルスペックの操作が許可されないうえ、opt-in で穴を残せる構造そのものが「黙って別アカウントの資格情報が使われる」事故を生んだ形だからです。
 
 ## 検証ルール
-1. `languages` には少なくとも 1 つの対応言語（node|go|python|php）を含めること
+1. `languages` には少なくとも 1 つの対応言語（node|go|python|php|rust）を含めること
 2. 指定した各言語に対応する feature を devcontainer.json に追加すること
 3. `remoteEnv` は `LOCAL_WORKSPACE_FOLDER` のみを持つこと（ホスト資格情報の注入経路を作らない）
 4. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
 
 ## 期待される出力
-- `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `compose.yaml` の `app` サービスを参照）
+
+装備の選択によらず常に生成するもの（`--dry-run` を付けると、この一覧が `plan:` 行としてそのまま確認できます）:
+
+- `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `.devcontainer/compose.yaml` の `app` サービスを参照）
 - `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置）
 - `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY` / `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
 - `scripts/fix-mount-owner.sh`（永続 volume のマウント先を remoteUser 所有へ戻す。`postCreateCommand` の先頭で実行）
+- `scripts/install-ai-tools.sh`（`postCreateCommand` の後段で実行。`--with-<ai>` で選んだ AI CLI だけを導入する。上記「AI CLI 導入挙動」参照）
 - `scripts/load-project-env.sh`（プロジェクト `.env` の優先読み込み。下記参照）
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`（永続 volume の実マウント検査を含む）
 - `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh`（git identity ガード。下記参照）
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
-- `.gitignore` の managed セクション（言語構成に応じて自動更新）
-- README のセットアップ節更新
+- `.gitignore` の managed セクション（言語構成に応じて自動更新。`--no-gitignore` で無効化）
 
 規範を配置する場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、加えて次を出力します。
 
-- `.ai-playbook/**`（AI 共通ルール一式）
+- `.ai-playbook/**`（AI 共通ルール一式。内容の正本は ai-playbook 側にあり、DCB は木ごと配置するだけです）
+- `.ai-playbook/VERSION`（DCB が記録する取得元の証跡。`version=`（`--playbook-version` のタグ。未指定なら `(unspecified)`）と `source=`（解決したディレクトリまたは URL）の 2 行を持つ機械可読な key=value 形式。規範ファイルと同じ `--playbook-conflict-policy` に従うため、規範を skip した実行では VERSION も更新されません）
 - `.github/project-ai-rules.md`
 - `CLAUDE.md` / `.github/copilot-instructions.md`
+- `scripts/gemini-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
 - `.github/workflows/copilot-review.yml`（`--with-copilot` も併せて選択した場合のみ。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
+
+なお bootstrap.sh は生成先の README.md を読み書きしません。セットアップ手順を README へ追記する処理は持たないため、生成後の README への反映は利用者側の作業です。
 
 #### リモート最終ゲート（Copilot）ワークフロー
 規範を配置し、かつ `--with-copilot` を選択した場合のみ `.github/workflows/copilot-review.yml` を配置します。これは PR 作成時（`pull_request: types: [opened]`）に一度だけ Copilot へコードレビューを要求するワークフローで、`synchronize`（push 更新）では再要求しないため「1 回だけ」を機構で保証します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。フォークからの PR はスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。
@@ -363,20 +466,51 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 > **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot` を指定しなければ、このワークフローは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
 
 ### `.gitignore` と github/gitignore の連携
-- managed セクション末尾には常に `github/gitignore` テンプレートを追加します。
-- 暗黙ターゲットは `macOS` + `--languages` で指定した言語対応テンプレート（`node`→`Node` / `go`→`Go` / `python`→`Python` / `php`→`PHP`）です。
+- managed セクションの中身は `github/gitignore` から取得したテンプレートだけです（DCB 固有の静的な無視パターンは持ちません）。マーカー行で挟んだこの区間だけを差し替え、セクション外の行は保持します。
+- 暗黙ターゲットは `macOS` + `--languages` で指定した言語対応テンプレート（`node`→`Node` / `go`→`Go` / `python`→`Python` / `php`→`PHP` / `rust`→`Rust`）です。
 - `--gitignore-targets <csv>` を指定すると、暗黙ターゲットに追加で合成します（重複は除去）。
 - テンプレート取得は `https://github.com/github/gitignore` から行います（`<name>.gitignore` と `Global/<name>.gitignore` を順に探索）。
 - 取得できないテンプレート名は警告を出してスキップします（処理は継続）。
 
-> **注意**: `--languages` の値は小文字（`node`, `go`, `python`, `php`）で指定します。一方 `--gitignore-targets` の値は [github/gitignore](https://github.com/github/gitignore) リポジトリのファイル名に合わせた大文字始まり（`Node`, `Go`, `PHP`, `macOS` など）で指定してください。これらは別々の用途を持つため、意図的に表記が異なります。
+> **注意**: `--languages` の値は小文字（`node`, `go`, `python`, `php`, `rust`）で指定します。一方 `--gitignore-targets` の値は [github/gitignore](https://github.com/github/gitignore) リポジトリのファイル名に合わせた大文字始まり（`Node`, `Go`, `PHP`, `Rust`, `macOS` など）で指定してください。これらは別々の用途を持つため、意図的に表記が異なります。
 
 ## Doctor 自己診断
-生成後に次を実行して検証します:
+
+生成後、生成先を対象に実行して構成を検証します。
+
 ```bash
-./doctor.sh --target-dir result --strict
+# 生成先を明示する場合（--target-dir 省略時はカレントディレクトリ）
+./doctor.sh --target-dir ./myapp
+
+# 生成先のコンテナ内で実行する場合は WARN も失格にする
+./doctor.sh --strict
 ```
-設定された各言語ランタイムの可用性を動的にチェックします。`--with-aws` / `--with-gcp` で cloud CLI（`aws` / `gcloud` / `terraform`）を配線した場合は、それらの可用性も検査します。
+
+オプション:
+
+- `--target-dir <path>`（既定: カレントディレクトリ）
+- `--strict`（既定: 無効。WARN があれば非 0 で終了する）
+- `-h` / `--help`
+
+検査は 3 カテゴリです。
+
+| カテゴリ | 検査内容 |
+|---|---|
+| 静的構造 | `.devcontainer/devcontainer.json` / `.env.example` / `scripts/on-attach.sh` / `scripts/fix-mount-owner.sh` / `scripts/post-rebuild-check.sh` / `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh` の実在。`devcontainer.json` が妥当な JSON であること。**`${localEnv:` の混入が無いこと**（下記）。`dockerComposeFile` が参照する compose ファイルが実在すること |
+| スクリプト検査 | 生成した各スクリプトの `bash -n` 構文検査（NG なら FAIL）と実行ビットの有無（無ければ WARN） |
+| 実行時コマンドの可用性 | `bash` / `jq` / `perl` / `gh`。`devcontainer.json` の features から検出した言語ランタイム（`rust` は feature 名と実行ファイル名が異なるため `cargo` で判定）。`--with-aws` / `--with-gcp` で配線した cloud CLI（`aws` / `gcloud` / `terraform`）。`docker-outside-of-docker` を配線していれば `docker`。いずれも不在は WARN |
+
+**`${localEnv:` の検出がこの診断の中核です。** 「[資格情報の扱い](#資格情報の扱い)」で述べたホスト資格情報の非注入は、方針を書いただけでは守られません。`remoteEnv` へホスト環境変数の参照が復活していないことを doctor が機械的に検査し、見つけたら FAIL にします。作業ディレクトリの受け渡し（`${localWorkspaceFolder}`）は `localEnv` ではないため対象外です。
+
+判定は `[OK]` / `[WARN]` / `[FAIL]` の 3 種で出力し、末尾に `Summary: PASS=<n> WARN=<n> FAIL=<n>` を表示します。終了コードは 3 値です。
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | FAIL が 0 件（`--strict` を付けた場合は WARN も 0 件） |
+| `1` | FAIL が 1 件以上 |
+| `2` | `--strict` 指定時に FAIL は 0 件だが WARN が 1 件以上 |
+
+WARN は「コンテナの外から実行したので言語ランタイムが見えない」といった、環境由来で正当なこともあります。**生成先のコンテナ内で実行するときに `--strict` を使う**のが想定運用です。
 
 ## mode オプションからの移行
 
