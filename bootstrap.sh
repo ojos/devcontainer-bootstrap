@@ -1403,6 +1403,13 @@ TMPL
 #   実質スキップされたまま GATE_PASS が出ることになる。push 前ゲートとしては
 #   偽の緑なので、ステージが空のときは commit 済み範囲を対象に切り替える。
 #
+#   切り替えた先が空になる経路も塞ぐ。push 済みのブランチでは上流と HEAD が
+#   同じコミットを指すため @{upstream}..HEAD の差分が空になり、同じ偽の緑が
+#   復活する。範囲は「解決できたか」ではなく「実際に差分があるか」で選び、
+#   無ければ既定ブランチとの分岐点まで戻してブランチ全体を対象にする。
+#   それでも差分が無いときは、レビュー対象が無いことを明示したうえで通過する
+#   （空を一律 FAIL にすると、差分の無い状態でのゲート実行が落ちるため）。
+#
 # 終了コード:
 #   0 = GATE_PASS（全段通過。push 可）
 #   1 = GATE_FAIL（いずれかの段が未通過、または実行不能）
@@ -1420,6 +1427,20 @@ cd "$(dirname "$HERE")"
 # 解決できない場合は、従来どおり引数なしで呼ぶ。ここで落とすと、git 管理下に
 # ない生成直後のプロジェクトでゲートが使えなくなる。
 REVIEW_RANGE=""
+# 範囲は解決できたが差分が空だった（= レビューできる対象が無い）状態を表す。
+# REVIEW_RANGE="" とは区別する。この状態を reviewer の既定へ流すと、空の
+# ステージ済み差分を見せることになり、塞いだはずの素通りへ戻るため。
+REVIEW_NO_TARGET=0
+
+# 範囲が実際に差分を持つか。git diff --quiet は差分ありで 1 を返す。
+# 128（範囲を解決できない等）を「差分あり」と誤認しないよう、1 だけを真とする。
+# 末尾の -- は、範囲と同名のパスが存在するときの曖昧さを排除する。
+range_has_diff() {
+  local rc=0
+  git diff --quiet "$1" -- >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -eq 1 ]]
+}
+
 resolve_review_range() {
   command -v git >/dev/null 2>&1 || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
@@ -1429,21 +1450,45 @@ resolve_review_range() {
   git rev-parse --verify --quiet HEAD >/dev/null || return 0
 
   # 上流が設定されていればそこからの差分。未 push のコミットがそのまま対象になる。
+  # push 済みだと上流 == HEAD で差分が空になるため、範囲を解決できたことではなく
+  # 差分があることを採用条件にする。
   local upstream
   upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-  if [[ -n "$upstream" ]]; then
+  if [[ -n "$upstream" ]] && range_has_diff "$upstream..HEAD"; then
     REVIEW_RANGE="$upstream..HEAD"
     return 0
   fi
 
-  # 上流が無い場合は既定ブランチの追跡枝を起点にする。名前は決め打ちしない。
-  local base
+  # 上流が無い、または上流との差分が空（= push 済み）の場合は、既定ブランチの
+  # 追跡枝との分岐点を起点にし、ブランチ全体をレビュー対象にする。
+  # 既定ブランチ名は決め打ちしない。
+  #
+  # 分岐点（merge-base）を使うのは、base..HEAD が 2 点間の比較であり、base 側に
+  # 進んだコミットを「打ち消し」として差分へ混ぜるため。ブランチが加えた変更
+  # だけを対象にする。
+  local base mb
   for base in origin/HEAD origin/main origin/master; do
-    if git rev-parse --verify --quiet "$base" >/dev/null; then
-      REVIEW_RANGE="$base..HEAD"
+    git rev-parse --verify --quiet "$base" >/dev/null || continue
+    mb="$(git merge-base "$base" HEAD 2>/dev/null || true)"
+    # 履歴が繋がっていない（分岐点が無い）場合の受け皿。
+    [[ -n "$mb" ]] || mb="$base"
+    if range_has_diff "$mb..HEAD"; then
+      REVIEW_RANGE="$mb..HEAD"
       return 0
     fi
+    # 既定ブランチの追跡枝が見つかった時点で起点は確定する。そこと差分が無いのは
+    # 「レビュー対象が無い」であって、空ツリーまで戻してリポジトリ全体を対象に
+    # すべき状況ではない。
+    REVIEW_NO_TARGET=1
+    return 0
   done
+
+  # 上流はあるが既定ブランチの追跡枝が無い場合。remote は存在するので、下の
+  # 空ツリー（= リポジトリ全体）へは広げずレビュー対象なしとして扱う。
+  if [[ -n "$upstream" ]]; then
+    REVIEW_NO_TARGET=1
+    return 0
+  fi
 
   # remote が無いプロジェクト。起点が無いので空ツリーからの全体を対象にする。
   #
@@ -1457,9 +1502,13 @@ resolve_review_range() {
   # 定数を焼き込まず git に計算させる。
   local empty_tree
   empty_tree="$(git hash-object -t tree /dev/null 2>/dev/null || true)"
-  if [[ -n "$empty_tree" ]]; then
+  if [[ -n "$empty_tree" ]] && range_has_diff "$empty_tree..HEAD"; then
     REVIEW_RANGE="$empty_tree..HEAD"
+    return 0
   fi
+
+  # 空ツリーとの差分すら無い（実質空のリポジトリ）。
+  REVIEW_NO_TARGET=1
 }
 
 echo "[loop-gate] step 1: verify (acceptance)"
@@ -1477,6 +1526,11 @@ if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
     if [[ -n "$REVIEW_RANGE" ]]; then
       echo "[loop-gate] staged diff is empty; reviewing $REVIEW_RANGE"
       bash "$HERE/gemini-review.sh" --range "$REVIEW_RANGE" || review_ok=1
+    elif [[ "$REVIEW_NO_TARGET" -eq 1 ]]; then
+      # レビューできる差分が 1 行も無い。第二意見を呼んでも対象が無いため、
+      # その事実を明示したうえで通過させる（空を FAIL にすると、差分の無い
+      # 状態でのゲート実行が落ちる）。黙って通すと偽の緑と区別が付かない。
+      echo "[loop-gate] no reviewable diff; second opinion has nothing to review"
     else
       bash "$HERE/gemini-review.sh" || review_ok=1
     fi
