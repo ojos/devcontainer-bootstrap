@@ -4,6 +4,27 @@
 
 > このファイルは公開リポジトリへ `CHANGELOG.md` として配布されます。配布先には `docs/` 階層が存在しないため、リポジトリ内の相対リンクを書かないでください（配布先で解決できないリンクになります）。
 
+## v0.8.0
+
+### Summary
+- `--languages` に **`ruby` を第 6 の選択肢として追加**した（issue #206）。既存 5 言語（`node` / `go` / `python` / `php` / `rust`）と同等の生成・検査・診断・文書体験を提供する。後方互換の機能追加。
+- 対応言語の README 追随漏れを機械で落とす**両方向の集合照合**を追加した。個別言語の取りこぼし検査は書いた言語しか守れず、次の言語追加で検査ごと足し忘れると素通りするため。
+
+### Highlights
+
+- **`--languages ruby` を追加（#206）**: `ghcr.io/devcontainers/features/ruby:1` を feature として配線し、`.gitignore` へ github/gitignore の `Ruby` テンプレートを取り込み、`doctor.sh` と生成物 `post-rebuild-check.sh` の検査対象に含める。VS Code の language server 拡張は選択時のみ `Shopify.ruby-lsp` を配線する（有料ティアを持たないため、`php` のような非配線扱いにはしない）。
+- **`ruby` は feature 名と実行ファイル名が一致するため写像を持たない**: `rust` は feature が `rust` なのに実行ファイルが `cargo` / `rustc` に分かれるため `runtime_check_cmd` に `rust`→`cargo` の写像を置いている。`ruby` は一致するので分岐を追加しない。`runtime_check_cmd` は「例外だけを書く」形を保つ。
+- **acceptance は `bundle exec rake` に委譲する**: ruby はテストフレームワークが Minitest / RSpec に分かれ、単一の慣習的コマンドが無い。`bundle exec rspec` や `bundle exec rake test` を既定にすると他方の流儀のプロジェクトで必ず失敗するため、`npm test` / `composer test` と同じく **プロジェクトの `Rakefile` の default タスクへ委譲**する形にした。マニフェスト判定は `Gemfile` の実在、ツール可用性の判定は `bundle`（`composer test` に対し `composer` を見る `php` と同型）。`Gemfile` が無ければ理由を出してスキップし、`Gemfile` があって `bundle` が無い場合は導入手順を添えて失敗させる（スキップと混同しない）。
+- **対応言語の両方向照合を追加した**: 実装の受理値 `case` から対応言語の集合を生成し、README「言語サポート」節の箇条書きと差集合を両方向で突き合わせる。実装が受理するのに README に無い言語は「存在しない機能」になり、README にあるのに受理されない言語はコピペで即エラーになる。フラグ照合と同じ理由で片方向にしない（規範「一覧の複製は機械照合で担保する」）。
+- **回帰テスト**: `tests/test-ruby-support.sh`（24 ケース）を追加。feature 配線・検査行・acceptance・gitignore ターゲット解決・拡張の条件配線・doctor 検出・入力検証を、いずれもネットワークに出ずに検証する。
+
+### 互換性
+
+- 破壊的変更なし。`--languages` へ選択肢が増えるだけで、既存 5 言語の挙動は変わらない。
+- `ruby` を指定しない生成物には、ruby feature・`Ruby` gitignore テンプレート・`Shopify.ruby-lsp` 拡張・ruby の検査行と acceptance 行のいずれも入らない。
+
+---
+
 ## v0.7.4
 
 ### Summary

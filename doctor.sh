@@ -164,11 +164,11 @@ check_runtime_languages() {
     return
   fi
 
-  # features から言語ランタイム（node, go, python, php, rust）を抽出する。
+  # features から言語ランタイム（node, go, python, php, rust, ruby）を抽出する。
   # feature キー名とランタイムコマンド名は原則一致するが、rust だけは feature が
   # rust なのに実行ファイルが cargo/rustc に分かれ「rust」コマンドは存在しない。
   # bootstrap.sh の runtime_check_cmd と同じ写像で検査コマンドを解決する。
-  for lang in node go python php rust; do
+  for lang in node go python php rust ruby; do
     if grep -q "\"ghcr.io/devcontainers/features/$lang:1\"" "$devcontainer_json" 2>/dev/null; then
       local cmd
       case "$lang" in

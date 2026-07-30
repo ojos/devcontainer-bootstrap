@@ -44,7 +44,7 @@ usage() {
   cat <<'EOF'
 options:
   --project-name <name>       Project name for devcontainer display name (required)
-  --languages <csv>           Language runtimes (CSV: node,go,python,php,rust) (required)
+  --languages <csv>           Language runtimes (CSV: node,go,python,php,rust,ruby) (required)
   --with-aws                  Install AWS CLI + Terraform (feature/extension)
   --with-gcp                  Install Google Cloud CLI + Terraform (feature/extension)
   --with-claude               Install Claude Code CLI + extension (persisted)
@@ -146,8 +146,8 @@ for i in "${!LANGUAGES[@]}"; do
 done
 for lang in "${LANGUAGES[@]}"; do
   case "$lang" in
-    node|go|python|php|rust) ;;
-    *) echo "error: unsupported language: $lang (supported: node, go, python, php, rust)" >&2; exit 1 ;;
+    node|go|python|php|rust|ruby) ;;
+    *) echo "error: unsupported language: $lang (supported: node, go, python, php, rust, ruby)" >&2; exit 1 ;;
   esac
 done
 case "$PLAYBOOK_CONFLICT_POLICY" in
@@ -329,6 +329,7 @@ TMPL
     "__IF_RUNTIME_PYTHON__": "ghcr.io/devcontainers/features/python:1",
     "__IF_RUNTIME_PHP__": "ghcr.io/devcontainers/features/php:1",
     "__IF_RUNTIME_RUST__": "ghcr.io/devcontainers/features/rust:1",
+    "__IF_RUNTIME_RUBY__": "ghcr.io/devcontainers/features/ruby:1",
     "__IF_WITH_AWS__": "ghcr.io/devcontainers/features/aws-cli:1",
     "__IF_WITH_GCP__": "ghcr.io/dhoeric/features/google-cloud-cli:1",
     "__IF_WITH_TERRAFORM__": "ghcr.io/devcontainers/features/terraform:1"
@@ -1668,6 +1669,9 @@ build_default_gitignore_targets() {
   if has_language "rust"; then
     targets+=("Rust")
   fi
+  if has_language "ruby"; then
+    targets+=("Ruby")
+  fi
   printf '%s\n' "${targets[@]}" | awk '!seen[$0]++'
 }
 
@@ -1751,6 +1755,10 @@ acceptance_check_cmd() {
     python) printf 'python -m pytest' ;;
     php)    printf 'composer test' ;;
     rust)   printf 'cargo test' ;;
+    # ruby はテストフレームワークが Minitest / RSpec に分かれ、単一の慣習的
+    # コマンドが無い。Rakefile の default タスクへ委譲し、npm test / composer test
+    # と同じ「プロジェクトの設定に従う」形にする。
+    ruby)   printf 'bundle exec rake' ;;
     *)      printf '%s' "$1" ;;
   esac
 }
@@ -1765,6 +1773,7 @@ acceptance_manifest_cond() {
     python) printf '[[ -f pyproject.toml || -f requirements.txt ]]' ;;
     php)    printf '[[ -f composer.json ]]' ;;
     rust)   printf '[[ -f Cargo.toml ]]' ;;
+    ruby)   printf '[[ -f Gemfile ]]' ;;
     *)      printf 'false' ;;
   esac
 }
@@ -1777,12 +1786,14 @@ acceptance_manifest_name() {
     python) printf 'pyproject.toml / requirements.txt' ;;
     php)    printf 'composer.json' ;;
     rust)   printf 'Cargo.toml' ;;
+    ruby)   printf 'Gemfile' ;;
     *)      printf '%s' "$1" ;;
   esac
 }
 
 # 受け入れ検証の実行に必要なツール名（command -v で存在確認する対象）を返す。
-# runtime_check_cmd と同型だが、実行するコマンドに合わせる（node は npm、php は composer）。
+# runtime_check_cmd と同型だが、実行するコマンドに合わせる（node は npm、php は
+# composer、ruby は bundle）。
 acceptance_tool_cmd() {
   case "$1" in
     node)   printf 'npm' ;;
@@ -1790,6 +1801,7 @@ acceptance_tool_cmd() {
     python) printf 'python' ;;
     php)    printf 'composer' ;;
     rust)   printf 'cargo' ;;
+    ruby)   printf 'bundle' ;;
     *)      printf '%s' "$1" ;;
   esac
 }
@@ -1803,6 +1815,7 @@ acceptance_install_hint() {
     python) printf 'install Python to run this acceptance check.' ;;
     php)    printf 'install PHP and Composer to run this acceptance check.' ;;
     rust)   printf 'install the Rust toolchain (https://rustup.rs) to run this acceptance check.' ;;
+    ruby)   printf 'install Ruby and Bundler (gem install bundler) to run this acceptance check.' ;;
     *)      printf 'install the required toolchain to run this acceptance check.' ;;
   esac
 }
@@ -1815,6 +1828,7 @@ language_extension() {
     rust)   printf 'rust-lang.rust-analyzer' ;;
     go)     printf 'golang.go' ;;
     python) printf 'ms-python.python' ;;
+    ruby)   printf 'Shopify.ruby-lsp' ;;
     *)      printf '' ;;
   esac
 }
@@ -2004,7 +2018,7 @@ render_content() {
 
   sed_args+=(-e "s|__PROJECT_NAME__|$PROJECT_NAME|g")
   sed_args+=(-e "s|__BASE_IMAGE__|$escaped_base_image|g")
-  for lang in node go python php rust; do
+  for lang in node go python php rust ruby; do
     local lang_upper lang_options
     lang_upper=$(printf '%s' "$lang" | tr '[:lower:]' '[:upper:]')
     if has_language "$lang"; then

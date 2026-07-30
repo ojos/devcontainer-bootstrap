@@ -1,6 +1,6 @@
 {
   "package": "devcontainer-bootstrap",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "assets": [
     "RELEASE-MANIFEST.json",
     "SHA256SUMS",
@@ -9,7 +9,7 @@
     "doctor.sh"
   ],
   "checksums": {
-    "PACKAGE_ARCHIVE.tar.gz": "687b0cd9b1fd40e581f2cd5dacd95a5468856055b676639021e23a7a542b26f2",
-    "SHA256SUMS": "89bfb4d67a0f130600514d25742ba7758340c39704475fa5d980e6a9c1f97a01"
+    "PACKAGE_ARCHIVE.tar.gz": "bb371baabf50b47649f2193c4c68e8f17bff1fc9792d0cdc2af757c392f81c74",
+    "SHA256SUMS": "6e0e4a61f7c9341d7ebefb0dd6661f965658109a4fffa9929440841b4879d835"
   }
 }
