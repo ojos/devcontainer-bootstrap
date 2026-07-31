@@ -49,31 +49,68 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.8.0`
+- `v0.8.1`
 
-`SHA256SUMS` は `bootstrap.sh` と `doctor.sh` を対象とするため、検証するにはその 2 つを取得します。
+取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.8.0
+TAG=v0.8.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
-curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
-curl -sSL "${BASE}/doctor.sh" -o doctor.sh
-curl -sSL "${BASE}/SHA256SUMS" -o SHA256SUMS
-sha256sum -c SHA256SUMS
-bash bootstrap.sh --project-name myapp --languages node,go --with-aws --with-claude
+
+d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
+trap 'rm -rf "$d"' EXIT
+curl -sSL "${BASE}/bootstrap.sh" -o "$d/bootstrap.sh"
+curl -sSL "${BASE}/SHA256SUMS"  -o "$d/SHA256SUMS"
+
+# --ignore-missing: SHA256SUMS は doctor.sh も対象にするため、bootstrap.sh だけを
+# 取得した場合は付けないと「doctor.sh が無い」で失敗する。
+#
+# 検証と実行は && で連結する。この手順は対話シェルへ貼って使うため set -e が効かず、
+# 行を分けると検証に失敗しても次の bash が走る。
+( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
+  --languages node,go --with-aws --with-claude
 ```
 
-AI 共通ルールも配置する場合は、ルールの取得元を指定します。
+一時ディレクトリから実行するため、次の 2 点に注意してください。
+
+- **`--output-dir` を必ず明示します。** 省略時の既定は `$PWD/<project-name>`、つまり一時ディレクトリの中になり、生成物が `trap` で消えます。
+- **`sha256sum --ignore-missing` は GNU coreutils 8.25 以降が必要です。** それ以前の環境や BSD 系の `shasum` を使う場合は、`doctor.sh` も取得したうえで `--ignore-missing` を外してください。
+
+検証を挟まない `curl | bash` 形式は採りません。`SHA256SUMS` は改ざんと取得失敗の両方を検出する唯一の手段で、省くと配布物の同一性を確認する経路が無くなります。
+
+AI 共通ルールも配置する場合は、ルールの取得元を指定します。一時ディレクトリから実行すると隣接チェックアウトが存在しないため、`--playbook-version` または `--playbook-from` が必要です（[AI 共通ルールの配置](#ai-共通ルールの配置)）。
 
 ```bash
-bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
-  --playbook-version v0.1.4
+# 上の手順の最後（検証と実行）を、規範の取得元を足した形へ置き換える。
+( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
+  --languages node,go --with-claude --playbook-version v0.1.4
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
+
+### doctor.sh を後から取得する
+
+上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
+
+```bash
+TAG=v0.8.1
+BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
+
+d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
+trap 'rm -rf "$d"' EXIT
+curl -sSL "${BASE}/doctor.sh"  -o "$d/doctor.sh"
+curl -sSL "${BASE}/SHA256SUMS" -o "$d/SHA256SUMS"
+
+( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+bash "$d/doctor.sh" --target-dir ./myapp
+```
+
+診断のたびに取得すれば、生成先のリポジトリへ `doctor.sh` を混入させずに済みます。手元へ置いて繰り返し使う場合は、`bootstrap.sh` と `doctor.sh` を同じディレクトリへ取得し、`--ignore-missing` を付けずに `sha256sum -c SHA256SUMS` で両方を検証してください。
 
 ### リリース資産
 
@@ -83,14 +120,14 @@ bash bootstrap.sh --project-name myapp --languages node,go --with-claude \
 |---|---|
 | `bootstrap.sh` | 生成コマンド本体。単体で動作します |
 | `doctor.sh` | 生成後の自己診断コマンド。単体で動作します |
-| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS` で改ざん・取得失敗を検出します |
+| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS` で改ざん・取得失敗を検出します（片方だけ取得した場合は `--ignore-missing` を付けます） |
 | `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md`）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合に使います |
 | `RELEASE-MANIFEST.json` | パッケージ名・版・資産一覧・チェックサムを機械可読にまとめたもの。`assets` がそのリリースに添付された資産の一覧、`checksums` が `PACKAGE_ARCHIVE.tar.gz` と `SHA256SUMS` のハッシュです |
 
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.8.0
+TAG=v0.8.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -478,7 +515,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 ## Doctor 自己診断
 
-生成後、生成先を対象に実行して構成を検証します。
+生成後、生成先を対象に実行して構成を検証します。公開リリースから `doctor.sh` を入手する手順は [doctor.sh を後から取得する](#doctorsh-を後から取得する) を参照してください。
 
 ```bash
 # 生成先を明示する場合（--target-dir 省略時はカレントディレクトリ）

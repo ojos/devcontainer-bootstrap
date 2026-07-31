@@ -891,8 +891,8 @@ check() {
 
   # 状態の検査を先に行う。適用を先に走らせると「未適用」を検出できなくなるため、
   # 冪等性の検査（apply を伴う）は最後に置く。
-  SNAPSHOT="$(mktemp)"
-  TMP_SNAPSHOT="$(mktemp)"
+  SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/dcb-git-identity-snapshot.XXXXXX")"
+  TMP_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/dcb-git-identity-snapshot.XXXXXX")"
   cp "$global_config" "$SNAPSHOT" 2>/dev/null || : >"$SNAPSHOT"
 
   # 1) global に identity が残っていないこと。
@@ -943,7 +943,7 @@ check() {
 
   # 5) local 設定を持たないリポジトリでは identity 解決が失敗すること。
   #    これが本題。黙って global へ落ちないことを確かめる。
-  TMP_REPO="$(mktemp -d)"
+  TMP_REPO="$(mktemp -d "${TMPDIR:-/tmp}/dcb-git-identity-repo.XXXXXX")"
   git init -q "$TMP_REPO"
   if (cd "$TMP_REPO" && git_ident_without_env var GIT_AUTHOR_IDENT >/dev/null 2>&1); then
     err "NG  local 未設定のリポジトリで author identity が解決できてしまう"
@@ -971,7 +971,7 @@ check() {
   #    ここが本題。設定を持たない新規リポジトリでも、上位スコープのヘルパーが
   #    生き残っていないことを、実際に一時リポジトリを作って確かめる。
   #    git は空文字で一覧をリセットするため、最後の空要素より後ろだけが実効値になる。
-  TMP_REPO="$(mktemp -d)"
+  TMP_REPO="$(mktemp -d "${TMPDIR:-/tmp}/dcb-git-identity-repo.XXXXXX")"
   git init -q "$TMP_REPO"
   local effective
   effective="$(cd "$TMP_REPO" && git config --get-all credential.helper 2>/dev/null \
@@ -1723,7 +1723,7 @@ build_remote_gitignore_block() {
     for target in $resolved_targets; do
       printf '%s\n' ""
       printf '%s\n' "# template: $target"
-      tmp="$(mktemp)"
+      tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-gitignore-template.XXXXXX")"
       if fetch_gitignore_template "$target" > "$tmp"; then
         cat "$tmp"
       else
@@ -2066,7 +2066,7 @@ upsert_gitignore() {
   local tmp block prev_mode=""
 
   block="$(build_gitignore_block)"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-gitignore-block.XXXXXX")"
 
   [[ -f "$gitignore_path" ]] && prev_mode="$(file_mode_octal "$gitignore_path")"
 
@@ -2279,7 +2279,7 @@ require_playbook_template() {
 # 展開ファイルをまだ必要とするプロセス自身に属するようにする。
 resolve_playbook_source_or_die() {
   if [[ "$PLAYBOOK_FROM" =~ ^https?:// ]]; then
-    PLAYBOOK_TMP_ROOT="$(mktemp -d)"
+    PLAYBOOK_TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dcb-playbook.XXXXXX")"
     trap 'rm -rf "$PLAYBOOK_TMP_ROOT"' EXIT
   fi
 
@@ -2374,7 +2374,7 @@ install_playbook_rules() {
 write_playbook_version_file() {
   local dest="$OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION" tmp
   local ver="${PLAYBOOK_VERSION:-(unspecified)}"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-playbook-version.XXXXXX")"
   {
     echo "# devcontainer-bootstrap が記録した ai-playbook のソース情報。"
     echo "# version は --playbook-version 指定時のタグ。未指定なら (unspecified)。"
@@ -2396,7 +2396,7 @@ write_file() {
     return 0
   fi
   mkdir -p "$(dirname "$out")"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
   render_content "$content" > "$tmp"
   if [[ "$out" == *.json ]]; then
     perl -0777 -i -pe 's/,\s*([}\]])/$1/g' "$tmp"
