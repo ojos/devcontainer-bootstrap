@@ -4,6 +4,56 @@
 
 > このファイルは公開リポジトリへ `CHANGELOG.md` として配布されます。配布先には `docs/` 階層が存在しないため、リポジトリ内の相対リンクを書かないでください（配布先で解決できないリンクになります）。
 
+## v0.9.0
+
+### Summary
+- **破壊的変更。`--with-copilot` からリモートのレビュー機構を分離した**（issue #230）。`--with-copilot` は手元の開発ツール（CLI・拡張・永続 volume）だけを配線し、リモート最終ゲートのワークフローは新設した `--with-copilot-review` が担う。**`--with-copilot` だけで再生成すると、ワークフローが配置されなくなる**（下記「移行」）。
+- **リモート最終ゲートが要求されないまま PR が通る穴を塞いだ**（issue #222）。要求側 `copilot-review.yml` に加え、要求されたことを別の契機から確認する `review-gate.yml` を配置する。**この版は ai-playbook v0.1.8 以降を要求する**（雛形の供給元が規範パッケージのため）。
+- **生成される `verify-commit-identity.sh` が GitHub 由来のコミットを扱えるようになった**（issue #223）。web UI でのマージやメール非公開設定では author が `<login>@users.noreply.github.com` になり、従来は一律で NG になっていた。あわせて許可エントリにドメイン一括指定を追加した。**許可範囲が広がる挙動変更を含む。**
+- **生成される `load-project-env.sh` が git worktree からメインの作業コピーの `.env` へ回り込むようになった**（issue #227）。worktree は追跡ファイルしか持たず、`.gitignore` された `.env` は複製されない。回り込みが無いと worktree 側でローカル事前ゲート（identity 検査を含む）が使えない。
+- 生成される `setup-git-identity.sh` の一時ファイル名に `dcb-` 接頭辞を付けた（issue #227）。**挙動は不変**で、作成先の名前だけが変わる。
+
+### 移行
+
+**これまで `--with-copilot` + 規範の配置でワークフローを得ていた場合**は、`--with-copilot-review` を足す。それだけで従来と同じ生成結果になる。
+
+```bash
+# 従来
+bootstrap.sh ... --with-copilot --with-playbook
+
+# 移行後（同じ結果）
+bootstrap.sh ... --with-copilot --with-copilot-review --with-playbook
+```
+
+- **ローカルの CLI・拡張だけが目的だった場合は、変更は不要。** `--with-copilot` の意味がローカル配線だけに縮んだ形になる。
+- **既存の生成物は、再生成しない限り影響を受けない。** 配置済みの `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` はそのまま残る。`--with-copilot-review` を付けずに `--force` 付きで再生成した場合も、この 2 本は削除されない（生成しないだけ）。ただし規範側の更新が反映されなくなるため、リモート最終ゲートを使い続けるなら新フラグを付けること。
+- **`--with-copilot-review` は規範の配置が前提。** `--with-playbook` / `--playbook-version` / `--playbook-from` のいずれも指定せずに（または `--without-playbook` と併せて）指定すると、**ファイルを 1 つも書かずに**エラー終了する。
+
+### Highlights
+
+- **効く場所が違うものを 1 つのフラグで束ねない（#230）**: 分離前は「リモートのレビューゲートだけ欲しい」構成を機構で表現できなかった。ローカル装備とリモート機構は動く場所も前提条件も違う。前者はコンテナ内の開発体験、後者は GitHub 上の PR ゲートで、規範パッケージの雛形を必要とする点も異なる。
+- **規範なしの指定は書き込み前に落とす（#230）**: 雛形の解決に任せると、生成物を途中まで書いてから停止する。v0.4.2 で「playbook 取得失敗時に部分生成せず書き込み前にアトミック停止」を選んだ前例に揃え、引数検証の段階で落とす。判定は既存の「規範を配置するか」のロジックを再利用しており、条件を二重に定義していない。
+- **要求と確認を分ける（#222）**: `pull_request` の `opened` は配信が取りこぼされることがあり、届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑になる。最終ゲートだけが黙って抜ける。`opened` を見る 2 本目を足しても塞げない（届いていないのはイベント自体）ため、確認側は定期実行を含む別の契機を張る。設計理由の正本は規範パッケージの `review-workflow.md`「要求されたことを別の契機で確認する」。
+- **雛形は規範パッケージが持ち、DCB は置き先だけを決める（#222）**: `review-gate.yml` の実体は ai-playbook 側にある。この分離は `copilot-review.yml` と同じで、規範をここで再定義しない。
+- **noreply 経路の許可は committer に縛る（#223）**: `is_github_authored()` は committer が `noreply@github.com` であることを必須とする。これにより GitHub 自身が作成したコミットに限定され、ローカルで作ったコミットには適用されない。許可リストへ個別 email を足して回る運用だと、メンバーが増えるたびに同じ穴が開く。
+- **ドメイン一括許可は 2 形に限定する（#223）**: 解釈するのは `@example.com` と `*@example.com` だけ。任意の glob を許すと、設定ミスの `*` 1 文字で全 email が通り、検知層が黙って無効化される。`*` 単体はどちらの形にも当たらず、何も許可しない。
+- **`@` を 2 つ持つ email を弾く（#223）**: 末尾一致だけで見ると `attacker@untrusted.com@example.com` が通る。git は author email を検証しないため、この形は実際に作れる。
+- **正本と写しの追随漏れを機械で検知する（#227）**: `scripts/*.sh` は `bootstrap.sh` 内のヒアドキュメントが正本で、開発リポジトリ直下の `scripts/` はその写しである。両者の同期を検査する機構が無く、片方だけ直しても両方のテストが緑になっていた。実際に 2 件の追随漏れが積み上がっていた。検査は開発リポジトリ側の機構で、配布物には含まれない。
+
+### 影響
+
+- **`--with-copilot-review` を使う場合、規範パッケージは ai-playbook v0.1.8 以降が必要。** それより古い版を組み合わせると次で停止する。
+
+  ```
+  error: template not found in rules source: templates/review-gate.yml
+         規範パッケージがこの版に必要な雛形を持っていません。
+  ```
+
+  このとき生成物は**途中まで書かれた状態で残る**。`--playbook-version v0.1.8`（以降）を指定すること。なお、この失敗の形は `review-gate.yml` に固有のものではなく、規範パッケージの雛形を要求する箇所すべてに共通する既存の挙動である。
+- **`verify-commit-identity.sh` は挙動が変わる。** これまで NG になっていた GitHub 由来のコミット（committer が `noreply@github.com` かつ author が `<login>@users.noreply.github.com`）が通るようになる。ローカルの identity 適用漏れ（別アカウントの個人 email の混入）は従来どおり検知する。取り込み済みの利用側は再生成すること。
+- **`load-project-env.sh` は挙動が変わる。** `.env` が生成先に無く、かつ git worktree から実行された場合に限り、メインの作業コピーの `.env` を読む。`PROJECT_ENV_FILE` を明示している場合は回り込まない。従来 `.env` を引けていた経路の挙動は変わらない。
+- `setup-git-identity.sh` の変更は一時ファイル名のみで、生成物の挙動には影響しない。
+
 ## v0.8.1
 
 ### Summary

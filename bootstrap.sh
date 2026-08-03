@@ -13,8 +13,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME=""
 OUTPUT_DIR=""
 LANGUAGES=()
-# --with-* で選択された装備（cloud / AI ツール）の集合。空既定。
-# 例: aws gcp claude gemini copilot。has_with で参照する。
+# --with-* で選択された装備（cloud / AI ツール / リモート機構）の集合。空既定。
+# 例: aws gcp claude gemini copilot copilot-review。has_with で参照する。
+# 判定は完全一致なので、copilot-review を足しても copilot の判定には影響しない。
 WITH_SET=()
 FORCE="false"
 DRY_RUN="false"
@@ -50,6 +51,8 @@ options:
   --with-claude               Install Claude Code CLI + extension (persisted)
   --with-gemini               Install Gemini CLI + extension (persisted)
   --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
+  --with-copilot-review       Place the remote review-gate workflows only
+                              (requires rules placement; no local tooling)
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
   --base-image <image>        Override auto-selected devcontainer base image
   --dry-run                   Show planned outputs without writing files
@@ -71,6 +74,13 @@ notes:
   AI CLIs are installed only when their --with flag is present (no token-based
   auto-install); each --with AI tool also adds its VS Code extension and
   persists its config across rebuilds.
+
+  Local tooling and the remote review mechanism are separate flags.
+  --with-copilot wires only the local side (CLI, extensions, persisted config);
+  --with-copilot-review places only the remote workflows. The latter requires a
+  rules placement (--with-playbook / --playbook-version / --playbook-from),
+  because those workflow templates are owned by the rules package; without one
+  the run stops before writing any file.
 
   Credentials are never injected from the host. remoteEnv carries only
   LOCAL_WORKSPACE_FOLDER; authenticate inside the container (gh auth login,
@@ -95,6 +105,10 @@ while [[ $# -gt 0 ]]; do
     --with-claude)      WITH_SET+=("claude"); shift ;;
     --with-gemini)      WITH_SET+=("gemini"); shift ;;
     --with-copilot)     WITH_SET+=("copilot"); shift ;;
+    # ローカル装備（--with-copilot）とは別のフラグにする。両者は性質が違い
+    # （手元の開発ツール / リモートのレビュー機構）、片方だけ欲しい構成が実在する。
+    # 1 つのフラグで束ねると「リモートのゲートだけ欲しい」を機構で表現できない。
+    --with-copilot-review) WITH_SET+=("copilot-review"); shift ;;
     --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
     # 廃止フラグは黙殺せず、移行先を示して停止する。黙って無視すると
     # 「指定したのに注入されない」状態を作り、資格情報の所在をふたたび曖昧にする。
@@ -563,6 +577,26 @@ __load_project_env() {
   # スクリプト位置から解決（scripts/ の 1 階層上がルート）。CWD にもパスにも依存しない。
   project_root="$(cd "$(dirname "$src")/.." && pwd)"
   env_file="${PROJECT_ENV_FILE:-$project_root/.env}"
+
+  # git worktree から実行された場合はメインの作業コピーの .env へ回り込む。
+  # worktree は追跡ファイルしか持たず、.gitignore された .env は複製されない。
+  # プロジェクト規約は並列実装に worktree 分離を機構で要求するため、ここで .env を
+  # 引けないと worktree 側でローカルゲート（identity 検査を含む）が使えなくなる。
+  # --git-common-dir はメインリポジトリの .git を指すので、その親がメインの作業コピー。
+  # PROJECT_ENV_FILE で明示された場合は回り込まない（明示指定を上書きしないため）。
+  if [[ -z "${PROJECT_ENV_FILE:-}" && ! -f "$env_file" ]] && command -v git >/dev/null 2>&1; then
+    local common_dir main_root
+    if common_dir="$(git -C "$project_root" rev-parse --git-common-dir 2>/dev/null)" && [[ -n "$common_dir" ]]; then
+      case "$common_dir" in
+        /*) ;;
+        *) common_dir="$project_root/$common_dir" ;;
+      esac
+      if main_root="$(cd "$common_dir/.." 2>/dev/null && pwd)" && [[ -f "$main_root/.env" ]]; then
+        env_file="$main_root/.env"
+      fi
+    fi
+  fi
+
   [[ -f "$env_file" ]] || return 0
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -1136,14 +1170,60 @@ init_allowlists() {
   ALLOWED_COAUTHOR_EMAILS_ARR=("${ALLOWED_AUTHOR_EMAILS_ARR[@]}" "noreply@github.com" "noreply@anthropic.com")
 }
 
+# 許可エントリは既定で完全一致。加えて "@example.com" / "*@example.com" の形だけを
+# ドメイン一括許可として解釈する。
+#
+# ドメイン形に限定するのは、任意の glob を許すと設定ミスの '*' 1 文字で全 email が
+# 通り、検知層が黙って無効化されるため。形を限定しておけば、書き間違えても影響範囲は
+# そのドメインに閉じる。'*' 単体はどちらの形にも当たらず、何も許可しない。
+#
+# 大文字小文字は区別する（既存の完全一致と同じ扱い）。git の email は通常小文字で、
+# ここだけ緩めると判定基準が 2 種類になる。
 is_allowed() {
   local needle="$1"
   shift
-  local candidate
+  local candidate domain
   for candidate in "$@"; do
     [[ "$needle" == "$candidate" ]] && return 0
+
+    case "$candidate" in
+      '*@'*) domain="${candidate#\*}" ;;
+      '@'*)  domain="$candidate" ;;
+      *)     continue ;;
+    esac
+    # ローカル部が 1 文字以上あることを要求する。"@example.com" という email
+    # そのものを許可しないため。
+    #
+    # あわせてローカル部に @ が無いことを要求する。末尾一致だけで見ると
+    # "attacker@untrusted.com@example.com" のような @ を 2 つ持つ email が
+    # 通る。git は author email を検証しないため、この形は実際に作れる。
+    [[ "$needle" == ?*"$domain" && "${needle%"$domain"}" != *@* ]] && return 0
   done
   return 1
+}
+
+# GitHub 上の操作（PR のマージ、web UI での編集）で作られたコミットかを判定する。
+#
+# GitHub 側で「メールアドレスを非公開にする」を有効にしていると、これらのコミットの
+# author は <login>@users.noreply.github.com（または <id>+<login>@...）になる。
+# committer は常に noreply@github.com。ローカルの identity 適用漏れとは発生経路が
+# 別で、許可リストに個別の email を足して回っても、メンバーが増えるたびに同じ穴が開く。
+#
+# 許可は「committer が noreply@github.com であること」に縛る。GitHub 自身が作成した
+# コミットに限定され、ローカルで作ったコミットには適用されない。
+#
+# トレードオフ: リポジトリへの書き込み権限を持つアカウントであれば、その GitHub
+# アカウントが Contributors に現れることを許容する。この検知層が塞ぐのはローカルの
+# identity 適用漏れ（別アカウントの個人 email の混入）であり、誰に書き込み権限を
+# 与えるかはリポジトリ側の責務として切り分ける。
+is_github_authored() {
+  local author="$1" committer="$2"
+  [[ "$committer" == "noreply@github.com" ]] || return 1
+  # ローカル部が 1 文字以上あり、かつ @ を含まないことを要求する（ドメイン許可と
+  # 同じ判定。末尾一致だけだと x@evil.com@users.noreply.github.com が通る）。
+  [[ "$author" == ?*"@users.noreply.github.com" ]] || return 1
+  [[ "${author%"@users.noreply.github.com"}" != *@* ]] || return 1
+  return 0
 }
 
 resolve_range() {
@@ -1210,7 +1290,8 @@ main() {
 
     IFS=$'\x1f' read -r sha author_email committer_email subject coauthors <<<"$record"
 
-    if ! is_allowed "$author_email" "${ALLOWED_AUTHOR_EMAILS_ARR[@]}"; then
+    if ! is_allowed "$author_email" "${ALLOWED_AUTHOR_EMAILS_ARR[@]}" \
+      && ! is_github_authored "$author_email" "$committer_email"; then
       echo "[identity] NG ${sha:0:8} author=<${author_email}> — ${subject}" >&2
       violations=$((violations + 1))
     fi
@@ -2348,9 +2429,21 @@ install_playbook_rules() {
   # リモート最終ゲートの雛形は、その機構を明示選択した場合のみ配置する。
   # 規範（review-workflow.md）はベンダー中立で「1 回に限定される機構なら自動でよい」
   # とだけ述べ、具体機構は選択時に雛形として置く分離を守る。
-  if has_with copilot; then
+  #
+  # 判定は --with-copilot ではなく --with-copilot-review で行う。前者はローカルの
+  # 開発ツール（CLI・拡張・永続 volume）を配線するフラグで、リモートのレビュー機構
+  # とは効く場所が違う。1 つのフラグで両方を制御すると、リモートのゲートだけを
+  # 使う構成が機構で表現できない（issue #230）。
+  #
+  # 雛形は 2 本で 1 組。copilot-review.yml が要求し、review-gate.yml が要求された
+  # ことを別の契機（PR 更新・定期実行）から確認する。要求側の契機は届かないことが
+  # あり、届かなければ最終ゲートが黙って抜けるため、確認側だけを落として配置する
+  # 選択肢は持たせない（規範 review-workflow.md「要求されたことを別の契機で確認する」）。
+  if has_with copilot-review; then
     tpl="$(require_playbook_template copilot-review.yml)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/workflows/copilot-review.yml"
+    tpl="$(require_playbook_template review-gate.yml)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/workflows/review-gate.yml"
   fi
 
   # Claude Code 向け intake 起点スキル。--with-claude を選んだときだけ配置する
@@ -2413,6 +2506,26 @@ write_file() {
 
 # ── メイン処理 ──────────────────────────────────────────────────────────────────────
 
+# --with-copilot-review が配置するのは規範パッケージの雛形だけなので、規範を配置
+# しない構成では供給元そのものが無い。require_playbook_template に任せると、規範や
+# 入口ファイルを書いたあとで停止し、中途半端な生成物が残る（実測済みの既存挙動）。
+# 取得元が解決できなければ 1 つも書かない（v0.4.2）に揃え、書き込み前のここで落とす。
+#
+# 判定条件は should_install_playbook をそのまま使う。配置は --with-playbook だけで
+# なく --playbook-from / --playbook-version でも成立するため、条件を書き写すと
+# 「ソース指定だけで配置した構成」を誤って弾く形でずれる。
+#
+# 検査をここへ置くのは、引数解析の直後では has_with / should_install_playbook が
+# まだ定義されていないため。ファイルを 1 つも書いていない点は同じで、アトミック
+# 停止の約束は満たす（--dry-run も同じ経路を通り、計画を出す前に落ちる）。
+if has_with copilot-review && ! should_install_playbook; then
+  echo "error: --with-copilot-review は規範の配置を前提とします。" >&2
+  echo "       配置するワークフローの雛形は規範パッケージが持つため、規範を配置しない構成では供給元がありません。" >&2
+  echo "       --with-playbook / --playbook-version <tag> / --playbook-from <path|url> のいずれかを併せて指定してください。" >&2
+  echo "       （--without-playbook を指定している場合は、両立しないためどちらかを外してください）" >&2
+  exit 1
+fi
+
 echo "[bootstrap] languages=${LANGUAGES[*]} with=${WITH_SET[*]:-(none)}"
 echo "[bootstrap] output=$OUTPUT_DIR"
 
@@ -2454,8 +2567,9 @@ EOF
     echo "plan: $OUTPUT_DIR/CLAUDE.md"
     echo "plan: $OUTPUT_DIR/.github/copilot-instructions.md"
     echo "plan: $OUTPUT_DIR/scripts/gemini-review.sh"
-    if has_with copilot; then
+    if has_with copilot-review; then
       echo "plan: $OUTPUT_DIR/.github/workflows/copilot-review.yml"
+      echo "plan: $OUTPUT_DIR/.github/workflows/review-gate.yml"
     fi
     has_with claude && echo "plan: $OUTPUT_DIR/.claude/skills/intake/SKILL.md"
     echo "plan: $OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION"

@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.8.1`
+- `v0.9.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.8.1
+TAG=v0.9.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -98,7 +98,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.8.1
+TAG=v0.9.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -127,7 +127,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.8.1
+TAG=v0.9.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -177,7 +177,10 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 | `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 |
 | `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
 | `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
+| `--with-copilot-review` | リモート最終ゲートのワークフロー 2 本（`.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`）。**ローカルの装備は一切入りません。** 規範の配置が前提（下記） |
 
+- **ローカル装備とリモート機構は別フラグ**: `--with-copilot` が配線するのは手元の開発ツール（CLI・拡張・永続 volume）だけで、リモートのレビュー機構は `--with-copilot-review` が担います。効く場所が違うものを 1 つのフラグで束ねると、「リモートのレビューゲートだけ欲しい」構成を機構で表現できないためです（[リモートレビュー分離への移行](#リモートレビュー分離への移行)）。
+- **`--with-copilot-review` は規範の配置が前提**: 配置するワークフローの雛形は規範パッケージが持つため、規範を配置しない構成では供給元がありません。`--with-playbook` / `--playbook-version` / `--playbook-from` のいずれも指定せずに（または `--without-playbook` と併せて）指定すると、**ファイルを 1 つも書かずに**エラー終了します。
 - **Terraform は cloud 随伴**: `--with-aws` または `--with-gcp` のいずれかを指定すると、Terraform feature + `hashicorp.terraform` 拡張が **1 回だけ** 同梱されます（両指定でも 1 回、cloud 無指定なら入りません）。
 - **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します（下記「資格情報の扱い」）。
@@ -432,6 +435,8 @@ VS Code は接続のたびにコンテナの `~/.docker/config.json` へ `credsS
   - コミット履歴の author / committer / Co-Authored-By を **email のみ**で判定します（name は表記揺れで判定に使わない）。許可外の author email を含む範囲で exit 1。
   - 許可する author email は、環境変数 `ALLOWED_AUTHOR_EMAILS`（カンマ/空白区切り）を最優先し、無ければ `.env` の `GIT_IDENTITY_EMAIL` にフォールバックします。どちらでも解決できなければ fail-closed（exit 1）で止まります。
   - committer には `noreply@github.com`（GitHub の squash merge / web UI）、Co-Authored-By には加えて `noreply@anthropic.com`（AI コーディング規約の trailer）を許可します。
+  - 許可エントリには `@example.com` / `*@example.com` の形でドメイン一括指定を書けます。**この 2 形だけ**をドメイン指定として解釈し、それ以外は完全一致です（任意の glob を許すと、設定ミスの `*` 1 文字で全 email が通り検知層が無効化されるため）。`*` 単体は何も許可しません。ローカル部が 1 文字以上あり、かつ `@` を含まないことを要求します（`@example.com` という email そのものや、`attacker@untrusted.com@example.com` の形を通さないため）。
+  - committer が `noreply@github.com` のコミットに限り、author が `<login>@users.noreply.github.com` の形であれば許可します。GitHub 側で「メールアドレスを非公開にする」を有効にしている利用者の PR マージ・web UI 編集に対応するためで、許可を committer に縛ることでローカルで作ったコミットには適用されません（ローカルの identity 適用漏れは従来どおり検知します）。
   - 使い方: 既定は `origin/main..HEAD`、範囲指定可、`--full` で HEAD の全履歴（`git rev-list --all` にはしない）。
 - `.github/workflows/identity-guard.yml`（CI）
   - `pull_request`（PR の全コミット）と `push`（`main` の全履歴）の 2 系統で `verify-commit-identity.sh` を呼びます。直接 push こそが混入の原因なので `push(main)` を省略しません。判定はスクリプト側にあり、ワークフローは呼ぶだけです。
@@ -494,15 +499,30 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.github/project-ai-rules.md`
 - `CLAUDE.md` / `.github/copilot-instructions.md`
 - `scripts/gemini-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
-- `.github/workflows/copilot-review.yml`（`--with-copilot` も併せて選択した場合のみ。下記参照）
+- `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`（`--with-copilot-review` を併せて選択した場合のみ。2 本で 1 組。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
 
 なお bootstrap.sh は生成先の README.md を読み書きしません。セットアップ手順を README へ追記する処理は持たないため、生成後の README への反映は利用者側の作業です。
 
 #### リモート最終ゲート（Copilot）ワークフロー
-規範を配置し、かつ `--with-copilot` を選択した場合のみ `.github/workflows/copilot-review.yml` を配置します。これは PR 作成時（`pull_request: types: [opened]`）に一度だけ Copilot へコードレビューを要求するワークフローで、`synchronize`（push 更新）では再要求しないため「1 回だけ」を機構で保証します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。フォークからの PR はスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。
+規範を配置し、かつ `--with-copilot-review` を選択した場合のみ、**要求側と確認側の 2 本**を配置します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。
 
-> **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot` を指定しなければ、このワークフローは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
+このフラグはリモート側だけを担い、ローカルの装備（CLI・拡張・`~/.copilot` の永続化）は入れません。ローカルの装備が必要なら `--with-copilot` を併せて指定します。逆に `--with-copilot` だけを指定した構成では、これらのワークフローは配置されません。
+
+| ファイル | 役割 |
+|---|---|
+| `.github/workflows/copilot-review.yml` | **要求側。** PR 作成時（`pull_request: types: [opened]`）に一度だけ Copilot へコードレビューを要求します。`synchronize`（push 更新）では再要求しないため「1 回だけ」を機構で保証します |
+| `.github/workflows/review-gate.yml` | **確認側。** 要求されたことを別の契機から確認します。要求はしません |
+
+要求側は、フォークからの PR をスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。要求に失敗した場合は、切り分け手順を `::error::` で出力して実行を落とします（握り潰してスキップにはしません。リモート最終ゲートが実行されていないのに緑を出すと、偽の緑と通過の区別が付かなくなるためです）。
+
+確認側を別に置くのは、**要求側の契機が届かないことがある**ためです。届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑なので、最終ゲートだけが黙って抜けます。同じ契機を見る 2 本目では塞げないため、確認側は `opened` / `synchronize` / `reopened` / `ready_for_review` に加えて**20 分ごとの定期実行**を張ります。判定は head SHA への commit status（`review-gate`）として出します。定期実行から見た PR にはジョブの成否が紐づかず、status でなければ PR 上に何も現れないためです。`opened` の契機だけは、要求が届くまで 120 秒待ってから判定します（要求側と同時に走るため）。
+
+> **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot-review` を指定しなければ、これらのワークフローは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
+
+> **注意**: `--with-copilot-review` は規範の配置を前提とします。雛形の正本は規範パッケージにあり、DCB は配置先を決めるだけだからです。規範を配置しない構成で指定すると、**ファイルを 1 つも書かずに**エラー終了します（生成物を途中まで書いてから止まると、中途半端な状態の切り分けが必要になるためです）。
+
+> **注意**: `review-gate.yml` は required check にしないでください。Copilot 側の遅延や障害でマージが止まる副作用があるためです。ここで止めたいのは「要求されていないことに気づかないまま通ること」だけです。
 
 ### `.gitignore` と github/gitignore の連携
 - managed セクションの中身は `github/gitignore` から取得したテンプレートだけです（DCB 固有の静的な無視パターンは持ちません）。マーカー行で挟んだこの区間だけを差し替え、セクション外の行は保持します。
@@ -512,6 +532,28 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - 取得できないテンプレート名は警告を出してスキップします（処理は継続）。
 
 > **注意**: `--languages` の値は小文字（`node`, `go`, `python`, `php`, `rust`, `ruby`）で指定します。一方 `--gitignore-targets` の値は [github/gitignore](https://github.com/github/gitignore) リポジトリのファイル名に合わせた大文字始まり（`Node`, `Go`, `PHP`, `Rust`, `Ruby`, `macOS` など）で指定してください。これらは別々の用途を持つため、意図的に表記が異なります。
+
+### 生成されるスクリプトの分類（そのまま配布 / 生成時に展開）
+
+`scripts/*.sh` の正本は `bootstrap.sh` の `get_template_content()` 内のヒアドキュメントです。テンプレートは**そのまま書き出されるもの**と、**生成時に構成へ応じて展開されるもの**の 2 種類に分かれます。生成先で内容が食い違って見えたときに、追随漏れなのか設計どおりなのかを判別できるよう、分類を明示します。
+
+| テンプレート | 生成時の扱い | 展開されるもの |
+|---|---|---|
+| `scripts/load-project-env.sh` | そのまま書き出す | — |
+| `scripts/loop-gate.sh` | そのまま書き出す | — |
+| `scripts/on-attach.sh` | そのまま書き出す | — |
+| `scripts/setup-git-identity.sh` | そのまま書き出す | — |
+| `scripts/verify-commit-identity.sh` | そのまま書き出す | — |
+| `scripts/verify.sh` | そのまま書き出す | — |
+| `scripts/acceptance.sh` | 生成時に展開 | 選択言語のマニフェストに応じた検証行。**生成後はプロジェクトが所有・編集します** |
+| `scripts/fix-mount-owner.sh` | 生成時に展開 | `--with-*` で配線した永続 volume のマウント先 |
+| `scripts/install-ai-tools.sh` | 生成時に展開 | `--with-<ai>` で選んだ AI CLI の導入行 |
+| `scripts/post-rebuild-check.sh` | 生成時に展開 | 永続 volume の実マウント検査、選択言語ランタイム、選択装備の CLI |
+
+- **「そのまま書き出す」側は、生成先で編集しないことを想定しています。** `--force` を付けて再実行するとテンプレートの内容へ戻ります（[再実行したときの挙動](#再実行したときの挙動)）。恒久的に変えたい場合はテンプレート側を直してください。
+- **「生成時に展開」側は、生成後にプロジェクトが手を入れる前提です。** とくに `scripts/acceptance.sh` は雛形であり、プロジェクトの実態（テスト・ビルド・lint・E2E）へ合わせて書き換えることを想定しています。
+
+この開発リポジトリ自身も DCB の生成物を取り込んで使っており、`scripts/` はテンプレートの写しにあたります。上表の「そのまま書き出す」6 本は、正本と写しがバイト一致していることを `tests/test-template-mirror.sh` が機械照合します（片方だけ直しても両方のテストが緑になり、配布物と手元が黙って食い違うため）。「生成時に展開」側はプレースホルダを持ち一致し得ないので検査対象外とし、その判断と理由を同テストのコメントに残しています（「検査していない」と「検査対象外と判断した」を読み分けられるようにするため）。
 
 ## Doctor 自己診断
 
@@ -550,6 +592,23 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 | `2` | `--strict` 指定時に FAIL は 0 件だが WARN が 1 件以上 |
 
 WARN は「コンテナの外から実行したので言語ランタイムが見えない」といった、環境由来で正当なこともあります。**生成先のコンテナ内で実行するときに `--strict` を使う**のが想定運用です。
+
+## リモートレビュー分離への移行
+
+`--with-copilot` からリモートのレビュー機構を切り出し、`--with-copilot-review` を新設しました（**破壊的変更**）。1 つのフラグが「手元の開発ツール」と「リモートのレビュー機構」という性質の違う 2 つを制御していたため、リモートのゲートだけを使う構成を機構で表現できなかったのが理由です。
+
+| 指定 | ローカル装備（CLI / 拡張 / `~/.copilot` 永続化） | リモートのワークフロー 2 本 |
+|---|---|---|
+| `--with-copilot` | 入る | **入らない（変更点）** |
+| `--with-copilot-review` | 入らない | 入る（規範の配置が前提） |
+| 両方 | 入る | 入る（旧 `--with-copilot` + 規範の配置と同じ結果） |
+
+移行手順:
+
+- **これまで `--with-copilot` + 規範の配置でワークフローを得ていた場合**は、`--with-copilot-review` を足してください。それだけで従来と同じ生成結果になります。
+- **ローカルの CLI・拡張だけが目的だった場合**は、変更は不要です。`--with-copilot` の意味がローカル配線だけに縮んだ形になります。
+- **既存の生成物は、再生成しない限り影響を受けません。** 配置済みの `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` はそのまま残ります。`--with-copilot-review` を付けずに `--force` 付きで再生成した場合も、DCB はこの 2 本を削除しません（生成しないだけです）。ただし規範側の更新が反映されなくなるため、リモート最終ゲートを使い続けるなら新フラグを付けてください。
+- `--with-copilot-review` は規範の配置（`--with-playbook` / `--playbook-version` / `--playbook-from`）が前提です。規範なしで指定すると、**ファイルを 1 つも書かずに**エラー終了します。
 
 ## mode オプションからの移行
 
