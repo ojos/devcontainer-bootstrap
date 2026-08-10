@@ -50,6 +50,7 @@ options:
   --with-gcp                  Install Google Cloud CLI + Terraform (feature/extension)
   --with-claude               Install Claude Code CLI + extension (persisted)
   --with-gemini               Install Gemini CLI + extension (persisted)
+  --with-antigravity          Install Antigravity CLI (agy; OAuth only, persisted)
   --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
   --with-copilot-review       Place the remote review-gate workflows only
                               (requires rules placement; no local tooling)
@@ -104,6 +105,10 @@ while [[ $# -gt 0 ]]; do
     --with-gcp)         WITH_SET+=("gcp"); shift ;;
     --with-claude)      WITH_SET+=("claude"); shift ;;
     --with-gemini)      WITH_SET+=("gemini"); shift ;;
+    # --with-gemini には束ねない。認証手段が違い（API キー / OAuth）、片方だけ
+    # 使いたい構成が実在する。束ねると使わない CLI が必ず入る。永続 volume だけは
+    # 共有する（agy は資格情報を ~/.gemini/antigravity-cli/ へ置くため）。
+    --with-antigravity) WITH_SET+=("antigravity"); shift ;;
     --with-copilot)     WITH_SET+=("copilot"); shift ;;
     # ローカル装備（--with-copilot）とは別のフラグにする。両者は性質が違い
     # （手元の開発ツール / リモートのレビュー機構）、片方だけ欲しい構成が実在する。
@@ -321,6 +326,7 @@ get_template_content() {
 
 # Gemini API キー（第二意見レビュー scripts/second-opinion-review.sh が読む）
 GEMINI_API_KEY=
+__SECOND_OPINION_ENGINE_LINES__
 
 # GitHub の PAT（personal access token）。gh がこの名前を直接読む。
 #
@@ -624,9 +630,14 @@ TMPL
       # トークン有無での自動インストールは行わない。__AI_INSTALL_LINES__ は
       # render_content が選択 AI ツール分の install 行に置換する（未選択なら空）。
       # 永続 volume の所有権修復は fix-mount-owner.sh が postCreate の先頭で行う。
+      #
+      # 雛形の地の文へ装備名を列挙しないこと。ヒアドキュメント内は構成によらず
+      # そのまま生成物へ入るため、列挙すると選ばれていない装備の名前が残る。
+      # 「そのフラグを指定しなければ関連する記述が 1 行も入らない」を、テストが
+      # 生成物ツリー全体の grep で検査している（test-antigravity.sh）。
       cat <<'TMPL'
 #!/usr/bin/env bash
-# 選択された AI CLI ツールを導入する（--with-claude / --with-gemini / --with-copilot）。
+# 選択された AI CLI ツールを導入する（生成時に --with-* で選ばれたものだけ）。
 set -euo pipefail
 
 install_if_missing() {
@@ -641,6 +652,7 @@ install_if_missing() {
   echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
 }
 
+__AGY_FUNCTION_LINES__
 __AI_INSTALL_LINES__
 echo "[install-ai-tools] done"
 TMPL
@@ -3019,14 +3031,32 @@ ai_config_dir() {
     claude)  printf '/home/vscode/.claude' ;;
     gemini)  printf '/home/vscode/.gemini' ;;
     copilot) printf '/home/vscode/.copilot' ;;
+    # agy は資格情報（OAuth トークン）を ~/.gemini/antigravity-cli/ へ置くため、
+    # gemini と同じディレクトリを共有する。専用の volume を切ると
+    # ~/.gemini と ~/.gemini/antigravity-cli の入れ子マウントになる。
+    antigravity) printf '/home/vscode/.gemini' ;;
     *)       printf '' ;;
   esac
 }
 
+# 永続 volume の名前。ディレクトリを共有する装備は volume 名も共有する。
+#
+# 名前まで共有しないと、--with-antigravity 単独で作った volume が
+# antigravity-storage になり、あとから --with-gemini を足した構成では
+# gemini-storage を見に行くことになる。同じ場所を指しているのに別の volume へ
+# 切り替わり、ログイン状態が消えたように見える。
+ai_storage_name() {
+  case "$1" in
+    antigravity) printf 'gemini' ;;
+    *)           printf '%s' "$1" ;;
+  esac
+}
+
 # with-set のうち AI ツールだけを選択順に列挙する。
+# antigravity は末尾に置く。既存構成の生成結果（install 行の並び）を変えないため。
 selected_ai_tools() {
   local t
-  for t in claude gemini copilot; do
+  for t in claude gemini copilot antigravity; do
     has_with "$t" && printf '%s\n' "$t"
   done
 }
@@ -3039,17 +3069,24 @@ selected_ai_tools() {
 # あり、それが rebuild のたびに消えると実用に耐えない。
 # cloud（aws / gcloud）は該当の --with-* を選んだときだけ定義する。未選択の構成に
 # 使われない volume を作らないため。
+#
+# gemini と antigravity は同じ "gemini /home/vscode/.gemini" を出すため、両方を
+# 選んだ構成では行が重複する。重複したまま流すと volume 定義・マウント・所有権修復・
+# 実マウント検査のすべてが 2 行ずつになる（compose は同じ名前の volume を 2 回
+# 定義した時点で落ちる）。名前とディレクトリの対で一意化する。
 persisted_storages() {
-  local t dir
-  printf '%s %s\n' gh /home/vscode/.config/gh
-  with_feature_active aws && printf '%s %s\n' aws /home/vscode/.aws
-  with_feature_active gcp && printf '%s %s\n' gcloud /home/vscode/.config/gcloud
-  while IFS= read -r t; do
-    [[ -n "$t" ]] || continue
-    dir="$(ai_config_dir "$t")"
-    [[ -n "$dir" ]] || continue
-    printf '%s %s\n' "$t" "$dir"
-  done < <(selected_ai_tools)
+  {
+    local t dir
+    printf '%s %s\n' gh /home/vscode/.config/gh
+    with_feature_active aws && printf '%s %s\n' aws /home/vscode/.aws
+    with_feature_active gcp && printf '%s %s\n' gcloud /home/vscode/.config/gcloud
+    while IFS= read -r t; do
+      [[ -n "$t" ]] || continue
+      dir="$(ai_config_dir "$t")"
+      [[ -n "$dir" ]] || continue
+      printf '%s %s\n' "$(ai_storage_name "$t")" "$dir"
+    done < <(selected_ai_tools)
+  } | awk '!seen[$0]++'
 }
 
 build_default_gitignore_targets() {
@@ -3369,16 +3406,152 @@ build_with_extensions_block() {
 
 # 選択した AI ツールの install 行を生成する（install-ai-tools.sh の __AI_INSTALL_LINES__）。
 # トークン分岐は行わない。未選択なら空。
+# .env.example の __SECOND_OPINION_ENGINE_LINES__。第二意見のエンジン選択。
+#
+# 既定は gemini で、指定しなければ挙動は変わらない。したがってこの記入欄が要るのは
+# antigravity を選べる構成だけで、--with-antigravity のときだけ出す。
+# 常時出すと、agy を導入していない生成物に「選べないエンジン」の記入欄が残る。
+build_second_opinion_engine_block() {
+  has_with antigravity || { printf ''; return; }
+  cat <<'ENGTMPL'
+
+# 第二意見レビューのエンジン（gemini | antigravity）。既定は gemini。
+#
+# antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
+# 対応しない。初回は対話で `agy` を起動してログインすること。GEMINI_API_KEY は
+# 使わないため、こちらへ寄せる場合は空のままでよい。
+SECOND_OPINION_ENGINE=
+ENGTMPL
+}
+
+# agy は npm 配布ではないため install_if_missing の同型に乗らない。専用の関数
+# （__AGY_FUNCTION_LINES__ が展開する）を呼ぶ。呼び出しは導入とオプトアウトの 2 つ。
 build_ai_install_block() {
   local tool spec cmd pkg out=""
   while IFS= read -r tool; do
     [[ -n "$tool" ]] || continue
+    if [[ "$tool" == "antigravity" ]]; then
+      out+="install_agy_if_missing"$'\n'
+      out+="disable_agy_telemetry"$'\n'
+      continue
+    fi
     spec="$(ai_cli_spec "$tool")"
     cmd="${spec%% *}"
     pkg="${spec#* }"
     out+="install_if_missing $cmd \"$pkg\""$'\n'
   done < <(selected_ai_tools)
   printf '%s' "$out"
+}
+
+# install-ai-tools.sh の __AGY_FUNCTION_LINES__。agy の導入とテレメトリ無効化の
+# 関数定義。--with-antigravity が無ければ空を返し、生成物に agy 関連は 1 行も
+# 入らない。
+#
+# 内容は開発リポジトリの scripts/install-ai-tools.sh と同じ性質を持たせる
+# （tests/test-agy-install-mirror.sh が関数本体のバイト一致を照合する）。
+build_agy_block() {
+  has_with antigravity || { printf ''; return; }
+  cat <<'AGYTMPL'
+# agy（Antigravity CLI）は npm 配布ではないため install_if_missing の同型に乗らない。
+# 配布元のインストーラを取得して実行し、~/.local/bin/agy へ置く。
+#
+# 認証は OAuth のみで、API キーには対応しない。導入だけでは使えず、初回に
+# 対話で `agy` を起動して Google アカウントへログインする必要がある。資格情報は
+# ~/.gemini/antigravity-cli/ 配下に置かれ、この devcontainer では ~/.gemini が
+# named volume（gemini-storage）なので rebuild しても消えない。
+install_agy_if_missing() {
+  if command -v agy >/dev/null 2>&1; then
+    echo "[install-ai-tools] agy already installed, skipping"
+    return 0
+  fi
+  echo "[install-ai-tools] installing agy (Antigravity CLI) ..."
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  # インストーラは ~/.local/bin へ置く。PATH に無ければ、導入直後の同一シェルからは
+  # 見えない。これは失敗ではないので、次に何をすればよいかを言うに留める。
+  #
+  # ただし「PATH に無いだけ」と「そもそも置かれていない」を取り違えない。実体の
+  # 有無で分ける。curl 自体の失敗は set -e + pipefail が捕まえるが、インストーラが
+  # 0 で終わりながらバイナリを置かない経路はそれをすり抜ける。取り違えると、導入に
+  # 失敗しているのに成功として先へ進む。
+  if command -v agy >/dev/null 2>&1; then
+    echo "[install-ai-tools] agy installed: $(command -v agy)"
+  elif [[ -x "$HOME/.local/bin/agy" ]]; then
+    echo "[install-ai-tools] agy installed to ~/.local/bin (PATH に無いため現シェルからは見えません)"
+  else
+    echo "[install-ai-tools] error: インストーラは完了しましたが agy が見つかりません" >&2
+    echo "                   ~/.local/bin/agy が存在しません。導入は失敗しています。" >&2
+    return 1
+  fi
+  echo "[install-ai-tools] agy は OAuth のみです。初回は対話で 'agy' を起動してログインしてください。"
+}
+
+# agy のテレメトリ（利用統計・クラッシュログ・対話ログの送信）を既定で止める。
+#
+# 環境変数によるオプトアウトは存在しない（agy 1.1.11 のバイナリを実測。AGY_* は
+# 自動更新・描画・認証まわりのみで、テレメトリ系は無い。DO_NOT_TRACK も非対応）。
+# したがって設定ファイルへ書く以外の手段が無い。キーは enableTelemetry（既定 true）。
+#
+# 上書きではなくマージする。このファイルは agy 自身も書き込む（colorScheme /
+# trustedWorkspaces 等）ため、丸ごと置き換えると利用者の設定が消える。
+#
+# 導入の有無に関わらず毎回通す。「導入したときだけ」にすると、先に手で入れた
+# 環境や、既存コンテナへ後追いで適用したい場合にオプトアウトが効かない。
+AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+
+disable_agy_telemetry() {
+  local dir tmp current
+  dir="$(dirname "$AGY_SETTINGS")"
+
+  # jq が無い場合に「黙って未適用」で先へ進めない。オプトアウトが効いていない
+  # ことに誰も気づけないまま、送信だけが続く状態になる。
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[install-ai-tools] error: jq が無いため agy のテレメトリを無効化できません" >&2
+    echo "                   jq を導入してから再実行してください: bash scripts/install-ai-tools.sh" >&2
+    return 1
+  fi
+
+  mkdir -p "$dir"
+  if [[ ! -e "$AGY_SETTINGS" ]]; then
+    printf '{}\n' > "$AGY_SETTINGS"
+    chmod 600 "$AGY_SETTINGS"
+  fi
+
+  # 壊れた JSON を黙って {} で置き換えない。利用者の設定を捨てることになる。
+  if ! jq -e . "$AGY_SETTINGS" >/dev/null 2>&1; then
+    echo "[install-ai-tools] error: JSON として読めないため書き換えを中止しました: $AGY_SETTINGS" >&2
+    echo "                   内容を修復するか退避してから再実行してください（オプトアウトは未適用です）" >&2
+    return 1
+  fi
+
+  # 冪等。既に false なら書き込まない（mtime も動かさない）。
+  #
+  # `// empty` は使わない。jq の `//` は null だけでなく **false も** 代替側へ
+  # 落とすため、既に false のときに「未設定」と区別できず、毎回書き込みが起きる。
+  # 値をそのまま出す（未設定なら null が出る）。
+  current="$(jq -r '.enableTelemetry' "$AGY_SETTINGS")"
+  if [[ "$current" == "false" ]]; then
+    echo "[install-ai-tools] agy telemetry already disabled, skipping"
+    return 0
+  fi
+
+  # 一時ファイルへ書いて mv で差し替える。`jq ... > 同じファイル` はリダイレクトが
+  # 先に空へ切り詰めるため、設定が消える。一時ファイルは同じディレクトリに作る
+  # （/tmp は別ファイルシステムのことがあり、その場合 mv が原子的にならない）。
+  # テンプレートを明示するのは BSD 系の mktemp が必須とするため。
+  tmp="$(mktemp "$dir/.settings.json.XXXXXX")"
+  # jq が落ちたら一時ファイルを残さない。作成先が設定ディレクトリ直下なので、
+  # 失敗のたびに .settings.json.XXXXXX が積み上がり、利用者の設定ディレクトリを
+  # 汚し続ける（set -e で即座に抜けるため、後始末の機会もここしかない）。
+  if ! jq '.enableTelemetry = false' "$AGY_SETTINGS" > "$tmp"; then
+    rm -f "$tmp"
+    echo "[install-ai-tools] error: settings.json の書き換えに失敗しました: $AGY_SETTINGS" >&2
+    return 1
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$AGY_SETTINGS"
+  echo "[install-ai-tools] agy telemetry disabled (enableTelemetry=false)"
+}
+AGYTMPL
 }
 
 # 永続 volume のマウント先の所有権修復行を生成する
@@ -3443,6 +3616,7 @@ build_with_check_block() {
   has_with claude  && checks+="claude "
   has_with gemini  && checks+="gemini "
   has_with copilot && checks+="copilot "
+  has_with antigravity && checks+="agy "
   for cmd in $checks; do
     out+="command -v $cmd >/dev/null 2>&1 && echo \"[check] $cmd OK\" || echo \"[check] $cmd missing\""$'\n'
   done
@@ -3475,6 +3649,8 @@ render_content() {
   subst_block __LANGUAGE_EXTENSIONS__ "$(build_language_extensions_block)"
   subst_block __WITH_EXTENSIONS__ "$(build_with_extensions_block)"
   subst_block __MOUNT_OWNER_LINES__ "$(build_mount_owner_block)"
+  subst_block __SECOND_OPINION_ENGINE_LINES__ "$(build_second_opinion_engine_block)"
+  subst_block __AGY_FUNCTION_LINES__ "$(build_agy_block)"
   subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
   subst_block __VOLUME_MOUNTS__ "$(build_volume_mounts_block)"
   subst_block __VOLUME_SECTION__ "$(build_volume_section_block)"

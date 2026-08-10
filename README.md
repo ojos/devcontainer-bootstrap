@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.9.1`
+- `v0.10.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.9.1
+TAG=v0.10.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -98,7 +98,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.9.1
+TAG=v0.10.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -127,7 +127,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.9.1
+TAG=v0.10.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -176,6 +176,7 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 | `--with-gcp` | Google Cloud CLI feature（外部 `dhoeric`）+ `GoogleCloudTools.cloudcode` 拡張 + Terraform（下記） |
 | `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 + マージ確認フック（下記） |
 | `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
+| `--with-antigravity` | Antigravity CLI（`agy`）+ `~/.gemini` 永続化 + テレメトリ無効化。**VS Code 拡張は入りません**。**OAuth のみ**で初回に対話ログインが要ります（下記） |
 | `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
 | `--with-copilot-review` | リモート最終ゲートのワークフロー 2 本（`.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`）。**ローカルの装備は一切入りません。** 規範の配置が前提（下記） |
 
@@ -183,6 +184,7 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 - **`--with-copilot-review` は規範の配置が前提**: 配置するワークフローの雛形は規範パッケージが持つため、規範を配置しない構成では供給元がありません。`--with-playbook` / `--playbook-version` / `--playbook-from` のいずれも指定せずに（または `--without-playbook` と併せて）指定すると、**ファイルを 1 つも書かずに**エラー終了します。
 - **Terraform は cloud 随伴**: `--with-aws` または `--with-gcp` のいずれかを指定すると、Terraform feature + `hashicorp.terraform` 拡張が **1 回だけ** 同梱されます（両指定でも 1 回、cloud 無指定なら入りません）。
 - **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
+- **`--with-gemini` と `--with-antigravity` は永続 volume を共有**: `agy` は資格情報を `~/.gemini/antigravity-cli/` に置くため、両者は同じ `~/.gemini` を使います。**どちらか一方でも指定すれば `gemini-storage` が 1 つだけ**作られ、両方指定しても重複しません。認証手段が違う（API キー / OAuth）ので、フラグは束ねず独立にしてあります。片方だけ使う構成をそのまま表現できます。
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します。唯一の例外は GitHub CLI で、PAT を `.env` の `GH_TOKEN` へ置けます（下記「[資格情報の扱い](#資格情報の扱い)」）。
 
 ### オプション入力
@@ -255,7 +257,9 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 bash scripts/fix-mount-owner.sh && bash scripts/install-ai-tools.sh
 ```
 
-導入するのは `--with-claude` / `--with-gemini` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
+導入するのは `--with-claude` / `--with-gemini` / `--with-antigravity` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
+
+`--with-antigravity` だけは npm 配布ではないため、配布元のインストーラを取得して `~/.local/bin/agy` へ置きます。あわせて**テレメトリを無効化**します（下記）。
 
 ## ループコーディング支援
 
@@ -426,7 +430,7 @@ gcloud auth login             # --with-gcp のとき（gcloud-storage）
 - `ms-azuretools.vscode-containers` は常に配線します。
 - 言語 language server 拡張は選択言語に応じて配線します（上記「言語サポート」参照）。
 - `--with-aws`: `amazonwebservices.aws-toolkit-vscode`。`--with-gcp`: `GoogleCloudTools.cloudcode`。いずれかの cloud 指定で `hashicorp.terraform`。
-- `--with-claude`: `anthropic.claude-code`。`--with-gemini`: `Google.gemini-cli-vscode-ide-companion`。`--with-copilot`: `github.copilot` / `github.copilot-chat`。
+- `--with-claude`: `anthropic.claude-code`。`--with-gemini`: `Google.gemini-cli-vscode-ide-companion`。`--with-copilot`: `github.copilot` / `github.copilot-chat`。`--with-antigravity` は拡張を追加しません（CLI のみ）。
 
 ## 資格情報の扱い
 
@@ -585,10 +589,23 @@ bash scripts/check-no-secrets.sh   # 終了コード 0 / 標準出力 SECRETS_PA
 |----------|----------|--------------|-------------------|------------------------|
 | Claude | `claude` | `/login`（既定。トークン注入は任意） | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は `/login` プロンプト表示（トークン運用は下記「Claude の認証」参照） |
 | Gemini | `gemini` | `.env` の `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
+| Antigravity | `agy` | Google アカウントの **OAuth のみ**（API キー非対応） | `--with-antigravity` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は応答を返さず終了（非対話ではツール実行許可を自動拒否し、診断は標準エラーへ出る） |
 | Copilot | `copilot` | GitHub 認証（`gh` / OAuth） | `--with-copilot` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時はログインプロンプト表示またはエラー終了 |
 | Codex  | `codex` | `.env` の `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
 
-各 AI ツールを `--with-<ai>` で選ぶと、CLI に加えて対応 VS Code 拡張が入り、設定ディレクトリ（`~/.claude` / `~/.gemini` / `~/.copilot`）が compose の named volume でリビルド間に保持されます。
+各 AI ツールを `--with-<ai>` で選ぶと、CLI に加えて対応 VS Code 拡張が入り、設定ディレクトリ（`~/.claude` / `~/.gemini` / `~/.copilot`）が compose の named volume でリビルド間に保持されます。**Antigravity だけは VS Code 拡張を持たず**、永続先は Gemini と同じ `~/.gemini` です。
+
+### Antigravity の認証とテレメトリ
+
+`--with-antigravity` は CLI（`agy`）を導入するだけで、**導入しただけでは使えません**。認証は Google アカウントの OAuth のみで、API キーには対応しません。コンテナ内で対話的に `agy` を起動し、初回のログインを済ませてください。
+
+資格情報は `~/.gemini/antigravity-cli/` に置かれます。この階層は `gemini-storage` volume に載るため、**リビルドしてもログイン状態は消えません**。OS のキーリングは使いません。
+
+テレメトリ（利用統計・クラッシュログ・対話ログの送信）は、生成物の `scripts/install-ai-tools.sh` が `~/.gemini/antigravity-cli/settings.json` の `enableTelemetry` を `false` へ**マージ**して無効化します。環境変数によるオプトアウトは存在せず、設定ファイルが唯一の手段です。
+
+- 冪等です（既に `false` なら書き込みません）。`agy` 自身が書く他のキー（`colorScheme` / `trustedWorkspaces` 等）は保持します
+- `jq` が無い場合と JSON が壊れている場合は**非 0 で停止**します。オプトアウトが黙って未適用のまま「プロビジョニング成功」に見える状態を作らないためです
+- **無効化されるのは CLI のみです。** Antigravity IDE を使う場合は、IDE 側で別途設定してください（このパッケージの対象外です）
 
 ### Claude の認証（コンテナ内で `/login`）
 
