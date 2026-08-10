@@ -255,7 +255,9 @@ template_rel_paths() {
     '.devcontainer/compose.yaml' \
     '.devcontainer/devcontainer.json' \
     '.github/workflows/identity-guard.yml' \
+    '.github/workflows/verify.yml' \
     'scripts/acceptance.sh' \
+    'scripts/check-no-secrets.sh' \
     'scripts/fix-mount-owner.sh' \
     'scripts/install-ai-tools.sh' \
     'scripts/load-project-env.sh' \
@@ -265,6 +267,39 @@ template_rel_paths() {
     'scripts/setup-git-identity.sh' \
     'scripts/verify-commit-identity.sh' \
     'scripts/verify.sh'
+}
+
+# --with-* の選択に応じて書き出すテンプレートの相対パス。
+# 無条件のものは template_rel_paths() が持つ。両者を分けるのは、
+# tests/test-template-mirror.sh が「生成対象の全件」を抽出するとき、
+# 条件付きのものを取りこぼさないようにするため（あちらは 2 つの関数の本体を
+# 別々の書式で読む。1 つの関数へ混ぜると、条件行を抽出できず分類漏れが素通りする）。
+#
+# 判定は has_with に依るが、この関数の定義位置は has_with より前でよい。呼び出しは
+# 書き出し直前（メイン処理）で、そこでは両方とも定義済みになっている。
+#
+# 条件は if 文で書く。`has_with aws || has_with gcp && printf ...` の形は、bash では
+# || と && が同じ優先順位・左結合なので条件の意味自体は等価だが（実測）、どちらも
+# 偽のとき関数の終了ステータスが 1 になる。呼び出し側は下記のとおり
+# `{ template_rel_paths; conditional_template_rel_paths; } | sort` で集めており、
+# bootstrap.sh は set -euo pipefail なので pipefail がこの 1 をパイプライン全体の
+# 失敗へ持ち上げ、**装備を選んでいない構成で bootstrap がその場で停止する**
+# （実測: 何も出力しないまま終了コード 1）。if 文は条件が偽でも 0 を返すため起きない。
+conditional_template_rel_paths() {
+  # 外部層の受け入れ条件は、外部状態を持つ構成だけへ配る。cloud 装備を選んでいない
+  # 構成へ空の雛形を配ると、使わないファイルを消す作業をさせることになる。
+  if has_with aws || has_with gcp; then
+    printf '%s\n' 'scripts/acceptance-remote.sh'
+  fi
+  # マージ確認フックとその配線先は Claude 実行環境の機構なので --with-claude に従う。
+  # .claude/.gitignore は settings.local.json の除外を .claude/ の中で閉じるために配る
+  # （生成先の .gitignore 管理セクションへ .claude/ 固有の行を書かないため）。
+  if has_with claude; then
+    printf '%s\n' \
+      '.claude/.gitignore' \
+      '.claude/settings.json' \
+      'scripts/confirm-merge-hook.sh'
+  fi
 }
 
 get_template_content() {
@@ -280,11 +315,42 @@ get_template_content() {
 # 作業ディレクトリの受け渡し（LOCAL_WORKSPACE_FOLDER）だけを担う。ここに書いた値が
 # 唯一の供給元になり、「どの資格情報を使っているか」がファイルとして目に見える。
 #
-# 認証そのもの（gh / cloud / AI CLI）はコンテナ内で行う。ログイン状態は named volume に
+# 認証そのもの（cloud / AI CLI）はコンテナ内で行う。ログイン状態は named volume に
 # 残るため、rebuild しても消えない。トークンをこのファイルへ書き写す必要はない。
+# 例外は GitHub（gh）だけで、理由は下の GH_TOKEN の項に書く。
 
-# Gemini API キー（第二意見レビュー scripts/gemini-review.sh が読む）
+# Gemini API キー（第二意見レビュー scripts/second-opinion-review.sh が読む）
 GEMINI_API_KEY=
+
+# GitHub の PAT（personal access token）。gh がこの名前を直接読む。
+#
+# 空にすると従来どおり、コンテナ内の `gh auth login` で保存した OAuth トークン
+# （~/.config/gh/hosts.yml）が使われる。PAT を持たない利用者はこのまま空でよい。
+#
+# ただし GITHUB_TOKEN も未設定（または空）であることが条件。gh は
+# GH_TOKEN -> GITHUB_TOKEN の順に環境変数を読み、空文字だけを読み飛ばす
+# （gh 2.96.0 で実測）。GITHUB_TOKEN に値があると、GH_TOKEN を空にしても
+# 保存済み認証へは戻らず GITHUB_TOKEN が使われる。GITHUB_TOKEN は恒久的に
+# 設定しないこと。空の GH_TOKEN は GITHUB_TOKEN に対する盾にならない。
+#
+# ここへ PAT を書き写すのは、gh の OAuth App に「ユーザー × アプリ × scope あたり
+# 10 トークン」の上限があるため。上限に達した状態でどこかの環境が認証すると、
+# GitHub が既存のトークンを 1 本破棄する（理由コード max_for_app）。溜まる単位は
+# 環境ではなく認証の回数で、`gh auth login` も `gh auth refresh` も自分の古い枠を
+# 返さない。失効に気づいた環境が再認証し、それがまた別の環境を殺す形で連鎖する。
+# これは実運用のセキュリティログで、理由コード max_for_app として確定している。
+# PAT は OAuth App の認可ではないため、この枠の外にある。
+#
+# gh 自身が読む名前をそのまま使う。GIT_IDENTITY_* が別名なのと方針が逆に見えるが、
+# 理由が違う。git は自身が読む名前（GIT_AUTHOR_EMAIL 等）を環境へ置くと
+# user.useConfigOnly の保護が無効になるため別名にしている。gh には、環境変数を
+# 置くことで無効化される保護が無い。別名にしても受け渡しの仕掛けが増えるだけになる。
+#
+# 設定しているあいだ `gh auth login` は効かなくなる（env が優先される）。これは
+# 制約ではなく安全装置として扱う。うっかり再認証して他環境のトークンを殺す事故が
+# 構造的に起きなくなる。設定中は login を実行しないこと。実行しても使われないまま
+# OAuth トークンが 1 本発行され、上限に達していれば他環境の 1 本が消えるだけになる。
+GH_TOKEN=
 
 # git のコミット identity。scripts/setup-git-identity.sh が local へ適用する。
 #
@@ -317,6 +383,10 @@ TMPL
       # cloud（aws/gcp/terraform）と cloud/AI の VS Code 拡張は --with-* に応じて
       # 条件配線する（__IF_WITH_*__ / __WITH_EXTENSIONS__ を render_content が処理）。
       # 条件行は末尾カンマ付きで置き、write_file の perl 除去 + jq 整形で末尾カンマを畳む。
+      # 静的解析器 shellcheck は ripgrep / tmux と同じく常時同梱する（--with-* を増やさない）。
+      # この生成物が配る scripts/* は言語やフラグに依らず必ずシェルスクリプトであり、
+      # 受け入れ条件の雛形（scripts/acceptance.sh）が静的解析を前提にできる価値が、
+      # feature 1 つぶんのビルド時間を上回る。
       cat <<'TMPL'
 {
   "name": "__PROJECT_NAME__",
@@ -336,6 +406,7 @@ TMPL
       "installDockerBuildx": true
     },
     "ghcr.io/devcontainers-extra/features/ripgrep:1": {},
+    "ghcr.io/devcontainers-extra/features/shellcheck:1": {},
     "ghcr.io/devcontainers-extra/features/tmux-apt-get:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "__IF_RUNTIME_NODE__": "ghcr.io/devcontainers/features/node:1",
@@ -423,6 +494,129 @@ jobs:
           else
             bash scripts/verify-commit-identity.sh --full
           fi
+TMPL
+      ;;
+    '.github/workflows/verify.yml')
+      # 受け入れ検証（scripts/verify.sh）を CI で回すゲート。判定は verify.sh /
+      # acceptance.sh 側に置き、ワークフローは段取りだけを持つ（identity-guard.yml と
+      # 同じ方針）。言語ランタイムやツールの導入は持たない。何が必要かは acceptance.sh が
+      # 何を検査するかに従属し、プロジェクトごとに違うため、位置だけをコメントで示す。
+      cat <<'TMPL'
+name: verify
+
+# 受け入れ検証（scripts/verify.sh）を CI で回すゲート。
+#
+# verify.sh / loop-gate.sh は手元で走らせる前提の実行体で、回し忘れても何も
+# 起きない。ローカル事前ゲートを通していない PR は、受け入れ条件を満たさないまま
+# レビューへ届く。ゲートを整備しても実行を忘れられるなら、守られている外観だけが
+# 残る。ここが担うのは判定ではなく「実行されること」の側である。
+#
+# 判定ロジックはこのファイルへ書き写さない。scripts/verify.sh を呼ぶだけにして、
+# 手元と CI が同じコードで判定するようにする。書き写すと、手元で緑・CI で赤に
+# なったときにどちらが正しいのかを決められなくなる。
+#
+# 2 系統を張る:
+#   - pull_request: マージ前に落とす（通常経路）
+#   - push(main):   PR を経由しない直接 push と、マージ後の統合状態を検査する。
+#                   並列に進む PR は互いの変更を見ないまま緑になるため、統合して
+#                   初めて壊れる組み合わせがある。こちらを省略しない。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# 同じ PR への連続 push で古い実行を積み残さない。
+#
+# main では取り消さない。push(main) が見ているのはマージ後の統合状態そのもので、
+# 続く push で前の実行を消すと「どのコミットから壊れたか」を追えなくなる。
+# pull_request では最新の head だけが関心の対象なので取り消す。
+#
+# 取り消さないことと直列化しないことは別の要求である。push 側のグループ鍵に
+# github.ref を使うと、main への push はどのコミットでも同じ ref
+# （refs/heads/main）になるため、cancel-in-progress: false と組み合わさって
+# 「取り消されない代わりに同じグループで直列にキュー待ちする」状態になる。
+# 連続してマージしたときに後続の実行が待たされ、統合状態を素早く追うという
+# 目的に反する。github.sha を使い、push はコミットごとに別グループへ分ける
+# ことで、取り消しも待ちも起きないようにする。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # fork からの PR の扱い: この雛形はスキップしない。
+    #
+    # scripts/verify.sh 自体は Secrets を必要とせず、permissions: contents: read で
+    # 足りる。これは fork からの PR に既に与えられている権限であり、走らせられない
+    # 理由が無い。スキップすれば、最も検証が要る外部からの変更にだけゲートが
+    # 掛からなくなる。スキップの根拠は「その権限では実行できない」ことに限り、
+    # 「赤くなりうるから」では外さない。
+    #
+    # ただし fork からの PR には Secrets もリポジトリ変数（vars）も渡らない。
+    # scripts/acceptance.sh へ vars / Secrets に依存する検査を足すと、その検査は
+    # fork からの PR でだけ供給元を失う。fail-closed な検査であれば常に赤くなり、
+    # 赤が定常状態のゲートは誰も見なくなる。足す側で次のどちらかを選ぶこと。
+    #   - 供給元を要する検査を acceptance.sh へ入れず、それ専用のワークフローに
+    #     置く（例: 許可 author email を要するコミット identity の検査）。
+    #   - fork からの PR を受け付けないリポジトリなら、次の 1 行を有効にする。
+    #
+    # 条件は fork の真偽で書く。よく使われる
+    # `head.repo.full_name == github.repository` の形は、push では
+    # github.event.pull_request が無く左辺が空になるため、push(main) の系統まで
+    # 丸ごとスキップされる（あちらの形が成り立つのは pull_request だけを契機に
+    # 持つワークフロー）。
+    # if: github.event.pull_request.head.repo.fork != true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 全履歴・全 ref を取る。
+          #
+          # 既定（fetch-depth: 1）は対象の ref 1 本を深さ 1 で取るだけで、既定
+          # ブランチの追跡枝（origin/main）が作られない。ここで起きるのは「範囲が
+          # 解決できずに落ちる」ことではなく、範囲を HEAD の全履歴へ落としたうえで、
+          # その全履歴が 1 コミットしか無い状態で通過することである。落ちるなら
+          # 気づけるが、これは偽の緑になる。
+          #
+          # 実測（許可外 author を 1 件含む 2 コミットの PR に対する identity 検証）:
+          #   深さ 1 -> 検査対象 1 件 / exit 0 で通過
+          #   全履歴 -> 検査対象 2 件 / exit 1 で検出
+          #
+          # acceptance.sh へ履歴を見る検査を足した時点でこの差が効くため、雛形の
+          # 側で全履歴を取っておく。
+          fetch-depth: 0
+
+      # ── プロジェクトの前提はここへ足す ──────────────────────────────────────
+      #
+      # 言語ランタイムの用意・ツール（静的解析器など）の導入・依存のインストールは
+      # この雛形が持たない。何が必要かは scripts/acceptance.sh が何を検査するかに
+      # 従属し、プロジェクトごとに違う。雛形が中途半端に決め打つと、使わない手順を
+      # 毎回消す作業をさせることになる。
+      #
+      # 例（そのまま貼らず、実態に合わせて書く）:
+      #   - uses: actions/setup-node@v4
+      #     with:
+      #       node-version: '20'
+      #   - run: npm ci
+      #   - run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Verify acceptance
+        env:
+          # CI には .env が無いため、リポジトリ変数がここでの唯一の供給元になる。
+          # acceptance.sh が許可 author email を要する検査を持つ構成のために渡す。
+          # 要らない構成では空のまま渡り、何も起きない。
+          #   利用側リポジトリの Settings > Secrets and variables > Actions >
+          #   Variables に ALLOWED_AUTHOR_EMAILS を作成する
+          #   （複数はカンマまたは空白区切り。例: "you@example.com"）。
+          ALLOWED_AUTHOR_EMAILS: ${{ vars.ALLOWED_AUTHOR_EMAILS }}
+        run: bash scripts/verify.sh
 TMPL
       ;;
     'scripts/install-ai-tools.sh')
@@ -570,6 +764,11 @@ __load_project_env() {
     src="${BASH_SOURCE[0]}"
   elif [ -n "${ZSH_VERSION:-}" ]; then
     # zsh: 現在ソース中ファイルの絶対/相対パス。
+    # この展開は zsh 固有で bash には無い。shellcheck は bash として解析するため
+    # 構文エラー（SC2296）に見えるが、この行へ到達するのは ZSH_VERSION が立つ
+    # zsh のときだけで、bash では評価されない。注記が無いと、scripts/ を静的解析に
+    # 掛ける受け入れ条件を持つプロジェクトが、配布物のせいで赤になる。
+    # shellcheck disable=SC2296
     src="${(%):-%x}"
   else
     src="$0"
@@ -649,6 +848,17 @@ echo "[on-attach] bootstrap active"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$HERE/load-project-env.sh"
 
+# このスクリプト自身にもプロジェクト .env を効かせる。
+#
+# 下の rc 注入は「これから開く対話シェル」にしか効かず、bash で実行される
+# on-attach.sh 自身には届かない。読まないと .env のキー（GH_TOKEN 等）が常に
+# 空に見え、PAT を設定している利用者を「未認証」と誤認して 'gh auth login' を
+# 案内してしまう。ローダーは source 専用・冪等で、.env が無ければ何もしない。
+if [[ -f "$HELPER" ]]; then
+  # shellcheck source=/dev/null
+  . "$HELPER"
+fi
+
 # git identity の無害化。VS Code の dev.containers.copyGitConfig がリビルドのたびに
 # ホストの ~/.gitconfig をコンテナへコピーし直すため、接続のたびに再適用する。
 # 失敗しても on-attach 全体は落とさない。identity が未適用でも、未指定のまま
@@ -712,10 +922,94 @@ strip_docker_creds_store() {
 }
 strip_docker_creds_store
 
+# gh の認証状態を確認する。
+#
+# 判定は「いま実際に使われている資格情報が有効か」だけに絞る（--active）。環境変数の
+# トークンと hosts.yml の保存済み認証は共存しうるため、--active を付けないと gh は
+# 両方を並べて報告し、使っていない側が無効なだけで exit=1 になる。
+GH_AUTH_TIMEOUT_SECS=10
+
+# gh が資格情報として読む環境変数のうち、いま効いているものの名前を返す（無ければ空）。
+#
+# gh は GH_TOKEN → GITHUB_TOKEN の順に読み、空文字は読み飛ばして次へ落ちる
+# （gh 2.96.0 で実測。GH_TOKEN= だけなら保存済み認証、GH_TOKEN= かつ
+# GITHUB_TOKEN=<値> なら GITHUB_TOKEN が使われる）。空文字を未設定と同じに扱うのは、
+# この gh 側の境界へ合わせるため。GITHUB_TOKEN を見落とすと、実際は環境変数で
+# 認証しているのに「保存済み認証を使用」と報告し、失敗時には 'gh auth login' を
+# 案内してしまう。
+gh_active_env_token_var() {
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    printf 'GH_TOKEN'
+  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf 'GITHUB_TOKEN'
+  fi
+}
+
+check_gh_auth() {
+  local rc=0 env_var
+  env_var="$(gh_active_env_token_var)"
+
+  # 応答が返らないまま接続処理を止め続けない。timeout が無い環境では打ち切れない
+  # ため、その場合だけ素で呼ぶ（124 の分岐へは入らなくなる）。
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$GH_AUTH_TIMEOUT_SECS" gh auth status --active >/dev/null 2>&1 || rc=$?
+  else
+    gh auth status --active >/dev/null 2>&1 || rc=$?
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    if [[ -n "$env_var" ]]; then
+      echo "[on-attach] gh auth OK ($env_var の値を使用)"
+    else
+      echo "[on-attach] gh auth OK (コンテナ内の保存済み認証を使用)"
+    fi
+    # GITHUB_TOKEN は供給元として想定していない。設定されていると、保存済み認証も
+    # .env の GH_TOKEN も黙って上書きされる。動いているうちに知らせる。
+    if [[ "$env_var" == "GITHUB_TOKEN" ]]; then
+      echo "[on-attach] WARN: GITHUB_TOKEN が保存済み認証より優先されています。恒久的に設定しないでください（空にすれば GH_TOKEN か保存済み認証へ戻ります）。" >&2
+    fi
+    return 0
+  fi
+
+  # ここで「到達できない」とも「認証が無効」とも断定しない。
+  #
+  # gh の出力では両者を区別できないことを実測している。プロキシ経由でしか外へ出られ
+  # ない状態を作って `gh auth status --active` を走らせると、到達できていないだけでも
+  # "The token in GH_TOKEN is invalid." と言う。
+  #
+  # 到達性を自前で測る案（bash の /dev/tcp で 443 へ直接つなぐ）は採らなかった。測れる
+  # のは直接経路だけで、gh が使うのはプロキシ経路である。プロキシ経由でしか外へ出られ
+  # ない環境では直接接続が塞がれ、gh は疎通しているのに「到達できません」と誤判定する。
+  # 逆に直接は開いていてプロキシ設定だけが壊れている環境では、「到達できています」と
+  # 誤判定して無効な断定を返す。配布物は網構成を知り得ないため、断定できないものを
+  # 断定しない側へ寄せる。
+  #
+  # 打ち切り（timeout の exit 124）だけは観測できた事実なので、分けて報告する。
+  if [[ "$rc" -eq 124 ]]; then
+    echo "[on-attach] WARN: gh の認証確認が ${GH_AUTH_TIMEOUT_SECS} 秒で完了しませんでした。認証は判定していません（ネットワークへ到達できていない可能性があります）。" >&2
+  else
+    echo "[on-attach] WARN: gh の認証を確認できませんでした。認証は判定していません（資格情報が無効か、GitHub へ到達できていない可能性があります）。" >&2
+  fi
+
+  if [[ -n "$env_var" ]]; then
+    # 環境変数で認証しているあいだは 'gh auth login' を案内しない。
+    #
+    # gh 2.96.0 で実測: 値が設定されているあいだ、gh はログインを拒否する
+    # （--with-token / --web のいずれでも "The value of the <VAR> environment
+    # variable is being used for authentication." で終了し、通信もしない）。
+    # 危ないのはその先で、拒否メッセージ（"first clear the value from the
+    # environment"）に従って値を空にしてログインすると、OAuth トークンの上限枠を
+    # 1 つ消費する。上限に達していれば GitHub が既存のトークンを 1 本破棄する
+    # （理由コード max_for_app）。ここで案内すると、その手順へ誘導することになる。
+    echo "[on-attach] WARN: $env_var が設定されています。gh はこの値を保存済み認証より優先します。'gh auth login' は実行しないでください（gh 自身も値が設定されているあいだはログインを拒否します）。値を空にしてログインすると OAuth トークンの上限枠を 1 つ消費し、上限に達していれば他環境の認証が 1 本失効します。" >&2
+    echo "[on-attach] WARN: $env_var の値（有効期限・権限・値の取り違え）と、ネットワークへ出られるかを確認してください。" >&2
+  else
+    echo "[on-attach] WARN: 未認証であれば、コンテナ内で 'gh auth login' を実行してください。ホストのトークンは注入されません。" >&2
+  fi
+}
+
 if command -v gh >/dev/null 2>&1; then
-  # 未認証なら、コンテナ内でのログインを案内する。ホストのトークンは注入されない。
-  gh auth status >/dev/null 2>&1 && echo "[on-attach] gh auth OK" || \
-    echo "[on-attach] WARN: gh は未認証です。コンテナ内で 'gh auth login' を実行してください。" >&2
+  check_gh_auth
 fi
 TMPL
       ;;
@@ -1008,6 +1302,11 @@ check() {
   TMP_REPO="$(mktemp -d "${TMPDIR:-/tmp}/dcb-git-identity-repo.XXXXXX")"
   git init -q "$TMP_REPO"
   local effective
+  # 末尾の `|| true` は if-then-else の代用（A && B || C）ではない。ヘルパーが
+  # 1 件も無ければ git config が非ゼロを返すため、空文字を得るための既定値として
+  # 置いている。A が真でも C が走ってよく、set -e 下で検査自体を落とさないための
+  # ものなので、SC2015 の想定する誤用には当たらない。
+  # shellcheck disable=SC2015
   effective="$(cd "$TMP_REPO" && git config --get-all credential.helper 2>/dev/null \
     | awk '$0 == "" { n = 0; next } { v[++n] = $0 } END { for (i = 1; i <= n; i++) print v[i] }' \
     | tr '\n' '|' || true)"
@@ -1020,6 +1319,47 @@ check() {
   fi
   rm -rf "$TMP_REPO"
   TMP_REPO=""
+
+  # 7.5) system スコープ（/etc/gitconfig 等）に置かれた credential.helper を
+  #      可視化する。判定には影響させない。
+  #
+  #      6) は global、7) は実効値しか見ないため、system に何が置かれていても
+  #      どちらの出力にも現れない。遮断そのものは成立している（global 先頭の
+  #      空文字が一覧をリセットするため system の helper は実効値から外れ、
+  #      それは 7) が一時リポジトリで実測済み）。ここで見たいのは遮断の可否では
+  #      なく、「自分たちが置いた覚えのないヘルパーが system にある」という
+  #      事実そのもの。
+  #
+  #      分かるのは存在の有無だけで、誰がいつ置いたかはこの検査から判定できない。
+  #      そのため出力は「検出」に留め、原因を断定しない。
+  #
+  #      失敗させない理由: 置く側が接続のたびに書き戻す構成では常時検出され
+  #      続けるため、失敗にすると常時赤になる。恒常的な赤は「赤を無視する習慣」
+  #      を生み、警告より悪い状態を作る。判定は変えず事実だけを出す。
+  #
+  #      プレフィクスは log に一元化する（直書きすると log の書式を変えたときに
+  #      この行だけが取り残される）。
+  #
+  #      検出は 1 つの文字列の空判定ではなく、行数で数える。`helper = `（空文字）
+  #      だけが置かれている場合、--get-all は空行 1 件を返すが、コマンド置換は
+  #      末尾改行を落とすため「1 件ある」と「0 件」が区別できない。キーがあるのに
+  #      「無い」と報告するのは、この検査が唯一報告すべきことを取り違えた状態。
+  local -a system_helpers=()
+  local system_helper
+  # git config は該当キーが無いと非ゼロを返す（未設定は正常系）。ここは検出の
+  # 有無を見るだけなので、空として受け取る（set -e 下で検査自体を落とさないため）。
+  while IFS= read -r system_helper; do
+    system_helpers+=("$system_helper")
+  done < <(git config --system --get-all credential.helper 2>/dev/null || true)
+  if [[ "${#system_helpers[@]}" -gt 0 ]]; then
+    log "INFO system スコープに credential.helper があります（実効値からは外れています。上記 7) を参照）:"
+    for system_helper in "${system_helpers[@]}"; do
+      log "INFO   ${system_helper:-<空文字>}"
+    done
+    log "INFO 誰がいつ置いたかはこの検査では判定できません。検出のみで、判定には影響させません。"
+  else
+    log "OK  system スコープに credential.helper は無い"
+  fi
 
   # 8) 冪等性。
   #    適用をもう一度走らせ、global 設定ファイルが 1 バイトも変わらないことを見る。
@@ -1396,9 +1736,15 @@ TMPL
 # 受け入れ条件の定義:
 #   既定で scripts/acceptance.sh を実行する。VERIFY_ACCEPTANCE で差し替え可能。
 #
+# 規範由来の検査:
+#   受け入れ条件の手前で scripts/check-no-secrets.sh（機密混入検査）を実行する。
+#   acceptance.sh 側へ置かないのは、あちらがプロジェクトの所有物で、受け入れ条件を
+#   書き足すたびに触られるため。規範由来の検査をそこへ置くと消える経路ができる。
+#   不在なら失敗させる（検査が成立していないことを合格にしない）。
+#
 # 終了コード:
 #   0 = VERIFY_PASS（受け入れ条件を満たす）
-#   1 = VERIFY_FAIL（未達、または受け入れ条件が未定義）
+#   1 = VERIFY_FAIL（未達、受け入れ条件が未定義、または機密の混入）
 set -euo pipefail
 
 # 受け入れ検証とテストコマンド（package.json / go.mod / Cargo.toml 等の検出）は
@@ -1416,6 +1762,24 @@ if [[ ! -f "$ACCEPTANCE" ]]; then
   exit 1
 fi
 
+# 機密混入検査。受け入れ条件より前に置く。機密が混入した状態で長い受け入れ検証を
+# 回しても直すべきことは変わらないため、安い検査から落として反復を短くする。
+SECRETS_CHECK="$HERE/check-no-secrets.sh"
+
+if [[ ! -f "$SECRETS_CHECK" ]]; then
+  echo "[verify] secret scan not found: $SECRETS_CHECK" >&2
+  echo "[verify] 機密混入検査が配置されていません。検査が成立しないため失敗させます。" >&2
+  echo "VERIFY_FAIL"
+  exit 1
+fi
+
+echo "[verify] running secret scan: scripts/check-no-secrets.sh"
+if ! bash "$SECRETS_CHECK"; then
+  echo "[verify] 機密混入検査に失敗しました" >&2
+  echo "VERIFY_FAIL"
+  exit 1
+fi
+
 echo "[verify] running acceptance: $ACCEPTANCE"
 if bash "$ACCEPTANCE"; then
   echo "VERIFY_PASS"
@@ -1425,6 +1789,507 @@ fi
 echo "[verify] acceptance not satisfied" >&2
 echo "VERIFY_FAIL"
 exit 1
+TMPL
+      ;;
+    'scripts/check-no-secrets.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-no-secrets.sh — 機密混入の検知ゲート（共通規範「機密をコミットしない」の機械化）
+#
+# 位置づけ:
+#   判定はこのスクリプトが持ち、scripts/verify.sh と CI は呼ぶだけ。
+#   scripts/verify-commit-identity.sh と同じ形にそろえる。
+#
+#   受け入れ条件の雛形（scripts/acceptance.sh）へ書かない理由: あちらは
+#   プロジェクトが所有・編集する設計であり、受け入れ条件を書き足すたびに触られる。
+#   規範由来の検査をそこへ置くと、書き換えのたびに検査が消える経路ができる。
+#   verify.sh から直接呼べば、その経路を作らずに済む。
+#
+# 検査は 4 つ:
+#
+#   1. 追跡前（git status --porcelain -z）
+#      追跡対象へ入る「前」に落とす。誤ってコミットしてからでは、削除コミットでは
+#      漏洩は解消しない（履歴からの除去と、当該資格情報の失効・再発行が必要になる）。
+#      列挙は NUL 区切り（#263）。パス名に改行を含むファイルも 1 レコードのまま
+#      崩れずに読める（後述）。
+#
+#   2. 追跡済み（git ls-files -z）
+#      CI で落とす。checkout 直後の作業ツリーはクリーンで 1. の出力が空になるため、
+#      追跡前の検査だけでは CI は「何も検査していない状態」で合格する。CI が
+#      本来捕まえたいのは機密を含んだままの PR、すなわち追跡済みの状態である。
+#      両方あって初めて、どちらの経路でも機密が既定ブランチへ入らない。
+#      こちらも列挙は NUL 区切り（#263）。
+#
+#   3. .env.example に機密の値が入っていないこと
+#      機密でない設定既定値は共有する意味があるため、キー名で対象を絞る。
+#
+#   4. .env と .env.example のキー整合
+#      .env が唯一の供給元で、.env.example はその雛形。
+#
+# 検査が成立していないことを合格にしない:
+#   git 管理外での実行、git コマンド自体の失敗、追跡ファイル 0 件は、いずれも
+#   「機密が無い」ことを意味しない。空の出力を「該当なし」と読むと、検査して
+#   いないのに合格になる。これらはすべて失敗として扱う。
+#
+# 出力に機密の値を出さない:
+#   検出時に出すのはパスとキー名だけで、値は決して出力しない（共通規範
+#   「ログ・issue 本文・相談記録・PR 説明に機密を含めない」）。
+#
+# 終了コード:
+#   0 = SECRETS_PASS
+#   1 = SECRETS_FAIL（機密の混入、または検査が成立しなかった）
+set -euo pipefail
+
+# ロケールを C に固定する。
+#
+# #263 以前は「判定の解析」（追跡前が git add --dry-run の人間向け出力
+# add '<path>' を解析していたため、翻訳されるとパターンに一致しなくなる）も
+# 固定の理由だった。追跡前・追跡済みとも git status --porcelain -z /
+# git ls-files -z の機械可読出力（ステータス文字とパスのみで、翻訳される
+# メッセージ文字列を含まない）へ置き換えたため、この理由は無くなった
+# （依存を外したのでここに書く）。
+#
+# 残る理由（並びの比較）: キー整合は sort / comm で集合差を取る。GNU sort の照合順は
+#   ロケールで変わり（実測: C では MYVAR < MY_VAR、en_US.utf8 では MY_VAR < MYVAR）、
+#   両辺が別の照合順で並ぶと comm は "not in sorted order" を警告しつつ終了コード 0 を
+#   返し、誤った差集合をそのまま使わせる（実測: 存在しないキー AB が片側だけに
+#   あると報告された）。両辺を同じ照合順に固定して依存そのものを切る。
+export LC_ALL=C
+
+# 検査はプロジェクトルート基準で行う。scripts/ は生成先プロジェクト直下にあるため、
+# スクリプト位置の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+ENV_EXAMPLE=".env.example"
+LOADER="$HERE/load-project-env.sh"
+
+VIOLATIONS=0
+
+ng() {
+  printf '[secrets] NG %s\n' "$1" >&2
+  VIOLATIONS=$((VIOLATIONS + 1))
+}
+
+fatal() {
+  printf '[secrets] %s\n' "$1" >&2
+  echo "SECRETS_FAIL"
+  exit 1
+}
+
+# git コマンドの stderr を一時退避する。追跡前 / 追跡済みのどちらの経路も、この
+# 検査の主題は「検査が成立していないことを合格にしない」ことであり、成立しなかった
+# 理由（index の破損・権限・パスの問題など）が読めないと主題と噛み合わない。
+#
+# 一方でこれらの git コマンドは成功時にも警告（embedded git repository・改行コード
+# 等）を出しうるため、常時 stderr をそのまま出すと通常運用で毎回ノイズが出る。それは
+# 「赤を無視する習慣」を作る経路であり、出力そのものが読まれなくなる。そのため
+# 一時ファイルへ落とし、失敗したときだけ見せる。
+#
+# mktemp はテンプレート付きで呼ぶ。$$ 由来の予測可能な名前は使わない（同名を先に
+# 置かれると書き込み先を乗っ取られる）。後始末は EXIT トラップで行う（この
+# スクリプトはここより前で trap を張っていない）。
+#
+# GIT_STDERR に加え、追跡前 / 追跡済みそれぞれの列挙（NUL 区切り）も一時ファイルへ
+# 落とす。bash の変数（"$(...)" によるコマンド置換）は NUL バイトを保持できず、
+# 埋め込まれた NUL がそのまま消えてしまう（末尾の改行除去とは別の、bash 自体の
+# 制約）。NUL 区切りのまま `while IFS= read -r -d '' ...` で読むには、変数ではなく
+# ファイルとして経由させる必要がある。
+#
+# trap は 3 つの mktemp より「前」に張る。あとから張ると、2 つ目・3 つ目の mktemp が
+# 失敗して fatal で抜けたときに、先に作られたファイルが消えずに残る（一時領域の
+# 容量やファイル数の上限に当たった環境で起きる）。変数は空で先に宣言する。
+#
+# 削除は関数に置き、パスを必ず二重引用符で囲む。${VAR:+"$VAR"} を rm の引数へ
+# 直接展開する形でも bash では引用が保たれる（実測: TMPDIR にスペースと * を
+# 含めても巻き添え削除は起きなかった）が、展開結果が引用されるかどうかはシェルの
+# 版ごとに確かめないと読み取れない。この雛形は任意の環境へ配布され、macOS の
+# bash 3.2 でも動く必要があるため、確かめなくても読める形にする。
+# -- を付けて、パスが rm のオプションとして解釈される経路も閉じる。
+GIT_STDERR=""
+PENDING_RAW=""
+TRACKED_RAW=""
+# trap から呼ぶため、静的解析からは呼び出しが見えない。
+# shellcheck disable=SC2329
+cleanup_temp_files() {
+  [[ -n "$GIT_STDERR" ]] && rm -f -- "$GIT_STDERR"
+  [[ -n "$PENDING_RAW" ]] && rm -f -- "$PENDING_RAW"
+  [[ -n "$TRACKED_RAW" ]] && rm -f -- "$TRACKED_RAW"
+  return 0
+}
+trap cleanup_temp_files EXIT
+GIT_STDERR="$(mktemp "${TMPDIR:-/tmp}/check-no-secrets.XXXXXX")" || fatal "一時ファイルを作成できませんでした。stderr の退避が成立しません。"
+PENDING_RAW="$(mktemp "${TMPDIR:-/tmp}/check-no-secrets-pending.XXXXXX")" || fatal "一時ファイルを作成できませんでした。追跡前の一覧が保存できません。"
+TRACKED_RAW="$(mktemp "${TMPDIR:-/tmp}/check-no-secrets-tracked.XXXXXX")" || fatal "一時ファイルを作成できませんでした。追跡済みの一覧が保存できません。"
+
+# 失敗したときだけ、退避しておいた git の stderr を見せる。正常時は無音のまま。
+show_git_stderr_if_any() {
+  if [[ -s "$GIT_STDERR" ]]; then
+    printf '[secrets] git の出力:\n' >&2
+    sed 's/^/    /' "$GIT_STDERR" >&2
+  fi
+}
+
+# ── 機密とみなすパス ─────────────────────────────────────────────────────────
+#
+# 判定は 2 経路で同じパターンを使う。片方だけ末尾一致に絞ると、改名・退避ファイル
+# （credentials.json.bak / terraform.tfstate-backup）が片側だけすり抜け、「経路が
+# 違うだけで守る対象は同じ」という前提が崩れる。
+#
+# 各名前のうしろに ([-._~][^/]*)? を許すことで、その退避形まで 1 つの式で拾う。
+# 境界を [-._~] に限るのは、無制限の後方一致にすると setup.environment.md や
+# foo.keys のような無関係な名前まで拾ってしまうため。広すぎる検知層は「赤を無視する
+# 習慣」を作り、検知層そのものを無力化する。
+#
+# 拡張子側は [^/]+ を前置きして、パス区切りをまたがせない。
+#
+# 接頭辞側（名前系トークンのみ）: credentials.json / client_secret /
+# service[-_]account の 3 つに限り、うしろと同じ境界 ([^/]*[-._~])? を前へも許す。
+# dev-credentials.json / prod-service-account.json / my-client_secret.json のように
+# 環境名や用途名を前置きする運用が実際にあり、先頭固定のままだとこの形がすり抜ける。
+# 境界を接尾辞側と同じ [-._~] に揃えるのは、無制限の前方一致にすると無関係な名前まで
+# 拾ってしまうため（接尾辞側と同じ理由）。
+#
+# .env / .netrc / .pgpass / .git-credentials / id_(rsa|...) は対象外のまま先頭固定に
+# 残す。これらは名前自体が短く、接頭辞を許すと foo.env のように無関係な名前（英単語
+# environment 系）まで拾う経路が接尾辞側より太い。過検知は検知層そのものを無力化する
+# ため、実際に接頭辞付き運用が確認された名前系トークンだけに絞る。
+SECRET_PATH_RE='(^|/)(\.env|\.netrc|\.pgpass|\.git-credentials|id_(rsa|dsa|ecdsa|ed25519)|([^/]*[-._~])?(credentials\.json|client_secret|service[-_]account)|[^/]+\.(pem|key|p12|pfx|jks|keystore|kdbx|tfstate|tfvars))([-._~][^/]*)?$'
+
+# 値を持たない雛形と公開鍵は共有が前提なので除外する（共通規範「共有するのは値の
+# ない雛形のみ」/ .pub は公開鍵）。
+#
+# トレードオフ: 名前で判定するため、機密を .example という名前で置けばこの検査は
+# すり抜ける。名前の検査だけでは中身は見られないので、配布する唯一の雛形である
+# .env.example については下の「機密の値」検査を第 2 層として持つ。
+SECRET_EXEMPT_RE='\.(example|sample|template|dist|pub)$'
+
+# 1 パスが機密とみなす対象かどうかを判定する。
+#
+# grep へ渡さず bash の =~ で判定するのは、grep の終了コード（1 = 該当なし /
+# 2 = エラー）をパイプライン越しに読み分けようとすると、エラーを「該当なし」と
+# 取り違える経路ができるため。ここでは外部プロセスを一切挟まない。
+is_secret_path() {
+  local path="$1" base
+  if [[ ! "$path" =~ $SECRET_PATH_RE ]]; then
+    return 1
+  fi
+  base="${path##*/}"
+  if [[ "$base" =~ $SECRET_EXEMPT_RE ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# ── 0. 検査が成立する状態か ──────────────────────────────────────────────────
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf '[secrets] git の作業ツリーではありません: %s\n' "$PWD" >&2
+  printf '[secrets] 機密が無いことと、検査が成立していないことは別です。\n' >&2
+  printf '[secrets] 対処: git init し、追跡対象を 1 件以上コミットしてから実行してください。\n' >&2
+  fatal "検査が成立しないため失敗させます。"
+fi
+
+# ── 1. 追跡前（追跡対象へ入る前に落とす） ────────────────────────────────────
+#
+# #263 より前は git add --all --dry-run の人間向け出力（add '<path>'）を行単位で
+# 解析していた。パス名に改行が含まれると、git はその改行をそのまま出力するため
+# 1 パスが 2 行へ割れ、`add '<path>'` の行末アンカー一致が成立せず検知できな
+# かった（実測: git 2.53.0 で追跡前・追跡済みとも SECRETS_PASS まで通過）。
+#
+# 塞ぎ方: 列挙そのものを NUL 区切りへ変える。git add --dry-run に -z は無いため、
+# 同じ「index へまだ入っていない変更」を機械可読で返す git status --porcelain -z
+# へ置き換える（出力書式の解析そのものが変わる。追跡済み側の ls-files -z と対で
+# 読むこと）。
+#
+# --untracked-files=all: 既定（normal）は未追跡ディレクトリを "?? dir/" と 1 行に
+# 畳んでしまい、配下の credentials.json が見えなくなる（実測）。add --dry-run は
+# 元々ファイル単位で列挙していたため、同じ広さに戻す。
+# --no-renames: 既定では index 側（ステージ済み）の改名が 1 レコード 2 パス
+# （新パス\0旧パス\0）になり、NUL 区切りのままでは「次のレコード」との境界が
+# 曖昧になる。無効化すると改名は旧パスの削除・新パスの追加という 2 レコードに
+# 分かれ、1 レコード = 1 パスの前提が常に成り立つ（実測: 作業ツリー側の改名は
+# 既定のままでも常にこの 2 レコード形であり、影響を受けない）。
+# パス指定を `.` にしてルート配下へ限るのは、下の git ls-files と同じ広さに
+# そろえるため（プロジェクトルートがリポジトリのサブディレクトリである構成でも、
+# 2 経路の対象が食い違わないようにする）。
+if ! git status --porcelain -z --untracked-files=all --no-renames -- . \
+      >"$PENDING_RAW" 2>"$GIT_STDERR"; then
+  show_git_stderr_if_any
+  fatal "git status --porcelain -z に失敗しました。追跡前の検査が成立しません。"
+fi
+
+# 各レコードは "XY<space><path>" で、X が index 側・Y が作業ツリー側の 1 文字
+# ステータス。数えるのは「これから git add --all で追跡対象へ入る変更」のみ:
+#
+#   Y が空白 … 作業ツリーに変更が無い（index 側だけの状態）。既に追跡済みなので
+#              下の git ls-files -z が拾う。ここで重複計上しない。
+#   Y = D    … 作業ツリーでの削除。git add --all は remove として扱い、削除は
+#              追跡対象へ「入る」変更ではない（#263 以前の add --dry-run 版も
+#              remove '<path>' 行を対象外にしていたのと同じ扱い）。
+#   Y = !    … 無視対象。--ignored を渡していないため通常は現れないが、将来
+#              オプションを増やしたときに備えて明示的に除外する。
+#   それ以外（?? の未追跡や M・A・T・C 等の未ステージ変更）は対象に含める。
+pending_count=0
+while IFS= read -r -d '' pending_rec; do
+  [[ -n "$pending_rec" ]] || continue
+  pending_y="${pending_rec:1:1}"
+  if [[ "$pending_y" == ' ' || "$pending_y" == 'D' || "$pending_y" == '!' ]]; then
+    continue
+  fi
+  pending_path="${pending_rec:3}"
+  pending_count=$((pending_count + 1))
+  if is_secret_path "$pending_path"; then
+    ng "追跡対象へ入ろうとしています: $pending_path"
+  fi
+done <"$PENDING_RAW"
+
+# ── 2. 追跡済み（CI で落とす層） ─────────────────────────────────────────────
+#
+# -z で列挙する（#263）。ls-files -z / status --porcelain -z は core.quotePath の
+# 設定に関わらずパスを一切引用・エスケープせず生バイト列のまま NUL 区切りで返す
+# （実測: git 2.53.0、非 ASCII パスも 8 進エスケープされない）。#263 より前は
+# newline 区切りの ls-files に -c core.quotePath=false を渡すことで同じ効果を
+# 得ていたが、-z へ移ったことでその依存が外れたため、ここでは渡していない
+# （依存を外したのでここに書く）。
+if ! git ls-files -z -- . >"$TRACKED_RAW" 2>"$GIT_STDERR"; then
+  show_git_stderr_if_any
+  fatal "git ls-files に失敗しました。追跡済みの検査が成立しません。"
+fi
+
+if [[ ! -s "$TRACKED_RAW" ]]; then
+  printf '[secrets] 追跡ファイルが 1 件もありません。\n' >&2
+  printf '[secrets] 出力が空なのは「機密が無い」ではなく「検査していない」状態です。\n' >&2
+  fatal "検査が成立しないため失敗させます。"
+fi
+
+tracked_count=0
+while IFS= read -r -d '' tracked_path; do
+  [[ -n "$tracked_path" ]] || continue
+  tracked_count=$((tracked_count + 1))
+  if is_secret_path "$tracked_path"; then
+    ng "追跡対象に含まれています: $tracked_path"
+  fi
+done <"$TRACKED_RAW"
+
+# ── .env / .env.example のキー抽出 ───────────────────────────────────────────
+#
+# 抽出をここへ書き直さず、ローダー（scripts/load-project-env.sh）自身に読ませる。
+# 別に書くと「実際には読まれるのに検査からは見えないキー」が生まれ、下の機密値の
+# 検査に穴が開く（CRLF・export 記法・KEY = VALUE・クォート囲みの揺れを吸収して
+# いるのはローダーだけである）。
+#
+# env -i を通す理由: 対話シェルには on-attach.sh が .env の読み込みを注入する。
+# 呼び出し元のシェルが既に .env を読んでいると、その値が「ファイルに書かれている」
+# のと区別できない。最小の環境から始め、ソース前後で export 済みになった変数の差
+# だけを取る。PATH / HOME / LC_ALL は落とすと外部コマンド（git / sort / comm）が
+# 動かない、あるいは並びが揺れるため明示的に渡す。
+#
+# 制約: PATH のように最小環境にも存在する名前が .env にあると差分に現れない。
+# 実運用の .env でその名前を使うことはなく、使えばローダーがシェルの PATH を
+# 壊すので、検査の穴としては表面化しない。
+#
+# 第 1 引数 = 出力モード（keys = キー名 / valued = 値が空でないキー名）
+# 第 2 引数 = ローダーの絶対パス
+#
+# valued モードでも値は出力しない。機密をログ・差分へ混入させないため、返すのは
+# 「値が空でないキーの名前」だけである。
+#
+# 単一引用符は意図的。この文字列は子 bash が解釈するプログラムで、ここで展開させない。
+#
+# 子シェルも fail-closed にする（set -euo pipefail）。以前は set -e 系が無く、
+# sort / comm が存在しない・失敗する環境でもキー抽出が空のまま exit 0 で完走して
+# いた（実測: PATH から comm を外すと `comm: command not found` を stderr へ出し
+# つつ空文字列を返し、rc=0 のまま抜ける）。呼び出し側は終了ステータスだけを見て
+# いるため、この経路は検出できず、下の機密値検査が「何も検査せずに通る」状態に
+# なっていた。git add / git ls-files の失敗は既に fail-closed にしており、内部で
+# 扱いが割れていたのをそろえる。
+#
+# 副作用の確認（実測、git 2.53.0 / bash 5.x）:
+#   - compgen -e は env -i でも PATH / HOME / LC_ALL を cns_probe() が明示的に
+#     渡しているため常に非空で、pipefail で before="$(compgen -e | sort)" が
+#     落ちることはない。
+#   - . "$loader" || exit 3 の既存ガードは維持する。
+#   - valued モードの ${!k} は compgen -e が返した「現に export 済みの名前」だけを
+#     対象にするため、set -u 下でも未定義変数を参照しない。
+#   - printf ... | while read ... の pipeline は、read が EOF で通常終了する分には
+#     非 0 にならず、pipefail で落ちない。
+#
+# baseline モード: ローダーを読む「前」に既に export されている名前（PATH / HOME /
+# LC_ALL に加え、bash が自動で export する PWD / SHLVL / _ など）をそのまま返す。
+# comm -13 は「ローダー実行後に増えた」ものだけを差分として拾うため、この一覧に
+# 含まれる名前は .env.example に書かれていても原理的に検出できない（下の空抽出
+# ガードが使う。「制約: PATH のように…」の段落と対で読むこと）。keys / valued の
+# 挙動は変えない。
+#
+# shellcheck disable=SC2016
+CNS_PROBE='
+  set -euo pipefail
+  mode="$1"; loader="$2"
+  before="$(compgen -e | sort)"
+  if [ "$mode" = baseline ]; then
+    printf "%s\n" "$before"
+    exit 0
+  fi
+  . "$loader" || exit 3
+  after="$(compgen -e | sort)"
+  keys="$(comm -13 <(printf "%s\n" "$before") <(printf "%s\n" "$after"))"
+  if [ "$mode" = keys ]; then
+    printf "%s\n" "$keys"
+    exit 0
+  fi
+  printf "%s\n" "$keys" | while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    if [ -n "${!k}" ]; then printf "%s\n" "$k"; fi
+  done
+  exit 0
+'
+
+# $1 = モード / $2 = PROJECT_ENV_FILE へ渡す絶対パス（空ならローダー自身の解決に委ねる）
+cns_probe() {
+  local mode="$1" env_file="${2-}"
+  if [[ -n "$env_file" ]]; then
+    env -i PATH="$PATH" HOME="${HOME:-}" LC_ALL=C PROJECT_ENV_FILE="$env_file" \
+      bash --noprofile --norc -c "$CNS_PROBE" cns-probe "$mode" "$LOADER"
+  else
+    # .env の場所はローダーに決めさせる。worktree から実行された場合にメインの
+    # 作業コピーへ回り込む挙動まで含めて、実際に読まれるファイルを対象にする。
+    env -i PATH="$PATH" HOME="${HOME:-}" LC_ALL=C \
+      bash --noprofile --norc -c "$CNS_PROBE" cns-probe "$mode" "$LOADER"
+  fi
+}
+
+if [[ ! -f "$LOADER" ]]; then
+  fatal "$LOADER が見つかりません。.env 系の検査が成立しません。"
+fi
+
+if [[ ! -f "$ENV_EXAMPLE" ]]; then
+  printf '[secrets] %s がありません。\n' "$ENV_EXAMPLE" >&2
+  printf '[secrets] 値のない雛形は共通規範が要求する共有物です（値は各自が .env へ設定する）。\n' >&2
+  fatal "検査が成立しないため失敗させます。"
+fi
+
+example_keys=""
+if ! example_keys="$(cns_probe keys "$PWD/$ENV_EXAMPLE")"; then
+  fatal "$ENV_EXAMPLE のキーを抽出できませんでした。"
+fi
+
+# 抽出そのものが「失敗はしていないが結果が空」になる経路を塞ぐ。CNS_PROBE の
+# set -euo pipefail だけでは、非 0 で終わらずに空を返すケースまでは塞げない。
+#
+# 空の .env.example は正当（環境変数を使わないプロジェクトもある）ため、単純に
+# 「空なら落とす」にはできない。KEY=... の形の行が 1 行以上あるのに抽出結果が
+# 0 件なら、それは「値が無い」のではなく「抽出そのものが成立していない」ことを
+# 意味するため、その場合だけ fatal で落とす……はずだったが、比較対象を素朴な
+# 行数にすると誤検知する。CNS_PROBE は「ローダー実行前に既に export されている
+# 名前」（baseline: PATH / HOME / LC_ALL や、bash が自動で export する PWD /
+# SHLVL / _ など）を comm -13 で除外する構造上、.env.example がそういう名前だけで
+# 構成されていると、行はあるのに抽出は原理的に 0 件になる（上の「制約: PATH の
+# ように最小環境にも存在する名前が .env にあると差分に現れない」と同じ理由）。
+# これは検査していないのではなく、検出できない対象を正しく除外した結果であり、
+# fatal にしてはならない。そのため比較対象を「baseline に含まれないキー」だけに
+# 絞る。
+if [[ -z "$example_keys" ]]; then
+  baseline_keys=""
+  if ! baseline_keys="$(cns_probe baseline "")"; then
+    fatal "ベースラインの環境変数一覧を取得できませんでした。空抽出の判定が成立しません。"
+  fi
+
+  # .env.example から KEY=... の行のキー名だけを取り出す（値・コメント・空行は
+  # 無視する）。ローダーの正確な解析ルールとは別に、ここでは「fatal を出すか」の
+  # 判定にのみ使う概算でよい。
+  example_candidate_keys="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/p' "$ENV_EXAMPLE")"
+
+  example_non_baseline_count="$(comm -23 \
+    <(printf '%s\n' "$example_candidate_keys" | sort) \
+    <(printf '%s\n' "$baseline_keys" | sort) \
+    | grep -c '[^[:space:]]' || true)"
+
+  if [[ "$example_non_baseline_count" -gt 0 ]]; then
+    fatal "$ENV_EXAMPLE にベースライン外の KEY=... 行が $example_non_baseline_count 件あるのに抽出結果が 0 件でした。抽出が成立していない疑いがあります（検査していないことを合格にしない）。"
+  fi
+fi
+
+# ── 3. .env.example に機密の値が入っていないこと ─────────────────────────────
+#
+# 機密でない設定既定値（例: 回数・モデル名）は雛形で共有する意味があるため、
+# すべてのキーを空必須にはしない。機密を示す語を含むキーと identity キーだけを
+# 対象にする。
+#
+# 部分一致で見る。語尾一致にすると AWS_SECRET_ACCESS_KEY_ID のような修飾付きが
+# すり抜ける。PAT だけは PATH との衝突を避けて語境界（先頭か _ に挟まれる）を要求する。
+SECRET_KEY_RE='SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|KEY|AUTH|IDENTITY|(^|_)PAT(_|$)'
+
+example_valued=""
+if ! example_valued="$(cns_probe valued "$PWD/$ENV_EXAMPLE")"; then
+  fatal "$ENV_EXAMPLE の値を検査できませんでした。"
+fi
+
+while IFS= read -r key; do
+  [[ -n "$key" ]] || continue
+  if printf '%s' "$key" | grep -Eqi "$SECRET_KEY_RE"; then
+    ng "$ENV_EXAMPLE に値が入っています（雛形はキー名だけを共有する）: $key"
+  fi
+done <<<"$example_valued"
+
+# ── 4. .env と .env.example のキー整合 ───────────────────────────────────────
+#
+# .env が唯一の供給元で、.env.example はその雛形。.env にしか無いキーは、雛形が
+# その設定項目を伝えていない状態で、他の環境が .env を作り直すと黙って欠ける。
+#
+# .env は追跡外なので、無い環境（CI）ではキーが 1 件も取れない。その場合はスキップ
+# する（この検査に限り、issue の指定どおり「.env が無い環境ではスキップ」とする）。
+env_keys=""
+if ! env_keys="$(cns_probe keys "")"; then
+  fatal ".env のキーを抽出できませんでした。"
+fi
+
+if [[ -z "$env_keys" ]]; then
+  printf '[secrets] .env からキーを取得できないため、キー整合はスキップします（CI など .env が無い環境）。\n'
+else
+  only_env="$(comm -23 \
+    <(printf '%s\n' "$env_keys" | sort) \
+    <(printf '%s\n' "$example_keys" | sort))"
+  only_example="$(comm -13 \
+    <(printf '%s\n' "$env_keys" | sort) \
+    <(printf '%s\n' "$example_keys" | sort))"
+
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    ng ".env にあるキーが $ENV_EXAMPLE に無い（雛形から作り直した環境で黙って欠ける）: $key"
+  done <<<"$only_env"
+
+  # 逆向き（雛形にあって .env に無い）は失敗にしない。
+  #
+  # 判断と理由: 雛形へキーが増えた直後は、各環境の .env が追いつくまで必ずこの状態を
+  # 通る。ここで落とすと、配布物の更新のたびに全利用者のローカルゲートが赤くなり、
+  # 直す先が追跡ファイルではなく各人の手元になる。実測でもこのリポジトリが該当した
+  # （#237 が .env.example へ GH_TOKEN を足した一方、手元の .env は 4 キーのまま）。
+  # 一方でこの向きが実害になる経路（値が解決できない）は、それを必要とする検査が
+  # それぞれ fail-closed で落とす（例: verify-commit-identity.sh の許可 email）。
+  # 黙って無視はせず、事実として提示する。
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    printf '[secrets] NOTICE %s にあるキーが .env に未設定です: %s\n' "$ENV_EXAMPLE" "$key"
+  done <<<"$only_example"
+fi
+
+# ── 結果 ─────────────────────────────────────────────────────────────────────
+
+printf '[secrets] 検査したパス: 追跡済み %s 件 / 追跡前 %s 件\n' \
+  "$tracked_count" "$pending_count"
+
+if [[ "$VIOLATIONS" -gt 0 ]]; then
+  printf '[secrets] 機密の混入を %s 件検出しました。\n' "$VIOLATIONS" >&2
+  printf '[secrets] 対処: 追跡前なら .gitignore へ加える。追跡済みなら git rm --cached で外し、\n' >&2
+  printf '[secrets] 既にコミット済みなら履歴からの除去と、当該資格情報の失効・再発行まで行う\n' >&2
+  printf '[secrets] （削除コミットでは漏洩は解消しません）。\n' >&2
+  echo "SECRETS_FAIL"
+  exit 1
+fi
+
+echo "SECRETS_PASS"
+exit 0
 TMPL
       ;;
     'scripts/acceptance.sh')
@@ -1464,6 +2329,124 @@ fi
 echo "[acceptance] OK"
 TMPL
       ;;
+    'scripts/acceptance-remote.sh')
+      # 外部層の雛形は骨格だけを持つ。何が外部状態かはプロジェクトごとに違うため、
+      # 具体的な検査を決め打つと必ず外れる。骨格（run ヘルパー・一時ログ・失敗の集計・
+      # 前提の記述位置）だけを配り、検査は利用側が足す。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# acceptance-remote.sh — 外部層の受け入れ条件（プロジェクトが所有・編集する）
+#
+# 受け入れ条件はローカル層と外部層に分かれる。
+#
+#   ローカル層（scripts/acceptance.sh）  ネットワークも外部認証も要さない検査。
+#                                        ループの接地信号。これが緑なら実装は前へ
+#                                        進んでよい。
+#   外部層（このファイル）               宣言（IaC 等）と実際の外部状態が一致して
+#                                        いるかの検査。外部認証とネットワークを要する。
+#
+# 起動方法:
+#   VERIFY_ACCEPTANCE=scripts/acceptance-remote.sh bash scripts/verify.sh
+#
+# scripts/loop-gate.sh へは含めない:
+#   あちらは push / PR 前の単一入口だが、外部層をそこへ入れると、認証の失効や
+#   オフラインでゲート全体が止まる。実装が正しいのにループが止まる状態を作らない。
+#   単一入口の目的は「複数の検査を別々に思い出す運用は破綻する」ことを機構で塞ぐ
+#   ことであって、外部の可用性をゲートの前提条件に持ち込むことではない。
+#
+# 通す契機:
+#   外部状態の宣言を変更したとき。反復のたびに回す層ではない。
+#
+# 前提:
+#   対象サービスへ認証済みであること。このスクリプトは認証を行わない（資格情報を
+#   スクリプトへ書き写す経路を作らないため）。未認証やオフラインで回すと個々の検査が
+#   失敗するが、それは「宣言と外部状態が食い違っている」ことを意味しない。前提の
+#   不成立と実際の乖離を読み分けられるよう、前提の確認（ログイン状態の検査など）を
+#   最初の検査として置くとよい。
+#
+# 終了コード: 0 = 合格 / 非0 = 不合格・未定義
+#
+# set -e は使わない。1 件目の失敗で止めず、全件を見てから落とすため。
+set -uo pipefail
+
+# 検証はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+# 任意の作業ディレクトリから起動しても結果が不変になるよう、起動時 CWD に依存しない。
+#
+# set -e を使わないため、失敗しうる代入には個別にガードを置く。HERE の解決に失敗
+# しても止めないと、空の HERE に対して dirname が "." を返し、続く cd が「成功」して
+# ガードを素通りする（実測: dirname "" = "." で cd は 0）。ルートへ移れていないのに
+# 検査を始めると、相対パスが別の場所を指したまま合否を出すことになる。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+cd "$(dirname "$HERE")" || exit 1
+
+echo "[acceptance-remote] external state checks"
+
+# 実際に検査を 1 つでも実行したか。1 つも実行できなければ「合格」ではなく失敗にする。
+# 検証していないことを合格として報告するのが最悪であるため。
+ran_any=0
+# 失敗件数。外部状態の乖離は複数箇所へ同時に出ることが多く、1 件ずつ往復すると
+# 回数だけ増える。
+failed=0
+
+# 各検査の出力を退避する一時ログ。mktemp のテンプレートで作り、$$ 由来の予測可能な
+# 名前は使わない（同名を先に置かれると書き込み先を乗っ取られる）。
+#
+# ここも代入ガードを置く（set -e が無いため）。作成に失敗したまま進むと LOG が空になり、
+# run の中の >"$LOG" が必ず失敗して、実行できていない検査が「失敗した検査」として
+# 報告される（実測: 空の対象へのリダイレクトは rc=1）。原因の異なる赤を同じ形で
+# 出さないよう、ここで落とす。
+LOG="$(mktemp "${TMPDIR:-/tmp}/acceptance-remote.XXXXXX")" || exit 1
+trap 'rm -f "$LOG"' EXIT
+
+# ラベル付きで 1 件実行する。成功時は出力を捨て、失敗したときだけ出力を見せる。
+# 正常な実行の出力で画面が埋まると、失敗の位置が読めなくなる。
+#
+#   run "<ラベル>" <コマンド> [引数...]
+#
+# サブシェル（パイプの構成要素・コマンド置換・( ) の中）から呼ばないこと。
+# ran_any と failed の更新が親へ伝わらず、実行したのに「未定義」、失敗したのに
+# 合格という報告になる。
+run() {
+  local label="$1"
+  shift
+  ran_any=1
+  printf '[acceptance-remote] %s\n' "$label"
+  if "$@" >"$LOG" 2>&1; then
+    return 0
+  fi
+  failed=$((failed + 1))
+  printf '[acceptance-remote] FAIL: %s\n' "$label" >&2
+  sed 's/^/    /' "$LOG" >&2
+  return 1
+}
+
+# ── ここへ外部状態の検査を足す ────────────────────────────────────────────────
+#
+# 宣言と実体が一致しているかを見る形にする（例: 宣言の差分検出コマンドが差分なしを
+# 返すこと、宣言したリソースが実在すること）。検査を足すまで、このスクリプトは
+# 下の判定で失敗する。未定義を合格として報告しないため。
+
+if [[ "$ran_any" -eq 0 ]]; then
+  echo "[acceptance-remote] 外部層の受け入れ条件が未定義です。検査を 1 つも実行していません。" >&2
+  echo "[acceptance-remote] 宣言と実際の外部状態を照合する検査を scripts/acceptance-remote.sh へ定義してください。" >&2
+  exit 1
+fi
+
+if [[ "$failed" -gt 0 ]]; then
+  echo "[acceptance-remote] $failed 件の検査が失敗しました。" >&2
+  echo "[acceptance-remote] 対象サービスへ認証済みか、ネットワークへ到達できるかを先に確認すること。" >&2
+  exit 1
+fi
+
+echo "[acceptance-remote] OK"
+TMPL
+      ;;
+    # 範囲選択の回帰テストは生成先へ配らない（#242 の判断）。生成先の scripts/ は
+    # プロジェクトが所有する運用スクリプトの置き場であり、この配布物の内部実装に
+    # 対する回帰テストを置くと、プロジェクトが所有すべきでないものを持たせること
+    # になる。acceptance.sh から呼ばせる案も同じ理由で採らない（あちらはプロジェクト
+    # が編集する雛形で、規範由来の検査を置くと消える経路ができる）。範囲選択の
+    # 正しさは、このパッケージの tests/test-loop-gate-range.sh が担保する。
     'scripts/loop-gate.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
@@ -1477,10 +2460,10 @@ TMPL
 # 無ければ優雅にスキップする（外部パッケージの導入を前提にしない）。
 #
 # 第二意見レビュー:
-#   既定で scripts/gemini-review.sh があれば実行する。
+#   既定で scripts/second-opinion-review.sh があれば実行する。
 #   LOOP_GATE_REVIEW_CMD で任意のコマンドへ差し替え可能。空文字でスキップする。
 #
-#   gemini-review.sh の既定対象はステージ済み差分で、空なら「レビュー対象なし」
+#   second-opinion-review.sh の既定対象はステージ済み差分で、空なら「レビュー対象なし」
 #   として 0 を返す。commit 後（ステージが空）にこのゲートを回すと、第二意見が
 #   実質スキップされたまま GATE_PASS が出ることになる。push 前ゲートとしては
 #   偽の緑なので、ステージが空のときは commit 済み範囲を対象に切り替える。
@@ -1492,27 +2475,38 @@ TMPL
 #   それでも差分が無いときは、レビュー対象が無いことを明示したうえで通過する
 #   （空を一律 FAIL にすると、差分の無い状態でのゲート実行が落ちるため）。
 #
+#   上流との差分が空でなくても、その範囲が他ブランチの成果を巻き込むことがある。
+#   @{upstream}..HEAD は 2 点間の比較なので、既定ブランチを取り込んだ直後は
+#   取り込んだ側のコミットがまるごと差分に入る。それは既にレビューを通った他
+#   ブランチの成果であって、このブランチが加えた変更ではない。範囲が既定ブランチ
+#   へ到達可能なコミットを含むときは分岐点まで戻し、なぜ範囲を変えたかを出力する。
+#
 # 終了コード:
 #   0 = GATE_PASS（全段通過。push 可）
 #   1 = GATE_FAIL（いずれかの段が未通過、または実行不能）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# verify・第二意見（git diff 等）はプロジェクトルート基準で実行する。
-# scripts/ の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
-cd "$(dirname "$HERE")"
 
 # 既定の reviewer へ渡す引数を決める。
 #
 # ステージ済み差分があるときは何も渡さない（reviewer 側の既定に委ねる）。
 # 空のときだけ commit 済み範囲へ切り替える。git リポジトリでない場合や範囲を
-# 解決できない場合は、従来どおり引数なしで呼ぶ。ここで落とすと、git 管理下に
-# ない生成直後のプロジェクトでゲートが使えなくなる。
+# 解決できない場合は、従来どおり引数なしで呼ぶ。範囲を解決できないことは
+# reviewer を呼べない理由にならないため、ここでは落とさない。
+#
+# なお、git 管理外ではこの関数へ到達する前に step 1（verify.sh）が落ちる。
+# verify.sh が呼ぶ機密混入検査（check-no-secrets.sh）が git の作業ツリーを前提に
+# しており、検査が成立しない状態を合格にしないため。この関数が git 外の経路を
+# 持つのは、範囲解決を単体で使えるようにしておくためである。
 REVIEW_RANGE=""
 # 範囲は解決できたが差分が空だった（= レビューできる対象が無い）状態を表す。
 # REVIEW_RANGE="" とは区別する。この状態を reviewer の既定へ流すと、空の
 # ステージ済み差分を見せることになり、塞いだはずの素通りへ戻るため。
 REVIEW_NO_TARGET=0
+# 上流以外を起点に採ったときの理由。黙って範囲を変えると、なぜその差分が
+# レビュー対象なのかを読み手が追えないため、採用時に 1 行出力する。
+REVIEW_RANGE_REASON=""
 
 # 範囲が実際に差分を持つか。git diff --quiet は差分ありで 1 を返す。
 # 128（範囲を解決できない等）を「差分あり」と誤認しないよう、1 だけを真とする。
@@ -1523,6 +2517,44 @@ range_has_diff() {
   [[ "$rc" -eq 1 ]]
 }
 
+# 既定ブランチの追跡枝を解決し、名前を標準出力へ返す。見つからなければ 1 を返す。
+# 既定ブランチ名は決め打ちせず origin/HEAD → origin/main → origin/master の順で探す。
+#
+# 解決を 1 箇所へ集約するのは、範囲の汚染判定と分岐点の算出とで**同じ枝**を見る
+# 必要があるため。別々に決めると、「汚染ありと判定した枝」と「分岐点を取った枝」が
+# 別物になりうる。
+resolve_integration_base() {
+  local base
+  for base in origin/HEAD origin/main origin/master; do
+    if git rev-parse --verify --quiet "$base" >/dev/null; then
+      printf '%s' "$base"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 範囲 <from>..HEAD が、既に既定ブランチ <base> へ到達可能なコミットを含むか。
+#
+#   all = <from>..HEAD の総数
+#   own = そのうち <base> から到達できないもの（= このブランチが加えた分）
+#   all != own なら、他ブランチの成果を巻き込んでいる
+#
+# 「マージコミットを含むか」では判定しない。取り込み方によって現れる形が違い、
+# 形ごとに書き分けるほど取りこぼす。到達可能性で見れば取り込み方に依らない。
+#
+# <base> が空（既定ブランチの追跡枝が無い）なら判定できない。ここで真を返すと
+# 分岐点も取れないまま範囲を失うため、偽を返して従来どおり上流を使わせる。
+range_includes_base_commits() {
+  local from="$1" base="$2" all own
+  [[ -n "$base" ]] || return 1
+  all="$(git rev-list --count "$from..HEAD" 2>/dev/null || true)"
+  own="$(git rev-list --count "$from..HEAD" "^$base" 2>/dev/null || true)"
+  # どちらかが数えられなければ判定不能。汚染なし扱いにして上流を使わせる。
+  [[ -n "$all" && -n "$own" ]] || return 1
+  [[ "$all" != "$own" ]]
+}
+
 resolve_review_range() {
   command -v git >/dev/null 2>&1 || return 0
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
@@ -1531,31 +2563,49 @@ resolve_review_range() {
   # コミットが 1 件も無ければ比較の起点を作れない。
   git rev-parse --verify --quiet HEAD >/dev/null || return 0
 
+  # 汚染判定と分岐点の算出は、ここで解決した 1 つの枝だけを見る。
+  local base=""
+  base="$(resolve_integration_base || true)"
+
+  # 上流を起点にできない理由。分岐点を採ったときにそのまま出力する。
+  local fallback_reason=""
+
   # 上流が設定されていればそこからの差分。未 push のコミットがそのまま対象になる。
-  # push 済みだと上流 == HEAD で差分が空になるため、範囲を解決できたことではなく
-  # 差分があることを採用条件にする。
+  # ただし採用条件は 2 つある。
+  #   1. 差分が空でないこと。push 済みだと上流 == HEAD で空になり、第二意見が
+  #      一度も差分を見ないまま通過する（偽の緑）。
+  #   2. 範囲が既定ブランチへ到達可能なコミットを含まないこと。含むなら、その
+  #      分は他ブランチが加えた既レビュー済みの成果であって、このブランチの
+  #      変更ではない。
   local upstream
   upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-  if [[ -n "$upstream" ]] && range_has_diff "$upstream..HEAD"; then
-    REVIEW_RANGE="$upstream..HEAD"
-    return 0
+  if [[ -n "$upstream" ]]; then
+    if ! range_has_diff "$upstream..HEAD"; then
+      fallback_reason="upstream range $upstream..HEAD has no diff (branch already pushed)"
+    elif range_includes_base_commits "$upstream" "$base"; then
+      fallback_reason="upstream range $upstream..HEAD also contains commits already reachable from $base (default branch integrated into this branch)"
+    else
+      REVIEW_RANGE="$upstream..HEAD"
+      return 0
+    fi
+  else
+    fallback_reason="no upstream is configured for this branch"
   fi
 
-  # 上流が無い、または上流との差分が空（= push 済み）の場合は、既定ブランチの
-  # 追跡枝との分岐点を起点にし、ブランチ全体をレビュー対象にする。
-  # 既定ブランチ名は決め打ちしない。
+  # 既定ブランチの追跡枝との分岐点を起点にし、ブランチ全体をレビュー対象にする。
   #
   # 分岐点（merge-base）を使うのは、base..HEAD が 2 点間の比較であり、base 側に
   # 進んだコミットを「打ち消し」として差分へ混ぜるため。ブランチが加えた変更
-  # だけを対象にする。
-  local base mb
-  for base in origin/HEAD origin/main origin/master; do
-    git rev-parse --verify --quiet "$base" >/dev/null || continue
+  # だけを対象にする。既定ブランチを取り込んでいる場合は分岐点が取り込み地点まで
+  # 進むので、取り込んだ成果は範囲から外れる。
+  if [[ -n "$base" ]]; then
+    local mb
     mb="$(git merge-base "$base" HEAD 2>/dev/null || true)"
     # 履歴が繋がっていない（分岐点が無い）場合の受け皿。
     [[ -n "$mb" ]] || mb="$base"
     if range_has_diff "$mb..HEAD"; then
       REVIEW_RANGE="$mb..HEAD"
+      REVIEW_RANGE_REASON="$fallback_reason; reviewing from the merge-base with $base instead"
       return 0
     fi
     # 既定ブランチの追跡枝が見つかった時点で起点は確定する。そこと差分が無いのは
@@ -1563,7 +2613,7 @@ resolve_review_range() {
     # すべき状況ではない。
     REVIEW_NO_TARGET=1
     return 0
-  done
+  fi
 
   # 上流はあるが既定ブランチの追跡枝が無い場合。remote は存在するので、下の
   # 空ツリー（= リポジトリ全体）へは広げずレビュー対象なしとして扱う。
@@ -1586,6 +2636,7 @@ resolve_review_range() {
   empty_tree="$(git hash-object -t tree /dev/null 2>/dev/null || true)"
   if [[ -n "$empty_tree" ]] && range_has_diff "$empty_tree..HEAD"; then
     REVIEW_RANGE="$empty_tree..HEAD"
+    REVIEW_RANGE_REASON="$fallback_reason; no default branch tracking ref either, reviewing the whole history"
     return 0
   fi
 
@@ -1593,49 +2644,318 @@ resolve_review_range() {
   REVIEW_NO_TARGET=1
 }
 
-echo "[loop-gate] step 1: verify (acceptance)"
-if ! bash "$HERE/verify.sh"; then
-  echo "[loop-gate] verify not passed" >&2
-  echo "GATE_FAIL"
-  exit 1
-fi
+main() {
+  # verify・第二意見（git diff 等）はプロジェクトルート基準で実行する。
+  # scripts/ の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
+  #
+  # cd を本体側へ置くのは、source した呼び出し元の作業ディレクトリを動かさない
+  # ため。範囲解決の回帰テストは、使い捨ての git リポジトリへ cd してから
+  # resolve_review_range を呼ぶ。
+  cd "$(dirname "$HERE")"
 
-echo "[loop-gate] step 2: second opinion"
-if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
-  if [[ -f "$HERE/gemini-review.sh" ]]; then
-    resolve_review_range
-    review_ok=0
-    if [[ -n "$REVIEW_RANGE" ]]; then
-      echo "[loop-gate] staged diff is empty; reviewing $REVIEW_RANGE"
-      bash "$HERE/gemini-review.sh" --range "$REVIEW_RANGE" || review_ok=1
-    elif [[ "$REVIEW_NO_TARGET" -eq 1 ]]; then
-      # レビューできる差分が 1 行も無い。第二意見を呼んでも対象が無いため、
-      # その事実を明示したうえで通過させる（空を FAIL にすると、差分の無い
-      # 状態でのゲート実行が落ちる）。黙って通すと偽の緑と区別が付かない。
-      echo "[loop-gate] no reviewable diff; second opinion has nothing to review"
+  echo "[loop-gate] step 1: verify (acceptance)"
+  if ! bash "$HERE/verify.sh"; then
+    echo "[loop-gate] verify not passed" >&2
+    echo "GATE_FAIL"
+    exit 1
+  fi
+
+  echo "[loop-gate] step 2: second opinion"
+  if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
+    if [[ -f "$HERE/second-opinion-review.sh" ]]; then
+      resolve_review_range
+      local review_ok=0
+      if [[ -n "$REVIEW_RANGE" ]]; then
+        # 上流以外を起点に採ったなら、その理由を先に出す。黙って範囲を変えると、
+        # なぜその差分がレビュー対象なのかを読み手が追えない。
+        if [[ -n "$REVIEW_RANGE_REASON" ]]; then
+          echo "[loop-gate] $REVIEW_RANGE_REASON"
+        fi
+        echo "[loop-gate] staged diff is empty; reviewing $REVIEW_RANGE"
+        bash "$HERE/second-opinion-review.sh" --range "$REVIEW_RANGE" || review_ok=1
+      elif [[ "$REVIEW_NO_TARGET" -eq 1 ]]; then
+        # レビューできる差分が 1 行も無い。第二意見を呼んでも対象が無いため、
+        # その事実を明示したうえで通過させる（空を FAIL にすると、差分の無い
+        # 状態でのゲート実行が落ちる）。黙って通すと偽の緑と区別が付かない。
+        echo "[loop-gate] no reviewable diff; second opinion has nothing to review"
+      else
+        bash "$HERE/second-opinion-review.sh" || review_ok=1
+      fi
+      if [[ "$review_ok" -ne 0 ]]; then
+        echo "[loop-gate] second opinion reported findings" >&2
+        echo "GATE_FAIL"
+        exit 1
+      fi
     else
-      bash "$HERE/gemini-review.sh" || review_ok=1
+      echo "[loop-gate] SKIP (no reviewer present)"
     fi
-    if [[ "$review_ok" -ne 0 ]]; then
+  elif [[ -n "$LOOP_GATE_REVIEW_CMD" ]]; then
+    if ! bash -c "$LOOP_GATE_REVIEW_CMD"; then
       echo "[loop-gate] second opinion reported findings" >&2
       echo "GATE_FAIL"
       exit 1
     fi
   else
-    echo "[loop-gate] SKIP (no reviewer present)"
+    echo "[loop-gate] SKIP (disabled by LOOP_GATE_REVIEW_CMD='')"
   fi
-elif [[ -n "$LOOP_GATE_REVIEW_CMD" ]]; then
-  if ! bash -c "$LOOP_GATE_REVIEW_CMD"; then
-    echo "[loop-gate] second opinion reported findings" >&2
-    echo "GATE_FAIL"
-    exit 1
-  fi
+
+  echo "GATE_PASS"
+  exit 0
+}
+
+# source ガード。読み込まれただけのときはゲート本体を実行せず、関数定義だけを
+# 提供する。範囲解決の回帰テストが resolve_review_range を単体で呼べるようにする
+# ため（ガードが無いと、テストが読み込んだだけでゲートが走り出す）。
+#
+# 逆に、実行されたのに main を呼び損ねると、何も検証しないまま終了コード 0 を
+# 返す偽の緑になる。ゲートの出力（step 1 / GATE_PASS / GATE_FAIL）が実行時に必ず
+# 現れることを、テスト側で併せて検査すること。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
+TMPL
+      ;;
+    'scripts/confirm-merge-hook.sh')
+      # マージ実行の前に確認を挟む PreToolUse フック（--with-claude 連動）。
+      # 規範 role-contracts/closer.md の「既定の merge 方針は手動承認とする」を、
+      # 呼びかけではなく機構で担保する（shared-ai-rules.md 12 章）。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# confirm-merge-hook.sh — マージ実行の前に確認を挟む PreToolUse フック。
+#
+# 規範（role-contracts/closer.md）は「既定の merge 方針は手動承認とする」と定めるが、
+# 呼びかけでは破れる。ある利用プロジェクトでは、対話中の許可承認によりマージコマンドが
+# 技術的に実行可能になった結果、承認を経ないまま PR 2 本がマージされた。実行できることと
+# 実行してよいことが混同された形で、shared-ai-rules.md 12 章が「機構で保証する」を
+# 求める対象そのものにあたる。
+#
+# 保証するのは「黙ってマージしない」ことであって「マージさせない」ことではない。判定は
+# deny ではなく ask を返し、利用者が承認すればマージは実行される。指示に従うマージまで
+# 塞ぐと「PR を作り、指示を待ち、指示されたらマージする」という本来の運用が成り立たない。
+#
+# ── なぜ settings.json の permissions.ask で足りないか ────────────────────────
+#
+# permissions の allow / ask / deny は、コマンド名と引数文字列の前方一致で判定する
+# （実測。下記の 2 例はいずれも harmless な echo で確認した）。そのため次を表現できない。
+#
+#   - 同じ操作の別経路: gh pr merge を対象にした規則は gh api --method PUT .../merge や
+#     gh api graphql の mergePullRequest に一致しない。gh api ごと対象にすると、状態を
+#     変えない GET まで確認を求める。
+#   - 引数の位置に依らない判定: --method PUT が引数の途中や末尾へ来る綴りは、前方一致
+#     では捕捉できない（実測: deny 規則 Bash(echo --method PUT:*) は
+#     `echo --method PUT repos/o/r/pulls/1/merge` を止めるが、
+#     `echo repos/o/r/pulls/1/merge --method PUT` は素通りする）。
+#
+# 迂回できる機構は守られている外観だけを作る（12 章）。フックは文字列全体を検査できる
+# ため、上の 2 つを 1 か所で扱える。
+#
+# なお「連結（cd ... && gh pr merge）が前方一致を抜ける」は理由として採らない。実測では
+# deny 規則 Bash(echo alpha:*) が `cd /tmp && echo alpha beta` を止めており、&& で連結した
+# 各コマンドが個別に判定されていた。実行環境の版によって変わり得る挙動であり、この
+# フックは連結も捕捉するが、permissions で足りない理由としては上の 2 点だけを挙げる。
+#
+# ── 検査対象 ──────────────────────────────────────────────────────────────────
+#
+#   1. gh pr merge          — コマンド位置にあるもの
+#   2. pulls/<n>/merge      — かつ PUT を指定しているもの（REST 経由の merge 実行）
+#   3. mergePullRequest     — かつ gh api graphql から呼ばれているもの
+#
+# いずれも「文字列に含まれるか」ではなく「実行しようとしているか」で判定する。単純な
+# 部分一致にすると `grep -rn 'mergePullRequest' .` や `git log -S 'gh pr merge'`、GET での
+# `pulls/1/merge`（マージ済みか調べるだけ）まで確認を要求する。確認が頻発すれば内容を
+# 読まずに承認する習慣ができ、機構は形だけになる。
+#
+# コマンド位置は「行頭、または ; && || | ( の直後」とし、先行する環境変数代入は読み飛ばす。
+# 前方一致にしないのは cd との連結を捕捉するためで、逆に引用符の内側は通る。
+#
+# ── fail-open にしない ───────────────────────────────────────────────────────
+#
+# jq でコマンドを取り出せなかった場合は、ペイロード全体を検査対象にする。「取れなければ
+# 通す」にすると、jq が無い環境・壊れた JSON・将来のペイロード変更のいずれでも検査を黙って
+# 飛ばして通す。検知層が黙って無効化されるのは最悪の壊れ方で、このフックが防ごうとして
+# いる「気づかないまま実行できる」状態そのものを再現する。出力側も同じ理由で jq に
+# 依存させない（printf のフォールバックを持つ）。
+#
+# ── 既知の限界（意図的に塞がない）────────────────────────────────────────────
+#
+# これは「うっかり実行」に確認を挟む guardrail であって、意図的な迂回を防ぐ
+# security boundary ではない。文字列照合である以上、書き方を変えれば抜けられる。
+#
+#   gh -R owner/repo pr merge 1      gh とサブコマンドの間にオプションが挟まる形
+#   /usr/bin/gh pr merge 1           絶対パス・相対パスでの起動
+#   env gh pr merge 1                env / command などのプレフィックス
+#   bash -c "gh pr merge 1"          引用符の内側（引用符の内側を通すことの裏返し）
+#   gh api .../pulls/$N/merge        URL に変数展開を含む形
+#   gh api graphql -F query=@q.gql   クエリを外部ファイルから読む形
+#
+# なお -XPUT（連結形）・--method=PUT（= 連結）・--method put（小文字）は、上の一覧とは
+# 違って意図的な迂回ではなく curl 風のごく普通の綴りである（実測: いずれも gh が受理する）。
+# 「うっかり実行」の側にあたるため、下の判定はこれらも拾う。
+#
+# ペイロードが空（stdin が空）の場合は確認を求める（ask）。マージコマンドを検知した
+# のではなく、検査そのものが成立しなかったことを理由文で伝える。将来ペイロードの
+# 渡し方が変わって stdin へ何も来なくなったときにここで気づけるようにするための措置
+# であって、配線が生きていることそのものを保証するものではない。配線が生きている
+# ことは、フックへ実際にペイロードを流して確かめる以外に保証できない。
+#
+# 塞ぐたびに新しい書き方が見つかるため、完全性は達成できない。完全であるかのように
+# 記録すると、実態より強い保証があると誤認させる（12 章）。
+#
+# main への直接 push は扱わない。ブランチ保護がサーバ側で拒否しており、そちらのほうが
+# 確実なため。ブランチ名に main を含む feature ブランチへの push を誤って止める副作用も
+# 避けられる。
+#
+# 副作用: マージコマンドに見える文字列を行頭に含むコミットメッセージやテストは、そのまま
+# では実行できず確認を求められる。ファイル経由（git commit -F、テストスクリプト）で
+# 回避できる。
+#
+# 終了コード: 常に 0。判定は標準出力の JSON（permissionDecision）で伝える。
+set -uo pipefail
+
+payload="$(cat)"
+
+reason=""
+
+if [[ -z "$payload" ]]; then
+  # ペイロードが空＝配線不全の疑い。matcher で絞られた Bash ツール実行に対して
+  # PreToolUse から何も渡っていないということは、フックが実行はされていても実質
+  # 機能していない状態になり得る。jq 不在時に「取れなければ通す」を採らなかったのと
+  # 同じ理由（検知層が黙って無効化されるのは最悪の壊れ方）で、ここも fail-open に
+  # しない。ただしマージを検知したわけではないので、理由文はマージ云々ではなく
+  # 「検査が成立しなかったこと」を伝える内容にする。
+  reason='PreToolUse フックへ届いたペイロードが空でした。マージを検知したのではなく、検査そのものが成立していません。.claude/settings.json の PreToolUse 配線を確認してください。'
 else
-  echo "[loop-gate] SKIP (disabled by LOOP_GATE_REVIEW_CMD='')"
+  # 検査対象の決定。Bash ツールのコマンド文字列を取り出せればそれを、取り出せなければ
+  # ペイロード全体を対象にする（fail-open にしない）。全体を対象にすると確認が増える
+  # 側へ振れるが、検査を飛ばす側へ振れるより安全である。
+  target=""
+  if command -v jq >/dev/null 2>&1; then
+    target="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+  fi
+  extracted=yes
+  if [[ -z "$target" ]]; then
+    extracted=no
+    target="$payload"
+  fi
+
+  # バックスラッシュ行継続（\ + 改行）だけを空白へ正規化する。判定にのみ使い、
+  # payload・target 自体や理由文は書き換えない。長い REST 呼び出しを \ で複数行に
+  # 分けるのは普通の書き方で、-XPUT / --method=PUT と同じ「うっかり実行」側にあたる。
+  # 分けて書くと pulls/<n>/merge と PUT が別行になり、REST 判定の同一行条件が外れて
+  # 検知漏れになる（実測）。
+  #
+  # 改行を一律には潰さない。無関係な 2 行（例: echo の次行にたまたま別の gh api 呼び
+  # 出しが続くだけの形）まで 1 行へ結合すると、同一行条件が意味を失い誤検知する。
+  # 落とすのは直前にバックスラッシュがある改行だけにする。
+  #
+  # CRLF を先に処理する。LF だけを落とすと \ + CR が残り、CR が語末境界として働いて
+  # 判定が外れる。CRLF がこのフックへ届く経路は実測できていないが、置換 1 行で
+  # 恒久的に問いを消せるため入れておく。
+  norm_target="${target//$'\\\r\n'/ }"
+  norm_target="${norm_target//$'\\\n'/ }"
+
+  # コマンド位置の前置き。行頭、または ; && || | ( の直後で、先行する環境変数代入
+  # （FOO=bar gh ...）を読み飛ばす。grep は行単位で見るため ^ が各行の先頭に効く。
+  #
+  # 取り出しに失敗したときはこの前置きを外す。ペイロード全体はシェルの行ではなく JSON
+  # であり、コマンドは引用符の内側に現れる。位置を問う条件をそのまま当てると必ず外れ、
+  # 「全体を検査対象にする」が実質 fail-open になる（実測: 壊れた JSON
+  # {"tool_input": {"command": "gh pr merge 1" が素通りした）。取り出せていない以上
+  # 位置は判定できないため、位置を問わない照合へ落として確認を増やす側へ振る。
+  cmd_pos='(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+  if [[ "$extracted" == "no" ]]; then
+    cmd_pos=''
+  fi
+
+  # 語末の境界。空白か行末だけにすると、JSON の引用符（"gh pr merge"）に隣接した形を
+  # 取りこぼす。逆に境界を置かないと gh pr mergequeue のような別サブコマンドまで拾う。
+  word_end='([^A-Za-z0-9_-]|$)'
+
+  # パイプは使わずヒアストリングで渡す。grep -q は一致した時点で終了するため、上流を
+  # パイプにすると SIGPIPE で pipefail が発火し、一致したのに条件が偽になる経路ができる。
+  if grep -qE "${cmd_pos}gh[[:space:]]+pr[[:space:]]+merge${word_end}" <<<"$norm_target"; then
+    reason='gh pr merge をコマンド位置で実行しようとしています。既定の merge 方針は手動承認です。承認の記録を確認してください。'
+  else
+    # REST 経由の merge。PUT の指定と merge エンドポイントが同じ行にあることを条件に
+    # する。GET は「マージ済みか」を調べるだけで状態を変えないため対象にしない。
+    #
+    # --method PUT（空白区切り）に加え、--method=PUT（= 連結）・-XPUT（-X への直接連結）・
+    # --method put（小文字）も拾う。value 側の大小混在は [Pp][Uu][Tt] で吸収する
+    # （GET 側はそもそもこのパターンに現れないため波及しない）。
+    #
+    # PUT の直後には word_end を要求する。無いと -XPUTS のような無関係な綴りまで拾う。
+    # --method の直後は区切り（= か空白）を要求する。無いと --methodology のような別
+    # オプション名の内部にまで一致する。norm_target を見るので、\ 行継続で PUT が
+    # 次行にずれていても同一行条件を満たす。
+    merge_endpoint_lines="$(grep -E 'pulls/[0-9]+/merge' <<<"$norm_target")"
+    if [[ -n "$merge_endpoint_lines" ]] \
+      && grep -qE "(--method(=|[[:space:]]+)|-X[[:space:]]*)[Pp][Uu][Tt]${word_end}" \
+        <<<"$merge_endpoint_lines"; then
+      reason='PR の merge エンドポイントへ PUT を実行しようとしています（REST 経由の merge）。既定の merge 方針は手動承認です。承認の記録を確認してください。'
+    elif grep -qF 'mergePullRequest' <<<"$norm_target" \
+      && grep -qE "${cmd_pos}gh[[:space:]]+api[[:space:]]+graphql${word_end}" <<<"$norm_target"; then
+      # graphql だけは行をまたぐ判定にする。クエリはヒアドキュメントや複数行の
+      # -f query=... で渡されることがあり、同じ行にあることを条件にすると外れる。
+      reason='gh api graphql から mergePullRequest を実行しようとしています。既定の merge 方針は手動承認です。承認の記録を確認してください。'
+    fi
+  fi
 fi
 
-echo "GATE_PASS"
+if [[ -z "$reason" ]]; then
+  exit 0
+fi
+
+# 出力も jq に依存させない。理由文には二重引用符とバックスラッシュを含めないため、
+# フォールバックの printf でも JSON として妥当な出力になる。
+if command -v jq >/dev/null 2>&1; then
+  jq -n --arg reason "$reason" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "ask",
+      permissionDecisionReason: $reason
+    }
+  }'
+else
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$reason"
+fi
 exit 0
+TMPL
+      ;;
+    '.claude/settings.json')
+      # PreToolUse フックの配線（--with-claude 連動）。JSON はコメントを持てないため、
+      # 何をなぜ配線しているかはフック本体（scripts/confirm-merge-hook.sh）の冒頭と
+      # README に置く。matcher を Bash に絞るのは、フックの検査対象がシェルコマンド
+      # だからで、他のツールへ配ると取り出せないペイロードでの照合ばかりが増える。
+      #
+      # 既存ファイルは衝突ポリシー（既定 skip）で温存される。既に settings.json を
+      # 持つプロジェクトへ後から入れる場合は、この hooks 節を手で足すことになる。
+      cat <<'TMPL'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/confirm-merge-hook.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
+TMPL
+      ;;
+    '.claude/.gitignore')
+      cat <<'TMPL'
+# settings.local.json は対話中に許可した操作の一覧を持つ。追跡すると、その場の判断で
+# 許可した強い操作が clone した全員へ配られる。.env と同じ理由で共有しない。
+#
+# ルートの .gitignore（devcontainer-bootstrap managed section）ではなくここへ置くのは、
+# .claude/ の中で閉じる除外を .claude/ を配る側の責務にするため。同じ除外を 2 か所に
+# 持つと、片方だけ直したときにどちらが効いているのか読めなくなる。
+settings.local.json
 TMPL
       ;;
     *)
@@ -1813,6 +3133,73 @@ build_remote_gitignore_block() {
       rm -f "$tmp"
     done
   } | sed '/^$/N;/^\n$/D'
+}
+
+# --with-* で入れた装備が作るファイルの除外を出力する。
+#
+# github/gitignore のテンプレートは言語・OS・エディタの生成物だけを対象にしており、
+# 装備フラグで入れたツールの生成物は含まれない。装備を入れた側が後始末を持たないと、
+# 各プロジェクトが同じ行を手書きすることになり、書き漏らしがそのまま機密の混入になる。
+#
+# 出力は github/gitignore ブロックより後ろへ置く。.gitignore は後に書いた行が勝つため、
+# テンプレート側の再包含（! 行）でここの除外が打ち消されない順序にする。
+#
+# 装備を選んでいない構成へは 1 行も出さない。使わない除外を配ると、その行が何のために
+# あるのかを利用者が判断できなくなる。
+build_static_gitignore_block() {
+  local body
+
+  # 出力する行はそのまま .gitignore へ入るため、展開の起きない引用符付き
+  # ヒアドキュメントで literal に書く（* や ** をシェルへ解釈させない）。
+  body="$(
+    if has_with claude; then
+      cat <<'CLAUDE_IGNORES'
+
+# Claude Code (--with-claude)
+# .mcp.json はプロジェクトスコープの MCP 設定。トークン方式の MCP サーバを追加すると
+# 平文の資格情報がここへ入るため、.env と同じ理由で共有しない。
+.mcp.json
+# .claude/worktrees/ の中身はリポジトリ全体のチェックアウトそのもので、除外しないと
+# git add . でリポジトリが自分自身を抱え込む。.claude/ 配下には追跡する成果物
+# （skills/）があるため、.claude/ ごとではなくこのディレクトリだけを除外する。
+.claude/worktrees/
+CLAUDE_IGNORES
+    fi
+
+    if with_feature_active terraform; then
+      cat <<'TERRAFORM_IGNORES'
+
+# Terraform (--with-aws / --with-gcp)
+# tfstate は機密を平文で保持する。tfvars も同じく機密を含みやすい。
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+# plan の出力は変数の値が解決済みで展開されるため、state / tfvars と同じ理由で
+# 機密が載る。-out=tfplan（拡張子なし）が慣用のため、両方の書き方を除外する。
+tfplan
+*.tfplan
+# crash log には実行時の変数値が出ることがある。
+crash.log
+crash.*.log
+# override 系と CLI 設定は端末ごとのローカル上書きで、共有すると他者の実行を変える。
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# .terraform.lock.hcl はプロバイダ版の固定に必要なため、意図して除外しない。
+TERRAFORM_IGNORES
+    fi
+  )"
+
+  [[ -n "$body" ]] || return 0
+
+  printf '%s\n' ""
+  printf '%s\n' "# devcontainer-bootstrap owned ignores"
+  printf '%s\n' "$body"
 }
 
 # 言語ランタイムの存在検査に使うコマンド名を返す。
@@ -2134,11 +3521,15 @@ render_content() {
 }
 
 build_gitignore_block() {
-  local remote_block=""
+  local remote_block="" static_block=""
 
   remote_block="$(build_remote_gitignore_block)"
+  static_block="$(build_static_gitignore_block)"
   if [[ -n "$remote_block" ]]; then
     printf '%s\n' "$remote_block"
+  fi
+  if [[ -n "$static_block" ]]; then
+    printf '%s\n' "$static_block"
   fi
 }
 
@@ -2420,10 +3811,10 @@ install_playbook_rules() {
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/CLAUDE.md"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/copilot-instructions.md"
 
-  tpl="$(require_playbook_template gemini-review.sh)"
-  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/gemini-review.sh"
-  if [[ -f "$OUTPUT_DIR/scripts/gemini-review.sh" ]]; then
-    chmod +x "$OUTPUT_DIR/scripts/gemini-review.sh"
+  tpl="$(require_playbook_template second-opinion-review.sh)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-review.sh"
+  if [[ -f "$OUTPUT_DIR/scripts/second-opinion-review.sh" ]]; then
+    chmod +x "$OUTPUT_DIR/scripts/second-opinion-review.sh"
   fi
 
   # リモート最終ゲートの雛形は、その機構を明示選択した場合のみ配置する。
@@ -2534,8 +3925,10 @@ if should_install_playbook; then
   resolve_playbook_source_or_die
 fi
 
-# 生成する相対パスを収集してソートする（bash 3 互換）
-sorted_rels="$(template_rel_paths | sort)"
+# 生成する相対パスを収集してソートする（bash 3 互換）。無条件ぶん（template_rel_paths）と
+# --with-* 条件ぶん（conditional_template_rel_paths）を 1 つの一覧へまとめる。ここで
+# 合流させるので、dry-run の計画と実際の書き込みは条件付きファイルでも一致する。
+sorted_rels="$( { template_rel_paths; conditional_template_rel_paths; } | sort)"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "[bootstrap] dry-run: no files will be written"
@@ -2566,7 +3959,7 @@ EOF
     echo "plan: $OUTPUT_DIR/.github/project-ai-rules.md"
     echo "plan: $OUTPUT_DIR/CLAUDE.md"
     echo "plan: $OUTPUT_DIR/.github/copilot-instructions.md"
-    echo "plan: $OUTPUT_DIR/scripts/gemini-review.sh"
+    echo "plan: $OUTPUT_DIR/scripts/second-opinion-review.sh"
     if has_with copilot-review; then
       echo "plan: $OUTPUT_DIR/.github/workflows/copilot-review.yml"
       echo "plan: $OUTPUT_DIR/.github/workflows/review-gate.yml"
