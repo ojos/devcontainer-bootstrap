@@ -6,6 +6,28 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.10.1
+
+### Summary
+- **macOS で規範を配置する構成が使えなかった不具合を修正した**（ojos/ai-packages-dev#285）。`--with-playbook` / `--playbook-version` / `--playbook-from` のいずれを指定しても `error: no rule files found in playbook source` で停止していた。**取得も展開も成功しており、壊れていたのは最終の存在検査だけ**だった。
+- 原因は `set -o pipefail` 下で `find … | grep -q .` としていたこと。`grep -q` は最初のマッチで終了してパイプを閉じ、まだ書き込み中の `find` が SIGPIPE で死ぬ。パイプライン全体が非 0 になり、**`grep` が実際にはマッチしているのに「0 件」と判定される**。
+- **Linux では再現しない。** GNU find は EPIPE を握って終了コード 0 で終わるが、BSD find（macOS）は SIGPIPE で 141 を返す。
+- 修正は `find … -print -quit` で**パイプ自体を無くす**形にした。1 件見つけた時点で `find` 自身が正常終了する。
+
+### Highlights
+
+- **`grep` は成功していた（ojos/ai-packages-dev#285。実測）**: `PIPESTATUS=141 0` — 右（grep）は 0 でマッチしている。左（find）だけが SIGPIPE で死んでいた。同じ木に対し `| wc -l` は 23 件を返す（`wc` は EOF まで読むので早期クローズが起きない）。
+- **同じ罠を一度踏んでいた（ojos/ai-packages-dev#285）**: 同一関数内の別の `find … | head -n 1` には既に `|| true` が付いていた。今回直した 2 箇所はその取りこぼしで、**部分的な対処が「塞いだ」ように見えていた**。
+- **`|| true` では直さない（ojos/ai-packages-dev#285）**: 症状は消えるが、生産側が**本当に失敗した**場合まで握り潰す。「検査が成立していないことを合格にしない」に反する。
+- **`-quit` は BSD find でも使える（ojos/ai-packages-dev#285。実測）**: このリポジトリに前例が無い構文だったため、GNU の挙動を普遍と仮定せず macOS 実機で検証した（`rc=0`、多数の一致がある木で 1 行のみ出力 = `-quit` が機能した証拠）。FreeBSD find(1) にも primary として記載がある。
+- **Linux でしか走らないテストでは捕まえられない（ojos/ai-packages-dev#285）**: 実行して再現する検査は緑になってしまう。同型の再混入は静的検査で落とす（開発リポジトリ側の機構で、配布物には含まれない）。
+
+### 移行
+
+- **`--with-playbook` 系を macOS で使っていた場合、v0.10.1 へ上げてください。** v0.10.0 以前では規範を配置する構成が成立しません。
+- Linux では v0.10.0 と挙動が変わりません。
+- 生成物には影響しません。修正は `bootstrap.sh` 自身の判定で、生成されるファイルは変わりません。
+
 ## v0.10.0
 
 ### Summary

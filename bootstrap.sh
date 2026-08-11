@@ -3787,7 +3787,11 @@ resolve_playbook_root() {
   # （相対パスにフルパスが残り、配置先が壊れる）のを防ぐ。
   local base="${1%/}" nested dirs files
   [[ -n "$base" ]] || base="/"
-  nested="$(find "$base" -type d -name '.ai-playbook' | head -n 1 || true)"
+  # `find ... | head -n 1` にはしない。head は 1 行目で終了してパイプを閉じるため、
+  # まだ書き込み中の find が SIGPIPE で死に、pipefail 下でパイプライン全体が 141 に
+  # なる。BSD find（macOS）はこの経路を通り、GNU find は EPIPE を握って 0 で終わる
+  # ため、Linux では再現しない差になる。find 自身を -quit で止めればパイプが要らない。
+  nested="$(find "$base" -type d -name '.ai-playbook' -print -quit 2>/dev/null)"
   if [[ -n "$nested" ]]; then
     printf '%s' "$nested"
     return
@@ -3795,7 +3799,7 @@ resolve_playbook_root() {
   dirs="$(find "$base" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
   files="$(find "$base" -mindepth 1 -maxdepth 1 ! -type d | wc -l | tr -d ' ')"
   if [[ "$dirs" -eq 1 && "$files" -eq 0 ]]; then
-    find "$base" -mindepth 1 -maxdepth 1 -type d | head -n 1
+    find "$base" -mindepth 1 -maxdepth 1 -type d -print -quit
   else
     printf '%s' "$base"
   fi
@@ -3944,7 +3948,11 @@ resolve_playbook_source_or_die() {
   # 取得できても規範（*.md）が 0 件なら、ファイルを書く前に失敗させる。
   # install_playbook_rules も同種の検査を持つが、そちらは書き込み後に走るため、
   # アトミック配置の約束（取得元が解決できなければ 1 つも書かない）をここで守る。
-  if ! find "$PLAYBOOK_DIR" -type f -name '*.md' 2>/dev/null | grep -q .; then
+  # `| grep -q .` にはしない。grep -q は最初のマッチで終了してパイプを閉じ、まだ
+  # 書き込み中の find が SIGPIPE で死ぬ。pipefail 下ではパイプライン全体が 141 に
+  # なり、**grep が実際にはマッチしているのに** 0 件と判定される。macOS で
+  # `--playbook-version` が必ず失敗する原因がこれだった（PIPESTATUS=141 0 を実測）。
+  if [[ -z "$(find "$PLAYBOOK_DIR" -type f -name '*.md' -print -quit 2>/dev/null)" ]]; then
     echo "error: no rule files found in playbook source: ${PLAYBOOK_FROM:-<adjacent checkout>}" >&2
     exit 1
   fi
