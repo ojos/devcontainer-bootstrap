@@ -4028,6 +4028,17 @@ install_playbook_rules() {
   if has_with claude; then
     tpl="$(require_playbook_template claude-skill-intake.md)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/skills/intake/SKILL.md"
+
+    # 委譲先の model / tools を frontmatter で固定するエージェント定義。同じく
+    # --with-claude のときだけ置く。指示文で「haiku を使う」と書いても迂回できるが、
+    # frontmatter は実行環境が読む機構なので迂回できない（規範 12 章）。
+    #
+    # 判定の導線は規範の共通層（shared-ai-rules.md 13 章「実装委譲パターン」）が持つ。
+    # 定義だけを配ると、判定から到達できない役割が生成先へ残る。
+    tpl="$(require_playbook_template claude-agent-explorer.md)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/agents/explorer.md"
+    tpl="$(require_playbook_template claude-agent-implementer.md)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/agents/implementer.md"
   fi
 
   # 導入した規範のソースを on-disk に記録する。これがないと、生成後の環境から
@@ -4148,7 +4159,11 @@ EOF
       echo "plan: $OUTPUT_DIR/.github/workflows/copilot-review.yml"
       echo "plan: $OUTPUT_DIR/.github/workflows/review-gate.yml"
     fi
-    has_with claude && echo "plan: $OUTPUT_DIR/.claude/skills/intake/SKILL.md"
+    if has_with claude; then
+      echo "plan: $OUTPUT_DIR/.claude/skills/intake/SKILL.md"
+      echo "plan: $OUTPUT_DIR/.claude/agents/explorer.md"
+      echo "plan: $OUTPUT_DIR/.claude/agents/implementer.md"
+    fi
     echo "plan: $OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION"
   fi
   exit 0
