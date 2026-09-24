@@ -36,6 +36,34 @@ PLAYBOOK_REL_ROOT=".ai-playbook"
 PLAYBOOK_DIR=""
 PLAYBOOK_TMP_ROOT=""
 
+# DCB 自身の版。生成物の由来記録（下記 ORIGIN_REL_PATH の `version=`）へ書き出す。
+#
+# バージョンの正本は公開するタグそのもので、正本の写しは計 5 箇所ある
+# （README.md の 3 箇所 + bootstrap.sh と doctor.sh のこの行。
+# docs/release/RELEASE_EXECUTION_RUNBOOK.md「バージョンの正本」節を参照）。
+# リリース準備のたびに 5 箇所すべてを同時に更新すること。doctor.sh 側にも
+# 同じリテラルを持つ（doctor.sh は curl で単体取得されうるため、bootstrap.sh を
+# 参照できない）。両者が食い違うと doctor.sh の「上流が更新されている」判定が
+# 自分自身の版を誤って報告するため、tests/test-origin-record.sh が bootstrap.sh /
+# doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
+# RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
+# それぞれ機械照合する。
+DCB_VERSION="v0.12.0"
+
+# 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
+# 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
+# 配下に置かないのは、あちらは規範専用の記録（VERSION）が既に機能しており、
+# 二重に記録すると片方だけ更新されたときにどちらが正本か読めなくなるため。
+# .devcontainer/ は常に生成される唯一のディレクトリなので、常時生成物の置き場に選ぶ。
+ORIGIN_REL_PATH=".devcontainer/ORIGIN"
+
+# 既存ファイルを温存（skip）した絶対パスの一覧（改行区切り）。write_file /
+# apply_file_with_policy の両方が書き込みをせず温存したときに積む。
+# write_origin_record が「今回の実行で確実に生成されたか」を判定するために使う
+# （記録を消して 1 ファイルだけ改造し --force なしで再実行すると、
+# 改造後の内容がそのまま「変化なし」として記録されていた）。
+SKIPPED_DESTS=""
+
 usage() {
   # 1 行目は呼び出しに使われたパスをそのまま示す。開発リポジトリでは
   # packages/devcontainer-bootstrap/bootstrap.sh、公開配布物ではリポジトリ直下と
@@ -262,7 +290,10 @@ template_rel_paths() {
     '.github/workflows/identity-guard.yml' \
     '.github/workflows/verify.yml' \
     'scripts/acceptance.sh' \
+    'scripts/check-control-chars.sh' \
     'scripts/check-no-secrets.sh' \
+    'scripts/check-shell-portability.sh' \
+    'scripts/check-table-breaks.sh' \
     'scripts/fix-mount-owner.sh' \
     'scripts/install-ai-tools.sh' \
     'scripts/load-project-env.sh' \
@@ -295,6 +326,11 @@ conditional_template_rel_paths() {
   # 構成へ空の雛形を配ると、使わないファイルを消す作業をさせることになる。
   if has_with aws || has_with gcp; then
     printf '%s\n' 'scripts/acceptance-remote.sh'
+  fi
+  # 依存の同期検査は npm の記録を読む。node を選んでいない構成へ配っても、常に
+  # 「対象が無い」で飛ばすだけのスクリプトが scripts/ に並ぶ。
+  if has_language "node"; then
+    printf '%s\n' 'scripts/check-deps-installed.sh'
   fi
   # マージ確認フックとその配線先は Claude 実行環境の機構なので --with-claude に従う。
   # .claude/.gitignore は settings.local.json の除外を .claude/ の中で閉じるために配る
@@ -2304,6 +2340,2160 @@ echo "SECRETS_PASS"
 exit 0
 TMPL
       ;;
+    'scripts/check-control-chars.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-control-chars.sh — 追跡ファイルへの「表示されない制御文字」混入の検知ゲート
+#
+# 位置づけ:
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   scripts/check-no-secrets.sh / scripts/verify-commit-identity.sh と同じ形にそろえる。
+#
+#   verify.sh から直接呼ばず acceptance.sh へ置く理由: verify.sh が直接呼ぶのは
+#   機密混入という別格の関心事だけである（あちらは一度入ると削除コミットでは漏洩が
+#   解消せず、資格情報の失効・再発行まで要る）。制御文字の混入は直せば終わるので、
+#   通常の受け入れ条件でよい。
+#
+# なぜ機構で押さえるか:
+#   ある利用プロジェクトでは、追跡ファイルに生の NUL バイトが混入したままレビュー
+#   まで進んだ。配列比較の区切りとして書かれたもので**振る舞いは正しく**、問題は
+#   表示上ただの空白に見えるため読んでも気づけないことだった。該当行を出して
+#   目視しても分からず、リモートのレビューが拾って初めて判明している。
+#
+#   **見えない文字は「見て探す」方法では見つからない。** 人のレビューは構造的にすり
+#   抜けるため、`.ai-playbook/shared-ai-rules.md` 12 章「機構化の判断基準」に照らして
+#   機構へ移す。ここで検査するのは「気をつけたか」ではなく「入っているか」なので、
+#   儀式では通過できない。
+#
+# 何を禁じるか（バイト単位で判定する）:
+#   C0 制御文字 0x00-0x1F のうち TAB(0x09) / LF(0x0A) / CR(0x0D) を除く全部と、DEL(0x7F)。
+#   すなわち 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F。
+#
+#   - TAB / LF は字下げと行の区切りであり、テキストファイルの構造そのものなので許す。
+#   - CR も許す。CRLF という**改行の流儀**の一部であり、行末の統一は整形の関心事
+#     （.gitattributes や整形ツールの領分）でこの検査の関心事ではない。
+#   - 残りを禁じる根拠は「表示すると幅を持たないか別の文字に化ける」ことに加えて、
+#     **ソースへ生のバイトとして書く必要が原理的に無い**ことである。値として必要なら
+#     どの言語にもエスケープがある（'\0' / "\x1b" / "\u001B"）。したがって除外規定は
+#     設けない。
+#
+# 何を見ないか（意図的に範囲外。この検査が見ていると誤解しないために明記する）:
+#   - Unicode の不可視文字（BOM U+FEFF、ZWSP U+200B、双方向制御 U+202A-U+202E 等）。
+#     同じ「見えない」問題だが、判定に符号化の解釈が要り、誤検出の方針も別に決める
+#     必要がある（多バイト文字を日常的に含む文書もある）。要るなら別の検査として足す。
+#   - UTF-8 妥当性そのもの。下記のとおり**バイナリ判定の材料としてだけ**使い、
+#     妥当でないことを不合格にはしない。
+#   - 行末の流儀（CRLF / 末尾改行）と、既存ファイルの一括修正。
+#
+# 検査対象の決め方:
+#   git ls-files -z を起点にし、作業ツリー上の実体を読む。
+#   - 追跡対象だけを見る。制御文字が問題になるのは、それが共有される状態に入ってからである。
+#   - 索引に入った時点で対象になるので、コミット前（git add 済み）でも落ちる。
+#   - 作業ツリーの内容を読むため、追跡ファイルを編集して混入させた時点でも落ちる。
+#   - 実体が無いもの（削除済み・サブモジュール）とシンボリックリンクは走査しない。
+#     リンクを開くと git が持つ内容（リンク先のパス文字列）ではなくリンク先の実体を
+#     読んでしまい、判定が別物になるため。リンク先パスに制御文字が入る事態は考えにくい。
+#
+# バイナリをどう除くか（この検査の一番の勘所）:
+#   **git 自身のバイナリ判定は使えない。** git は「先頭 8000 バイトに NUL があればバイナリ」と
+#   みなす（git grep -I、diff の "Binary files differ" がこれ）。その判定を使うと、まさに
+#   捕まえたい「NUL の混ざったテキストファイル」が真っ先に対象外へ落ちる。
+#
+#   代わりに 2 段で見る。
+#     1 段目: 追跡ファイルを 1 本ずつ grep で走査し、禁止バイトを含むファイルだけを拾う。
+#     2 段目: 1 段目に引っかかったものだけを、テキストかバイナリかで判定する。
+#
+#   2 段目の判定材料は **UTF-8 として解釈できるか**である。NUL も ESC も UTF-8 として妥当な
+#   バイト列なので、「NUL の混ざったテキスト」はテキストのまま残る。一方、画像やフォントは
+#   実際上どこかに不正なバイト列を含む（PNG の先頭 0x89、JPEG の 0xFF、gzip の 0x8B は
+#   いずれもその時点で不正）ため、バイナリとして落ちる。**妥当でないものを不合格にするので
+#   はなく、走査から外すだけ**である点で、UTF-8 妥当性の検査とは向きが逆である。
+#
+#   限界（承知の上で受け入れる）: UTF-8 として妥当なバイナリ形式を追跡すると、それは
+#   テキストとして扱われる。逆に UTF-8 でないテキスト（Shift_JIS など）は走査されない。
+#   どちらも起きたら、その時点で拡張子による短絡を足すのが素直である。
+#
+# 速度:
+#   1 段目は追跡ファイル 1 本につき grep を 1 回起こす（GNU 専用の -Z を避けて移植性を
+#   優先した結果で、1 回の一括走査より遅い）。2 段目はバイナリを大量に追跡すると
+#   呼び出し回数がその件数に比例するので、目に見えて遅くなったら拡張子による短絡を
+#   1 段目の手前へ足すこと。
+#
+# 禁止バイトの渡し方:
+#   パターンはファイルへ書いて grep -f で読ませる。**NUL は引数として渡せない**（argv は
+#   NUL 終端なので、文字列の途中に NUL を置けない）ためで、これが唯一の理由である。
+#   PCRE（grep -P）なら \x00 と書けるが、PCRE 付きの grep があることを前提にしたくない。
+#   角括弧の範囲指定はロケールの照合順に依存するため LC_ALL=C で固定する
+#   （scripts/check-no-secrets.sh が sort/comm で固定しているのと同じ理由）。
+#
+# 検査が成立していないことを合格にしない:
+#   git 管理外での実行、git コマンドの失敗、追跡ファイル 0 件、grep 自体の失敗は、いずれも
+#   「制御文字が無い」ことを意味しない。空の出力を「該当なし」と読むと、検査していないのに
+#   合格になる。すべて失敗として扱う。
+#   加えて、**起動時に検査機構そのものを自己診断する**（NUL を混ぜた入力で必ず当たること、
+#   通常の文字で当たらないこと）。パターンの書き損じや grep の仕様差で「何も当たらない
+#   検査」になっていた場合、それは常に緑を返すため、赤にならない限り誰も気づけない。
+#
+# 終了コード:
+#   0 = CONTROL_CHARS_PASS
+#   1 = CONTROL_CHARS_FAIL（制御文字の混入、または検査が成立しなかった）
+set -euo pipefail
+
+# 角括弧の範囲指定（[\000-\010] など）の解釈をバイト順に固定する。
+export LC_ALL=C
+
+# 検査はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+# 任意の作業ディレクトリから起動しても結果が不変になるよう、起動時 CWD に依存しない。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+fail() {
+  printf '[control-chars] %s\n' "$1" >&2
+  echo "CONTROL_CHARS_FAIL"
+  exit 1
+}
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/control-chars.XXXXXX")" || { echo "[control-chars] 一時ディレクトリを作成できません。" >&2; echo "CONTROL_CHARS_FAIL"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT
+
+PATTERN="$WORK/forbidden.pattern"
+TRACKED="$WORK/tracked.z"
+TARGETS="$WORK/targets.z"
+SUSPECTS="$WORK/suspects.z"
+GREP_ERR="$WORK/grep.err"
+
+# ── 禁止バイトのパターン ─────────────────────────────────────────────────────
+#
+# 8 進で 0x00-0x08 / 0x0B / 0x0C / 0x0E-0x1F / 0x7F。TAB(011) / LF(012) / CR(015) が
+# 範囲から外れていることが読み取れるよう、範囲を分けて書く。
+printf '[\000-\010\013\014\016-\037\177]\n' > "$PATTERN"
+
+# ── 自己診断 ─────────────────────────────────────────────────────────────────
+#
+# 両方向を見る。当たること（偽陰性＝常に緑になる壊れ方）と、当たらないこと（偽陽性）。
+# grep が早期終了して書き込み側が SIGPIPE で落ちても影響しないよう、標準入力ではなく
+# プロセス置換のファイルとして渡す。
+if ! grep -q -a -f "$PATTERN" <(printf 'a\000b\n'); then
+  fail "自己診断に失敗しました: NUL を含む入力を検出できません。検査が成立していないため失敗させます。"
+fi
+if grep -q -a -f "$PATTERN" <(printf 'tab\there\tand newline\r\n'); then
+  fail "自己診断に失敗しました: TAB / CR / LF だけの入力を誤検出します。検査が成立していないため失敗させます。"
+fi
+
+# ── 検査対象の列挙 ───────────────────────────────────────────────────────────
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "git の作業ツリーではありません。追跡ファイルを列挙できないため失敗させます。"
+
+# 列挙は NUL 区切り。パス名に改行を含むファイルでも 1 レコードのまま崩れずに読める
+# （scripts/check-no-secrets.sh と同じ扱い）。
+git ls-files -z > "$TRACKED" || fail "git ls-files に失敗しました。追跡ファイルを列挙できません。"
+
+tracked_count=0
+target_count=0
+skipped_count=0
+
+# 走査できる実体だけを残す。判定は bash の組み込みだけで行うのでプロセスを起こさない。
+while IFS= read -r -d '' path; do
+  tracked_count=$((tracked_count + 1))
+  # シンボリックリンクは走査しない（理由は冒頭「検査対象の決め方」）。
+  if [[ -L "$path" ]]; then
+    skipped_count=$((skipped_count + 1))
+    continue
+  fi
+  # 通常ファイルでないもの（削除済み・サブモジュールのディレクトリ）は走査対象が無い。
+  if [[ ! -f "$path" ]]; then
+    skipped_count=$((skipped_count + 1))
+    continue
+  fi
+  target_count=$((target_count + 1))
+  printf '%s\0' "$path"
+done < "$TRACKED" > "$TARGETS"
+
+[[ "$tracked_count" -gt 0 ]] \
+  || fail "追跡ファイルが 1 件もありません。検査していないことと、制御文字が無いことは別なので失敗させます。"
+[[ "$target_count" -gt 0 ]] \
+  || fail "走査できる追跡ファイルが 1 件もありません（全件が実体なし、またはリンク）。検査が成立していないため失敗させます。"
+
+# ── 1 段目: 禁止バイトを含むファイルを 1 回の走査で拾う ──────────────────────
+#
+# ファイルごとに grep -q を 1 回ずつ呼ぶ（xargs -0 grep -l -Z の一括走査は使わない）。
+#
+# **-Z は GNU grep の拡張で、macOS / BSD の grep には無い。** 一括走査は「該当ファイル名を
+# NUL 区切りで返させる」ために -Z が要ったが、それ自体は移植性のために採用したはずの
+# 手段（#263 系）が GNU 依存を持ち込む本末転倒だった。ここでは $TARGETS が既に NUL 区切りの
+# ファイル一覧を持っているため、-Z で教えてもらう必要が無い。1 ファイルずつ read で
+# 取り出し、grep には対象を直接渡す（-a のみで足りる。-l / -Z は使わない）。
+#
+# 費用はファイル数に比例して grep の起動回数が増える（バッチ化していた旧実装より遅い）。
+# 目に見えて遅くなったら、xargs -0 grep -l -a -f "$PATTERN" -- （-Z を使わない一括版）
+# への切り替えを検討すること。ただし一括版は「suspects の一覧」しか返せず、NUL 区切りで
+# 返す手段が -Z 以外に無いため、改行を含むパス名が suspects に混じると 1 レコードとして
+# 復元できない。1 ファイルずつ処理する現行方式はこの制約が無い。
+grep_error=0
+while IFS= read -r -d '' path; do
+  path_status=0
+  grep -q -a -f "$PATTERN" -- "$path" 2>>"$GREP_ERR" || path_status=$?
+  if [[ "$path_status" -eq 0 ]]; then
+    printf '%s\0' "$path" >> "$SUSPECTS"
+  elif [[ "$path_status" -ne 1 ]]; then
+    # 0 = 該当あり（suspect）。1 = 該当なし（正常）。それ以外（2 等）は grep 自体の
+    # エラーで、検査が成立していないため失敗させる。ここでは即座に落とさず、
+    # 全件を回してから GREP_ERR の中身と合わせて判定する（1 ファイルの失敗で
+    # 残りの走査を打ち切らないほうが、他にも壊れたファイルがあれば一度に分かる）。
+    grep_error=1
+  fi
+done < "$TARGETS"
+
+if [[ -s "$GREP_ERR" ]]; then
+  printf '[control-chars] 走査中にエラーが出ました。検査が成立していないため失敗させます:\n' >&2
+  sed 's/^/[control-chars]     /' "$GREP_ERR" >&2
+  echo "CONTROL_CHARS_FAIL"
+  exit 1
+fi
+if [[ "$grep_error" -ne 0 ]]; then
+  fail "走査中に grep が異常終了したファイルがあります。検査が成立していないため失敗させます。"
+fi
+
+# ── 2 段目: 拾ったものをテキストとバイナリに分ける ───────────────────────────
+
+binary_count=0
+violations=0
+
+if [[ -s "$SUSPECTS" ]]; then
+  # iconv はここで初めて要る。1 段目が空なら「制御文字は無い」と言い切れるので、
+  # 不在を理由に落とすのは実際に判定が必要になったときだけでよい。
+  command -v iconv >/dev/null 2>&1 \
+    || fail "iconv がありません。テキストとバイナリを判定できないため失敗させます（対処: libc の iconv を導入する）。"
+
+  while IFS= read -r -d '' path; do
+    # UTF-8 として解釈できなければバイナリとみなして走査から外す（冒頭の議論を参照）。
+    if ! iconv -f UTF-8 -t UTF-8 < "$path" > /dev/null 2>&1; then
+      binary_count=$((binary_count + 1))
+      continue
+    fi
+
+    violations=$((violations + 1))
+    hit_lines="$(grep -c -a -f "$PATTERN" -- "$path" || true)"
+    printf '[control-chars]   %s（該当 %s 行）\n' "$path" "$hit_lines" >&2
+    # 該当行は cat -v で可視化してから出す。生のまま出すと、端末では**やはり見えない**。
+    # 先頭 5 行に絞り、1 行 200 バイトで切る（長い行で対処が画面から流れないように）。
+    grep -n -a -f "$PATTERN" -- "$path" 2>/dev/null \
+      | head -5 | cat -v | cut -c1-200 | sed 's/^/[control-chars]     /' >&2 || true
+  done < "$SUSPECTS"
+fi
+
+# ── 結果 ─────────────────────────────────────────────────────────────────────
+
+printf '[control-chars] 検査したパス: 追跡 %s 件 / 走査 %s 件（実体なし・リンク %s 件、バイナリ %s 件）\n' \
+  "$tracked_count" "$target_count" "$skipped_count" "$binary_count"
+
+if [[ "$violations" -gt 0 ]]; then
+  printf '[control-chars] 表示されない制御文字を含むファイルを %s 件検出しました。\n' "$violations" >&2
+  printf '[control-chars] 上の表記は cat -v によるものです（^@ = NUL、^[ = ESC、^? = DEL）。\n' >&2
+  printf '[control-chars] 対処: その文字が値として必要なら、生のバイトではなく言語のエスケープで書く\n' >&2
+  printf "[control-chars]       （例: '\\\\0' / \"\\\\x1b\"）。不要な混入であれば取り除く。\n" >&2
+  echo "CONTROL_CHARS_FAIL"
+  exit 1
+fi
+
+echo "CONTROL_CHARS_PASS"
+exit 0
+TMPL
+      ;;
+    'scripts/check-deps-installed.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-deps-installed.sh — node_modules が package-lock.json と一致していることの機械照合
+#
+# 位置づけ:
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は node の節から呼ぶだけ。
+#   scripts/check-no-secrets.sh / scripts/check-control-chars.sh と同じ形にそろえる。
+#
+# なぜ機構で押さえるか:
+#   package-lock.json は「入っているべき依存の一覧」の宣言で、node_modules はその実体
+#   である。`npm ci` を回さずに反復すると、この 2 つが黙ってずれる。ずれた状態で
+#   受け入れ条件を回すと、テストが `Cannot find package '...'` で全滅する。
+#
+#   **これは自分の変更と無関係な赤で、しかも原因が読み取りにくい。** 偽の赤と同じ
+#   ようにゲートへの信頼を削る。CI は毎回 `npm ci` するので緑のままで、**手元でだけ
+#   出る。** worktree を使う並列作業ではレーンごとに `npm ci` が要るため、踏む頻度が
+#   上がる。
+#
+#   検査するのは「`npm ci` を実行したか」ではなく「一致しているか」である。
+#
+# **直さない。落とすだけである。**
+#   ゲートの役割は判定であって環境の修復ではない。黙って `npm ci` を走らせると、
+#   何が起きたのかが見えないまま結果だけが変わる。加えて `npm ci` は node_modules を
+#   丸ごと作り直すため、反復の接地信号が目に見えて遅くなる。対処は人（または
+#   エージェント）が明示的に実行する。
+#
+# マニフェストが無ければスキップする:
+#   **通過と同じ信号を出さない。** 「検査していない」と「一致を確認した」は別のこと
+#   で、同じ信号にすると読み分けられなくなる。scripts/acceptance.sh も、マニフェストが
+#   無い言語はスキップして失敗させない方針で作られている。
+#
+#   ただし **package.json があるのに周辺が欠けている場合は失敗させる。** そこは
+#   「検査が成立しない」であって「対象が無い」ではない。
+#
+# 何と何を比べるか:
+#   package-lock.json（宣言）と node_modules/.package-lock.json（npm が導入時に書く
+#   「実際に入れた木」の記録）を比べ、記録にある分だけディレクトリの存在も見る。
+#   node_modules 全体は走査しない。
+#
+#   実測（宣言 300 件・実体 300 件、この開発環境）: 13〜20ms。**ほぼ node の起動費用
+#   である**（同じ環境で `node -e ''` が 21ms）。反復のたびに通ることを前提にした値段
+#   として測った。**取り込み元の数値は書き写さない。** 環境が違えば変わる。
+#
+#   4 方向を見る:
+#     - 宣言にあって記録に無い   … `npm ci` していない
+#     - 版が食い違う             … 別の版のまま残っている
+#     - 記録にあって宣言に無い   … 依存を削ったあと `npm ci` していない
+#     - 記録にあるが実体が無い   … ディレクトリを消した（退避した）状態、または
+#                                    ディレクトリが通常ファイルに置き換わった状態
+#
+#   optional な依存は宣言にあっても入らないのが正常なので、宣言側から除く（他の
+#   プラットフォーム向けの esbuild / workerd などがこれに当たる）。link は
+#   workspace への参照で実体の版を持たないため、**宣言側と記録側の両方から**除く。
+#
+#   **どちらの lockfile も packages を持っていなければ失敗させる。** 空として扱うと、
+#   両方が空になって「差分ゼロ＝一致」になり、比較が成立していないのに緑を返す。
+#   lockfileVersion 1 は packages を持たないので、この検査は 2 以降を前提にする。
+#
+# 対象は npm だけである:
+#   pnpm / yarn / bun は記録の形式が違う。見ない。
+#
+# 終了コード:
+#   0 = DEPS_PASS（一致）/ DEPS_SKIP（package.json が無い）
+#   1 = DEPS_FAIL（ずれている、または検査が成立しなかった）
+set -euo pipefail
+
+# 検査はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+fail() {
+  printf '[deps] %s\n' "$1" >&2
+  echo "DEPS_FAIL"
+  exit 1
+}
+
+# ── 対象の有無 ───────────────────────────────────────────────────────────────
+#
+# package.json が無いのは「この構成では対象が無い」であって、異常ではない。
+if [ ! -f package.json ]; then
+  echo "[deps] package.json がありません。照合の対象が無いため飛ばします。"
+  echo "DEPS_SKIP"
+  exit 0
+fi
+
+# ── ここから先は「対象がある」。欠けていれば検査が成立しない ────────────────
+[ -f package-lock.json ] \
+  || fail "package-lock.json がありません。宣言が無いため照合できません（'npm install' で生成し、追跡に含めること）。"
+[ -d node_modules ] \
+  || fail "node_modules がありません。'npm ci' を実行してください。"
+
+HIDDEN="node_modules/.package-lock.json"
+[ -f "$HIDDEN" ] \
+  || fail "$HIDDEN がありません（npm が導入時に書く記録）。node_modules が npm 以外の手段で作られたか壊れています。'npm ci' を実行してください。"
+
+command -v node >/dev/null 2>&1 \
+  || fail "node が見つかりません。Node.js を導入してください。"
+
+# ── 照合 ─────────────────────────────────────────────────────────────────────
+#
+# 比較そのものは node で行う。JSON を正しく読む道具が要り、node はこの検査の対象
+# （Node プロジェクト）に必ず存在するため、新しい依存を増やさずに済む。
+#
+# 差分は先頭 10 件だけ出す。全件出しても取るべき行動（`npm ci`）は変わらず、大量の
+# 行で「対処」が画面から流れると読めない赤になる。
+if ! diff_report="$(node - <<'JS'
+const fs = require('fs');
+const read = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
+
+// `|| {}` で受けない。**packages を持たない文書を空の宣言として扱うと、両方が空に
+// なって「差分ゼロ＝一致」になる。** 比較が一度も成立していないのに緑を返す経路で、
+// 検査が成立しないことを合格にしないという方針に反する（実測で踏んだ）。
+//
+// lockfileVersion 1 は packages を持たない（dependencies だけ）。この検査は 2 以降を
+// 前提にする。1 のまま使うプロジェクトは `npm install` で作り直すこと。
+const packagesOf = (doc, path) => {
+  const pkgs = doc.packages;
+  if (pkgs === null || typeof pkgs !== 'object' || Array.isArray(pkgs)) {
+    throw new Error(`${path} に packages がありません（lockfileVersion 2 以降が必要です）`);
+  }
+  return pkgs;
+};
+
+const declared = packagesOf(read('package-lock.json'), 'package-lock.json');
+const installed = packagesOf(read('node_modules/.package-lock.json'), 'node_modules/.package-lock.json');
+const problems = [];
+
+for (const [path, entry] of Object.entries(declared)) {
+  // "" はルート（package.json 自身）で、導入記録側には現れない。
+  if (path === '') continue;
+  // optional は「入らないのが正常」な経路がある（他プラットフォーム向けの依存）。
+  if (entry.optional) continue;
+  // link はワークスペースへの参照で、実体の版を持たない。
+  if (entry.link) continue;
+  const got = installed[path];
+  if (!got) {
+    problems.push(`未導入: ${path}@${entry.version ?? '(版不明)'}`);
+    continue;
+  }
+  if (entry.version && got.version !== entry.version) {
+    problems.push(`版ちがい: ${path} 宣言=${entry.version} 導入=${got.version}`);
+  }
+}
+
+for (const [path, entry] of Object.entries(installed)) {
+  // ルートを表す空文字キーは、実測した npm では記録側へ書かれない。**書かれない
+  // ことを前提にしない。** 将来の版が書くようになると fs.existsSync('') が false を
+  // 返すため、正常な状態が毎回「実体が無い」になる。1 行のガードで版への依存を外す。
+  if (path === '') continue;
+  // **記録側でも link を外す。** 宣言側だけで外すと、workspace への参照が実体の
+  // 確認まで到達して「実体が無い」と報告される。除外の契約は両側で同じにする。
+  if (entry.link) continue;
+  if (!(path in declared)) {
+    problems.push(`宣言に無い: ${path}@${entry.version ?? '(版不明)'}`);
+    continue;
+  }
+  // 記録にあるものが実体として置かれていることも見る。記録だけを信じると、
+  // ディレクトリを消した（退避した）状態を「一致している」と報告してしまう。
+  //
+  // **existsSync では足りない。通常ファイルでも真になる。** ディレクトリが 1 バイトの
+  // ファイルに置き換わった壊れ方を「一致」として通していた（実測で踏んだ）。
+  // statSync はシンボリックリンクを辿るので、ディレクトリへのリンクは通る。
+  let isDir = false;
+  try {
+    isDir = fs.statSync(path).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) {
+    problems.push(`実体が無い: ${path}@${entry.version ?? '(版不明)'}`);
+  }
+}
+
+if (problems.length === 0) process.exit(0);
+console.log(String(problems.length));
+for (const line of problems.slice(0, 10)) console.log(line);
+if (problems.length > 10) console.log(`... 他 ${problems.length - 10} 件`);
+process.exit(1);
+JS
+)"; then
+  # node 自身が落ちた場合（JSON が壊れている等）も、ここへ来る。
+  #
+  # **node の標準エラーは捕捉していない**（`2>&1` を付けていない）ので diff_report は
+  # 空になり、下の分岐が読めるメッセージを出す。標準エラーを混ぜると、スタックの
+  # 1 行目を件数として表示してしまう。**足さない理由をここへ残す。**
+  if [ -z "$diff_report" ]; then
+    printf '[deps] ---- 上は node の出力 ----\n' >&2
+    fail "package-lock.json / $HIDDEN を読めませんでした（JSON が壊れているか、packages を持っていません）。上の node の出力に理由があります。lockfileVersion 1 のままなら 'npm install' で作り直し、それ以外は 'npm ci' を実行してください。"
+  fi
+
+  # 先頭行が件数（数字）でなければ、想定外の出力である。**件数として表示しない。**
+  first_line="$(printf '%s\n' "$diff_report" | sed -n 1p)"
+  case "$first_line" in
+    '' | *[!0-9]* )
+      printf '[deps] 依存の照合が想定外の出力を返しました。そのまま出します:\n' >&2
+      printf '%s\n' "$diff_report" | sed 's/^/[deps]     /' >&2
+      echo "DEPS_FAIL"
+      exit 1
+      ;;
+  esac
+
+  printf '[deps] node_modules が package-lock.json とずれています（差分 %s 件）:\n' "$first_line" >&2
+  printf '%s\n' "$diff_report" | sed -n '2,$p' | sed 's/^/[deps]     /' >&2
+  printf "[deps] 対処: npm ci\n" >&2
+  printf '[deps] このゲートは自動で直しません（判定と修復を混ぜると、何が起きたのかが見えなくなるため）。\n' >&2
+  echo "DEPS_FAIL"
+  exit 1
+fi
+
+echo "[deps] package-lock.json と node_modules の記録が一致しています。"
+echo "DEPS_PASS"
+exit 0
+TMPL
+      ;;
+    'scripts/check-shell-portability.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-shell-portability.sh — 「この環境では通るが BSD 系（macOS）では落ちる」綴りを、
+#   実行せずに検出する。
+#
+# 位置づけ:
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   scripts/check-control-chars.sh / scripts/check-table-breaks.sh と同じ形にそろえる。
+#
+# なぜ機構で押さえるか:
+#   CI は Linux（GNU coreutils）でしか走らない。一方、配布されたスクリプトと README の
+#   導入手順は**利用者のホスト（macOS）で実行される**。この差は原理的にすり抜ける——
+#   テストを書いても緑になり、レビューでも「動いている」ようにしか見えない。
+#
+#   実際に同じ形を繰り返し踏んでいる。素の mktemp が 19 箇所まで積み上がった例、
+#   pipefail 下の SIGPIPE で版の表示が必ず失敗していた例、GNU 専用の grep -Z で
+#   走査そのものが落ちていた例。**いずれも外部のレビューが拾うまで気づけなかった。**
+#
+#   道具の差は、実行しなくても綴りで分かる。分かるものは機械で見る。
+#
+# この検査が約束しないこと:
+#   **移植性の保証ではない。規則表に載っている綴りが無いことしか言わない。**
+#   踏んだ事故を表へ足していく形なので、**緑でも macOS で落ちうる。** 新しく踏んだら、
+#   直すのと同じコミットで表へ 1 行足すこと。
+#
+#   - **bash の版は見ない。** macOS の /bin/bash は 3.2 で mapfile も連想配列も無いが、
+#     新しい bash を使う前提を受け入れているなら、それを後から検査で赤くしない。
+#   - **外部コマンドの存在も見ない**（jq / terraform など）。各スクリプトが command -v で
+#     確かめる責務である。
+#   - **`# bsd-ok:` を付けた行の妥当性は検査しない。** 印があるかどうかだけを見る。
+#     妥当性はレビューの責務である。
+#
+# 逃げ道:
+#   **代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く。**
+#   理由は必須で、空の印は逃げ道として認めない。
+#
+#   **逃げ道を用意するのは、検査を無効化させないためである。** 逃げ道の無い検査は、
+#   そのうち丸ごと外される。印は差分に残るのでレビューで見える。
+#
+#   **この検査自身とテストも対象に含める。** 検出対象の綴りをリテラルで持つ層を
+#   除外すると、そこに残った本物を見逃す（実際に見逃した）。除外ではなく印で通す。
+#
+# 検査対象:
+#   追跡している *.sh と *.md。*.md は**フェンスで囲まれたコード部分だけ**を見る。
+#   - *.md を含めるのは、README の導入手順が利用者のホストでそのまま実行されるため。
+#   - 地の文を見ないのは、リリースノート等が綴りを説明として書くため。全文へ当てると
+#     検査が文章の書き方に依存する。
+#   - コメント行は見ない。同じ理由で、「なぜ直したか」を書けなくなるため。
+#
+# ── 検出するもの ──────────────────────────────────────────────────────────────
+#
+# SED_BRACKET_TAB: ブラケット式の中の `\t`
+#
+#   BSD 系（macOS）の sed は、**ブラケット式の中では** `\t` をタブとして解釈しない。
+#   `[ \t]` は「空白・バックスラッシュ・t」の集合になり、タブ字下げの行を取りこぼす。
+#   POSIX の規定どおり（ブラケット式の中でバックスラッシュは特殊な意味を失う）。
+#
+#   実測（macOS 26.5.2 / /usr/bin/sed / /usr/bin/awk version 20200816）:
+#
+#     ブラケット内の \t   sed 's/[ \t]/X/'   a<TAB>b -> 一致しない / atb -> aXb
+#                          => タブとして効かない。**検出するのはこれだけ**
+#
+#   次の 2 つは検出対象にしていたが、測定で否定されたので外した。対象プラット
+#   フォーム（macOS の BWK awk / Linux の mawk）のどちらでも動く。
+#   **実測に合っていない検査は、動くコードの書き換えを迫るぶん、検査が無いより悪い。**
+#
+#     ブラケット外の \t   sed 's/\t/TAB/'    -> aTABb（タブとして効く）
+#     置換側の \n         sed 's/x/a\nb/'    -> 2 行（改行になる）
+#
+#   パターン側の `\n`（`/^$/N;/^\n$/D` の形）も効くことを確認済み。
+#
+#   **3 つ目として awk の間隔指定も外していたが、その判断は誤りだった。** 根拠にした
+#   見本は「`xx` に一致するから間隔指定として機能する」だったが、**その入力では
+#   区別が付かない。** 間隔指定が機能していても、下限の 2 回だけに解釈されていても
+#   `xx` には一致する。**区別できる入力は 3 回以上の繰り返しである。** AWK_INTERVAL
+#   として検出へ戻した（下記）。
+#
+# AWK_INTERVAL: awk の正規表現の間隔指定（下限 2 以上）
+#
+#   **mawk は下限が 2 以上の間隔指定で、下限を超える繰り返しに一致しない。** 書いた
+#   意図より狭い集合を指すが、下限ちょうどの入力には一致するため、緑のまま通る。
+#
+#   実測（Linux / mawk 1.3.4 20240123。比較は GNU grep 3.11）:
+#
+#     awk '/^x{2,3}$/'   xx   -> 一致      grep -E '^x{2,3}$'   xx   -> 一致
+#     awk '/^x{2,3}$/'   xxx  -> **不一致** grep -E '^x{2,3}$'   xxx  -> 一致
+#     awk '/^x{2,4}$/'   xxxx -> **不一致** grep -E '^x{2,4}$'   xxxx -> 一致
+#     awk '/^x{2,}$/'    xxx  -> **不一致** grep -E '^x{2,}$'    xxx  -> 一致
+#
+#   **下限が 1 の形は一致する**（`{1,3}` は 1〜3 回に正しく一致し、4 回には一致しない）。
+#   したがって検出は**下限 2 以上に限る。** 「{n,m} を {n} と解釈する」という一般化は
+#   実測に反するので書かない。
+#
+#   **macOS の BWK awk（version 20200816）での挙動は未測である。** 上の 3 行を実機で
+#   測ったら、この表へ足すこと。mawk だけでも規則の理由は足りる（devcontainer の awk は
+#   mawk であり、対象プラットフォームに含まれる）。
+#
+#   検出は awk の引数のうち、**正規表現として解釈される部分だけ**を見る。
+#
+#     - `/…/` のリテラル（`gsub(/ {2,}/, …)` や `match($0, /b{4,}/)` を含む）
+#     - `~` / `!~` の右辺の文字列リテラル
+#     - `-v name=` の右辺
+#
+#   同じ行に `grep -E 'x{2,3}'` があっても、そちらは grep の引数なので数えない
+#   （grep は POSIX どおりに解釈する）。
+#
+#   **限界 1: 別ファイルの awk スクリプト（`awk -f scan.awk`）は拾えない。** パターンが
+#   行に現れないためで、この検査自身がその形である。
+#
+#   **限界 2: 文字列を変数へ入れてから `~` で使う形は拾えない**
+#   （`awk 'BEGIN { p = "a{2,5}" } $0 ~ p'`）。その文字列が正規表現として使われるかを
+#   構文だけでは決められない。プログラム本文へ素当てすると `awk 'BEGIN { print
+#   "{2,3}" }'` まで報告する（実測）。**正常なコードへ書き換えを迫るより、偽陰性の側へ
+#   倒す**（規則表の方針と同じ向き）。
+#
+#   網羅はしていない。
+#
+# BRACKET_BACKSLASH_N: ブラケット式の中の `\n`
+#
+#   ブラケット式の中でバックスラッシュは特殊な意味を失う（POSIX）。**`[^\n]` は
+#   「改行以外」ではなく「バックスラッシュと n 以外」であり、`n` という文字を含む行を
+#   黙って落とす。** 「同じ行の中で A と B」を表現したつもりの式が、意図と違う集合を指す。
+#
+#   実測（GNU grep 3.11。locale は C / C.UTF-8 / en_US.UTF-8 で差が無い）:
+#
+#     grep -E 'A[^\n]*B'   AxB    -> 一致
+#     grep -E 'A[^\n]*B'   A\nB   -> **不一致**（\ と n が集合から外れている）
+#     grep -E '[\n]'       n      -> **一致**（改行の集合ではない）
+#
+#   SED_BRACKET_TAB と同じ類型だが、あちらは sed の引数だけを見る。こちらは sed /
+#   awk / grep の引数を見る（`[^\n]` は grep の式として書かれた実例がある）。
+#
+#   **awk 側は AWK_INTERVAL と同じく正規表現の文脈だけを見る**（`awk 'BEGIN { print
+#   "[^\n]" }'` は報告しない）。**`grep -F` / `--fixed-strings` は対象外にする。**
+#   固定文字列検索ではブラケットが正規表現として解釈されないため、`[^\n]` を書いても
+#   意図どおりの可搬な呼び出しである（実測。Copilot の指摘）。
+#
+#   **sed 側はパターンだけを見る。**`s/pat/repl/flags` の
+#   置換側と `y` コマンドは対象外である。**そこにブラケット式は存在せず、`[` と `]` は
+#   リテラルの文字**なので、「ブラケット式の中の `\t` / `\n`」という判定が成り立たない。
+#   これは移植性の実測ではなく構造上の理由で、SED_BRACKET_TAB も同じ扱いにそろえた。
+#
+#   取り出すのは次の 2 つ。実測で確かめた形は下記のとおり。
+#
+#     アドレス           sed -n '/^[ \t]*x/p'        -> 検出する
+#     s のパターン側     sed -n 's/^[ \t]*x//p'      -> 検出する
+#     別の区切り         sed 's|^[^\n]*x||'          -> 検出する
+#     複数の -e          sed -e 's/a/b/' -e 's/^[^\n]//' -> 検出する
+#     アドレス付きの s   sed '1,$s/x/[\n]/'          -> 検出しない（置換側）
+#     s の置換側         sed 's/x/[\n]/'             -> 検出しない
+#     y コマンド         sed 'y/ab/[\n]/'            -> 検出しない
+#
+#   **限界: 区切り文字がブラケット式の中に現れる形（`sed 's/[/]/x/'`）は取りこぼす。**
+#   区切りを数える側がブラケットを見ないため、パターンが途中で切れる。正しい sed だが
+#   検出できない。偽陰性の側へ倒している。
+#
+#   **`\t` を sed 以外でも見るかは、この検査では扱わない**（sed 以外での実測をしていない）。
+#
+# GREP_DASH_Z_FLAG: `grep -Z` は GNU 拡張
+#
+#   `grep -Z`（該当ファイル名を NUL 区切りで返す）は GNU grep の拡張で、BSD の grep に
+#   は無い。**開発環境の grep によっては通ってしまうため、CI・手元のどちらも気づけない。**
+#   macOS ではオプションエラーになり、対象ファイルがある正常なプロジェクトでも走査
+#   そのものが失敗する。
+#
+#   検出は「同じ行に grep という単語があり、かつ Z を含む短縮オプションの塊
+#   （`-Z` / `-lZa` 等）がある」ことで判定する。`--` で始まる長いオプション名は対象に
+#   ならない。全体を通した厳密な引数解析はしていない。
+#
+# PIPEFAIL_SIGPIPE: `pipefail` 下で早期終了する消費側へのパイプ
+#
+#   `grep -q` や `head -n 1` は目的を果たした時点で終了し、パイプを閉じる。まだ書き
+#   込み中の生産側は SIGPIPE で死に、終了コード 141 を返す。`pipefail` があると
+#   **パイプライン全体が非 0** になる。消費側が成功していても、である。
+#
+#     $ set -o pipefail
+#     $ find <多数の .md がある木> -type f -name '*.md' | grep -q .
+#     rc=141  PIPESTATUS=141 0        <- 右は 0（一致している）
+#
+#   **GNU find は EPIPE を握って 0 で終わる。BSD find（macOS）は SIGPIPE で死ぬ。**
+#   Linux コンテナで実行して再現する検査を書いても緑になる。だから静的に見る。
+#
+#   直し方:
+#     find … | grep -q .    -> find … -print -quit の出力が空かで判定（パイプを無くす）
+#     find … | head -n 1    -> find … -print -quit
+#     cmd  … | grep -q X    -> cmd … | grep X >/dev/null（-q を外せば EOF まで読む）
+#     cmd  … | head -n 1    -> cmd … | sed -n 1p（EOF まで読む）
+#
+#   `|| true` を足すだけの対処は勧めない。生産側が**本当に失敗した**場合まで握り潰し、
+#   検査が成立していないことを合格にしてしまう。ただし既存の `|| true` は意図的な
+#   ガードなので、検出の対象からは外す。
+#
+#   **報告するのは「終了コードが読まれる形」だけである。**
+#     - パイプがコマンド置換の外にある   -> 報告する（その文の終了コードそのものになる）
+#     - コマンド置換の中にある           -> **それを囲む文が条件文脈のときだけ**報告する
+#
+#   後者を外すのは、`v="$(cmd | head -1)"` のように**終了コードを誰も読まない**形では
+#   判定が反転しようがないためである。除外しないと、実害の無い代入が大量に赤くなり、
+#   検査が読まれなくなる（実測: この除外が無いと 1 リポジトリで 50 行が該当した）。
+#   **代償は偽陰性で、後から `set -e` を足したときに壊れる経路を見逃す。** この検査の
+#   弱点は最初から偽陰性の側にあるので、向きは揃っている。
+#
+#   生産側が単一の printf / echo の場合も外す。出力がパイプバッファに収まりきって
+#   生産側が先に終わるため実害が無い。**生産側の判定は「パイプの直前のコマンド」で
+#   行う。** 行頭だけを見ると `elif ! printf … | grep -q …` の形を取りこぼす
+#   （実測: 行頭だけを見る実装は 1 リポジトリで 143 行の偽陽性を出した）。
+#
+# RULE: 規則表（1 行 = 正規表現と対処）
+#
+#   **踏んだ事故を書き足す場所である。** 表を増やすときは、必ず「代わりに何を書くか」
+#   まで書くこと。指摘だけの検査は、直し方を探す時間を利用者へ押し付ける。
+#
+#   **1 つの規則へ複数の綴りをまとめるのは、対処が同じときに限る。** `sha256sum` と
+#   `md5sum` を 1 行にまとめると、対処として書ける代替はどちらか一方になり、もう
+#   一方の利用者は**指摘どおりに直すとハッシュ方式が変わる。** 検査が壊れた助言を
+#   与えるのは、検査が無いより悪い（レビューの指摘で実際に踏んだ）。
+#
+#   規則は 1 行ずつ当てるだけで、引用の内外は区別しない。たとえば sed -i の規則は
+#   `sed 's/ -i / X /' f` のように**プログラムの中に ` -i ` を含む形**も拾う。
+#   引用を解析すれば避けられるが、規則表は綴りを 1 行足すだけで増やせることに価値が
+#   あるので、構造解析は持ち込まない。誤検出はその行の `# bsd-ok: 理由` で黙らせる。
+#
+# ── 検査が成立していないことを合格にしない ──────────────────────────────────
+#
+#   git 管理外での実行、git コマンドの失敗、対象 0 件、awk 自体の失敗は、いずれも
+#   「移植性を欠く綴りが無い」ことを意味しない。すべて失敗として扱う。
+#   加えて、**起動時に検査機構そのものを自己診断する**（検出されるべき入力で必ず
+#   当たること、されないべき入力で当たらないこと）。パターンの書き損じで「何も当たら
+#   ない検査」になっていた場合、それは常に緑を返すため、赤にならない限り誰も気づけない。
+#
+# 使い方:
+#   bash scripts/check-shell-portability.sh
+#
+# 終了コード:
+#   0 = SHELL_PORTABILITY_PASS
+#   1 = SHELL_PORTABILITY_FAIL（綴りの検出、または検査が成立しなかった）
+set -euo pipefail
+
+# 角括弧の範囲指定と正規表現の解釈をバイト順に固定する。
+export LC_ALL=C
+
+# 検査はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+fail() {
+  printf '[portability] %s\n' "$1" >&2
+  echo "SHELL_PORTABILITY_FAIL"
+  exit 1
+}
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/shell-portability.XXXXXX")" \
+  || { echo "[portability] 一時ディレクトリを作成できません。" >&2; echo "SHELL_PORTABILITY_FAIL"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT
+
+RULES="$WORK/rules.tsv"
+SCAN="$WORK/scan.awk"
+TRACKED="$WORK/tracked.z"
+REPORT="$WORK/report.tsv"
+AWK_ERR="$WORK/awk.err"
+
+# ── 規則表 ───────────────────────────────────────────────────────────────────
+#
+# 1 行 = `正規表現<TAB>対処<TAB>分岐とみなす綴り<TAB>この行自身の逃げ道`。
+#
+# **3 列目は「近くに BSD 側の綴りがあれば、分岐が完成しているとみなす」印である。**
+# `stat -c %U "$1" 2>/dev/null || stat -f %Su "$1"` のように 1 行で両系統を書く形は、
+# 可搬性のための正しい書き方であって、報告すると**動くコードの書き換えを迫る。**
+#
+# **見るのは前後 1 行までを含む。** 分岐は同じ行に収まるとは限らない。`for mode in \`
+# の並びや `if command -v … ; then` の枝は**隣の行**に BSD 側が来るうえ、行継続の
+# 途中には行コメントを書けないので、逃げ道の印で黙らせることもできない（実測で踏んだ）。
+#
+# 代償は偽陰性で、素の呼び出しの隣にたまたま BSD 側の綴りがあると見逃す。この検査の
+# 弱点は最初から偽陰性の側にあるので、向きは揃っている。空なら判定しない。
+#
+# **3 列目の `# bsd-ok:` は飾りではない。** この表は検出したい綴りをリテラルで持つ
+# ため、この検査が自分自身を走査したときに当たる。除外リストではなく逃げ道の印で
+# 通すのが、この検査の方針である（冒頭「逃げ道」参照）。
+cat > "$RULES" <<'RULES_EOF'
+(^|[^[:alnum:]_.-])mktemp([[:space:]]+-[a-zA-Z-]+)*[[:space:]]*([)|;&`<>#]|$)	テンプレート引数の無い mktemp は BSD 系で usage エラーになる。mktemp -d "${TMPDIR:-/tmp}/name.XXXXXX" と書く		# bsd-ok: 規則表の綴りそのもの
+date [^|;&]*%N	BSD の date に %N（ナノ秒）は無い。秒で足りるなら %s、要るなら別の手段を選ぶ		# bsd-ok: 規則表の綴りそのもの
+sed [^|;&]*\\x[0-9A-Fa-f]	\xNN は GNU sed の拡張。BSD sed は文字 x として扱う。ESC="$(printf '\033')" のように作って渡す		# bsd-ok: 規則表の綴りそのもの
+(^|[^[:alnum:]_.-])sed[[:space:]]+([^|;&]*[[:space:]])?-i([[:space:]]|\.|$)	sed -i の引数の扱いが GNU と BSD で違う（BSD は直後の引数をバックアップ拡張子と解釈する）。一時ファイルへ書いて mv する		# bsd-ok: 規則表の綴りそのもの
+(^|[^[:alnum:]_.-])grep [^|;&]*(-P|--perl-regexp)	BSD の grep に -P は無い。-E で書き直す		# bsd-ok: 規則表の綴りそのもの
+readlink +-f	BSD の readlink に -f は無い。cd と pwd で解決する		# bsd-ok: 規則表の綴りそのもの
+base64 [^|;&]*-w	BSD の base64 に -w は無い。折り返しが要るなら fold へ渡す		# bsd-ok: 規則表の綴りそのもの
+find [^|;&]*-printf	BSD の find に -printf は無い。-exec か -print と組み合わせる		# bsd-ok: 規則表の綴りそのもの
+xargs [^|;&]*-r	BSD の xargs に -r は無い（空入力でも実行しない挙動が既定）		# bsd-ok: 規則表の綴りそのもの
+(head|tail) +-n +-[0-9]	負の行数は GNU 拡張。BSD には無い		# bsd-ok: 規則表の綴りそのもの
+(^|[^-[:alnum:]_/])tac( |$)	BSD 系には tac が無い。tail -r か awk で代用する		# bsd-ok: 規則表の綴りそのもの
+(^|[^-[:alnum:]_])sha256sum	BSD 系に sha256sum は無い。shasum -a 256 か openssl dgst -sha256 への分岐を書く	shasum|openssl[[:space:]]+dgst	# bsd-ok: 規則表の綴りそのもの
+(^|[^-[:alnum:]_])md5sum	BSD 系に md5sum は無い（macOS は md5）。md5 か openssl dgst -md5 への分岐を書く。**sha256 系へ置き換えないこと。ハッシュ方式が変わる**	(^|[^-[:alnum:]_])md5([^-[:alnum:]_]|$)|openssl[[:space:]]+dgst[^|;&]*-md5	# bsd-ok: 規則表の綴りそのもの
+stat[[:space:]]+-c	BSD の stat は -f である。両方へ分岐するか、別の手段を選ぶ	stat[[:space:]]+-f	# bsd-ok: 規則表の綴りそのもの
+IGNORECASE[[:space:]]*=	IGNORECASE は gawk の拡張。mawk と BSD awk は黙って無視するので、大小の違う入力に一致しなくなる。tolower($0) ~ /.../ と書く		# bsd-ok: 規則表の綴りそのもの
+RULES_EOF
+
+# 規則表に `grep -P` の規則がある以上、この表自身も `stat -c` や `sha256sum` と同じく
+# 「当たるが分岐がある」場合がありうる。そのときは該当行へ `# bsd-ok: 理由` を書く。
+
+cat > "$SCAN" <<'SCAN_EOF'
+# scan.awk — 1 ファイルを 2 度読み、移植性の欠陥を報告する。
+#
+# 1 度目（NR == FNR）: set -e / pipefail の宣言を拾う。2 度目: 本走査。
+# 同じファイルを 2 引数で渡して実現する（1 行ずつ読む awk で「ファイル全体の性質」を
+# 先に知るための定石。ファイルごとに grep を起こすより安い）。
+#
+# -v で受ける変数:
+#   rulesfile  … 規則表（正規表現 <TAB> 対処）
+#   mode       … sh / md
+#
+# 出力:
+#   欠陥     パス <TAB> KIND <TAB> 行番号 <TAB> 対処 <TAB> 該当行
+#   統計     #STATS <TAB> 逃げ道の印の件数 <TAB> 走査した行数
+#
+# パスは環境変数 PORTABILITY_PATH で受ける。**-v で渡すとエスケープが解釈され、
+# `\t` を含むパスが壊れる。** 呼び出し側で sed の置換文字列へ埋めるのも不可で、
+# `|` や `&` を含むパスで sed 自体がエラーになり、検査が判定を出さずに落ちる
+# （実測で踏んだ）。
+
+function is_comment(s) { return s ~ /^[[:space:]]*#/ }
+
+# 逃げ道の印。理由が空のものは認めない（印だけ付けて黙らせる形を残さない）。
+function has_bsd_ok(s) { return s ~ /#[[:space:]]*bsd-ok:[[:space:]]*[^[:space:]]/ }
+
+# フェンスの印（バッククォートかチルダ）。CommonMark はどちらも認め、**互いに閉じ
+# 合わない。** チルダを見ないと、`~~~bash` で囲んだコードが丸ごと走査から外れる
+# （配布先で起きる偽陰性）。
+function fence_char(s,   t, c) {
+  t = s
+  sub(/^[[:space:]]*/, "", t)
+  c = substr(t, 1, 1)
+  return (c == "`" || c == "~") ? c : ""
+}
+
+function fence_len(s, ch,   n) {
+  sub(/^[[:space:]]*/, "", s)
+  n = 0
+  while (substr(s, n + 1, 1) == ch) n++
+  return n
+}
+
+# 閉じのフェンスは、印の連なりだけで言語指定を持たない行に限る。
+function fence_only(s, ch,   t) {
+  t = s
+  sub(/^[[:space:]]*/, "", t)
+  while (substr(t, 1, 1) == ch) t = substr(t, 2)
+  return t ~ /^[[:space:]]*$/
+}
+
+# prefix に cmd のトークンがあるか。名前の一部（gawk の awk など）を拾わないよう
+# 左境界を必須にする。
+function has_cmd(prefix, cmd) {
+  return prefix ~ ("(^|[^[:alnum:]_.-])" cmd "([[:space:]]|$)")
+}
+
+# prefix のうち、最後のコマンド区切りより後ろだけを返す。
+#
+# prefix 全体を見ると、同一行で連結した別コマンドまで持ち主を引き継ぐ。
+# `sed 's/a/b/' | grep 'x\ty'` の grep の引数が sed のプログラムとして誤検知され、
+# `awk 'x' | sed 'y'` の sed は awk と誤判定される。区切りの後ろだけを見れば、
+# いま開いた引用がどのコマンドのものかが決まる。
+#
+# 区切りが引用の中にある場合は切り出しがずれるが、ずれた結果は持ち主が空になる
+# 方向なので、誤検知ではなく検出漏れになる。
+function last_segment(prefix,   i, c, cut) {
+  cut = 0
+  for (i = 1; i <= length(prefix); i++) {
+    c = substr(prefix, i, 1)
+    if (c == "|" || c == ";" || c == "&" || c == "(" || c == "`" || c == "{") cut = i
+  }
+  return substr(prefix, cut + 1)
+}
+
+# sed のプログラム text の中に、ブラケット式の中の `\t` があるか。
+#
+# 文字クラス（[:space:] など）はブラケット式の中に [ と ] を持つ。素朴に数えると
+# 閉じを取り違え、`[[:space:]\t]` の `\t` を外側と誤認して見落とす。`[:` を見つけたら
+# `:]` まで飛ばす。
+#
+# 制限: 置換側の `[` も開きとして数える。`s/x/[\t]/` のような形は誤検知になる。
+# s/// の構造まで解析していない。この形が出たときに構造解析を足す方が安い。
+# t の start 位置から、エスケープされていない区切り文字 d の位置を返す。無ければ 0。
+function sed_delim(t, start, d,   n, i) {
+  n = length(t)
+  i = start
+  while (i <= n) {
+    if (substr(t, i, 1) == "\\") { i += 2; continue }
+    if (substr(t, i, 1) == d) return i
+    i++
+  }
+  return 0
+}
+
+# sed のプログラムから、**ブラケット式として解釈される部分だけ**を取り出す。
+#
+#   - アドレスの正規表現（`/re/`）
+#   - `s` コマンドのパターン側（`s/pat/repl/flags` の pat）
+#
+# **置換側（repl）と `y` コマンドは含めない。そこにブラケット式は存在しない。**
+# `[` と `]` はリテラルの文字であり、「ブラケット式の中の `\t` / `\n`」という判定が
+# そもそも成り立たない。プログラム全体へ当てると `sed 's/x/[\n]/' f` を報告する
+# （実測。レビューで指摘された）。
+#
+# **これは移植性の実測ではなく、構造上の理由である。** 置換側の `\n` が両プラット
+# フォームで改行になることは別途記録済みだが、仮にそうでなくても、置換側に
+# ブラケット式は無い。
+#
+# **限界: 区切り文字がブラケット式の中に現れる形（`s/[/]/x/`）は取りこぼす。**
+# 区切りを数える側がブラケットを見ないため、パターンが途中で切れる。POSIX は
+# ブラケット式の中の区切り文字をリテラルとして扱うので、この形は正しい sed である。
+# 取りこぼす（偽陰性）側に倒しており、正しいコードを赤くはしない。
+function sed_regex_parts(t,   n, i, c, out, d, j, k) {
+  n = length(t)
+  i = 1
+  out = ""
+  while (i <= n) {
+    c = substr(t, i, 1)
+    if (c == "\\") { i += 2; continue }
+    if (c == "/") {
+      j = sed_delim(t, i + 1, "/")
+      if (j > 0) {
+        out = out substr(t, i + 1, j - i - 1) "\n"
+        i = j + 1
+        continue
+      }
+      i++
+      continue
+    }
+    if (c == "s" || c == "y") {
+      d = substr(t, i + 1, 1)
+      # **区切りにはバックスラッシュと改行以外のどの文字も使える**（POSIX）。英数字や
+      # 空白も有効で、`sed 's1^[^\n]*1x1'` は正しい sed である（実測: GNU sed で通る）。
+      # 当初これを弾いていたため、その形のパターン側を取りこぼしていた（レビューの指摘）。
+      #
+      # **改行はここへ現れないので判定しない。** `sed_text` は scan() の冒頭で作り直され、
+      # scan() は物理行ごとに呼ばれる。複数行にまたがる sed スクリプトでも、1 行ずつ
+      # 別々に走査されるため、区切り位置に改行が来ることがない。
+      #
+      # **バックスラッシュを弾く分岐に、当たる見本は無い。** `s` の直後が `\\` になる
+      # 正しい sed が存在しない（`s\\...` は unterminated で落ちる）ため、この条件を
+      # 外す変異は自己診断で赤にならない。POSIX の規定に合わせた保険として残す。
+      if (d != "" && d != "\\") {
+        j = sed_delim(t, i + 2, d)
+        if (j > 0) {
+          # y は文字の対応表で、正規表現ではない。取り出さない。
+          if (c == "s") out = out substr(t, i + 2, j - i - 2) "\n"
+          k = sed_delim(t, j + 1, d)
+          i = (k > 0) ? k + 1 : j + 1
+          continue
+        }
+      }
+      i++
+      continue
+    }
+    i++
+  }
+  return out
+}
+
+# ブラケット式の中に `\<ch>` があるか。ch は "t"（タブ）/ "n"（改行）のように、
+# 書き手が特殊文字を意図して書いたのに、ブラケットの中では失われるエスケープの 1 文字。
+function bracket_escape(t, ch,   n, i, c, inb, j) {
+  n = length(t)
+  i = 1
+  inb = 0
+  while (i <= n) {
+    c = substr(t, i, 1)
+    if (!inb) {
+      if (c == "\\") { i += 2; continue }
+      if (c == "[") {
+        inb = 1
+        i++
+        # `[^` の ^ と、その直後の ] はリテラルで、閉じではない。
+        if (substr(t, i, 1) == "^") i++
+        if (substr(t, i, 1) == "]") i++
+        continue
+      }
+      i++
+      continue
+    }
+    # ブラケットの中。ここでは \ はリテラルなので、次の 1 文字を飛ばさない。
+    if (c == "[" && substr(t, i + 1, 1) == ":") {
+      j = index(substr(t, i), ":]")
+      if (j > 0) { i = i + j + 1; continue }
+    }
+    if (c == "]") { inb = 0; i++; continue }
+    if (c == "\\" && substr(t, i + 1, 1) == ch) return 1
+    i++
+  }
+  return 0
+}
+
+# awk のプログラム本文から、**正規表現として解釈される部分だけ**を取り出す。
+#
+#   - `/…/` のリテラル
+#   - `~` / `!~` の右辺の文字列リテラル
+#
+# プログラム全体へ当てると、正規表現でない文字列まで報告する（実測: `awk 'BEGIN
+# { print "{2,3}" }'` が AWK_INTERVAL になった。Copilot の指摘）。**正常なコードへ
+# 逃げ道の印や書き換えを強いる検査は、検査が無いより悪い。**
+#
+# **取り出せない形は対象外にする。** 文字列を変数へ入れてから `~` で使う形
+# （`BEGIN { p = "a{2,5}" } $0 ~ p`）は、文字列が正規表現として使われるかを構文だけ
+# では決められない。**この検査の弱点は偽陰性の側に置く**（規則表の方針と同じ向き）。
+function awk_regex_parts(t,   n, i, c, out, j, k, q) {
+  n = length(t)
+  i = 1
+  out = ""
+  while (i <= n) {
+    c = substr(t, i, 1)
+    if (c == "\\") { i += 2; continue }
+    if (c == "/") {
+      j = i + 1
+      while (j <= n) {
+        if (substr(t, j, 1) == "\\") { j += 2; continue }
+        if (substr(t, j, 1) == "/") break
+        j++
+      }
+      if (j <= n) {
+        out = out substr(t, i + 1, j - i - 1) "\n"
+        i = j + 1
+        continue
+      }
+      i++
+      continue
+    }
+    if (c == "~") {
+      j = i + 1
+      while (j <= n && substr(t, j, 1) == " ") j++
+      q = substr(t, j, 1)
+      if (q == "\"") {
+        k = j + 1
+        while (k <= n) {
+          if (substr(t, k, 1) == "\\") { k += 2; continue }
+          if (substr(t, k, 1) == "\"") break
+          k++
+        }
+        if (k <= n) {
+          out = out substr(t, j + 1, k - j - 1) "\n"
+          i = k + 1
+          continue
+        }
+      }
+      i++
+      continue
+    }
+    i++
+  }
+  return out
+}
+
+# awk の引数の中に、下限 2 以上の間隔指定があるか。
+#
+# **この判定に間隔指定を使わない。** 検出したい綴りそのものであり、mawk の下で書けば
+# 静かに狭くなる。`+` と `*` だけで書き、下限は数値として取り出して比べる。
+#
+# awk の動作ブロック `{ print }` は数字とカンマを持たないため当たらない。
+function awk_interval(t,   rest, spec, lo) {
+  rest = t
+  while (match(rest, /\{[0-9]+,[0-9]*\}/)) {
+    spec = substr(rest, RSTART + 1, RLENGTH - 2)
+    lo = spec
+    sub(/,.*$/, "", lo)
+    if (lo + 0 >= 2) return 1
+    rest = substr(rest, RSTART + RLENGTH)
+  }
+  return 0
+}
+
+# 固定文字列検索の grep か。`-F` / `--fixed-strings` ではブラケットが正規表現として
+# 解釈されないため、`[^\\n]` を書いても意図どおりの可搬な呼び出しである（Copilot の指摘）。
+function grep_fixed(prefix) {
+  if (prefix ~ /--fixed-strings/) return 1
+  return prefix ~ /(^|[[:space:]])-[A-Za-z]*F[A-Za-z]*([[:space:]]|$)/
+}
+
+function grep_z_flag(s) {
+  if (s !~ /(^|[^[:alnum:]_.-])grep([[:space:]]|$)/) return 0
+  return s ~ /(^|[[:space:]])-[A-Za-z]*Z[A-Za-z]*([[:space:]]|$)/
+}
+
+# 先頭の制御構文キーワード・否定・変数代入を取り除く。
+# `elif ! printf …` の printf を生産側として見つけるために要る。
+function strip_keywords(seg) {
+  sub(/^[[:space:]]+/, "", seg)
+  while (1) {
+    if (seg ~ /^(if|elif|while|until|then|do|else)[[:space:]]+/) {
+      sub(/^[A-Za-z]+[[:space:]]+/, "", seg)
+      continue
+    }
+    if (seg ~ /^[!{][[:space:]]*/ && seg ~ /^[!{]/) {
+      sub(/^[!{][[:space:]]*/, "", seg)
+      continue
+    }
+    if (seg ~ /^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/) {
+      sub(/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/, "", seg)
+      continue
+    }
+    break
+  }
+  return seg
+}
+
+function first_word(seg) {
+  seg = strip_keywords(seg)
+  if (match(seg, /^[^[:space:]]+/)) return substr(seg, 1, RLENGTH)
+  return ""
+}
+
+# 生産側が単一行に収まると分かっている形か（冒頭 PIPEFAIL_SIGPIPE 参照）。
+function safe_producer(seg,   w) {
+  w = first_word(seg)
+  return (w == "printf" || w == "echo")
+}
+
+# ctx が条件文脈で始まるか。終了コードが読まれるかの判定に使う。
+function conditional_ctx(ctx) {
+  sub(/^[[:space:]]+/, "", ctx)
+  if (ctx ~ /^!/) return 1
+  return ctx ~ /^(if|elif|while|until)[[:space:]]/
+}
+
+# s の位置 p から始まるパイプの消費側が、早期に終了する形か。
+function early_consumer(s, p) {
+  return substr(s, p) ~ /^\|[[:space:]]*(grep[[:space:]]+-[A-Za-z]*q[A-Za-z]*|head([[:space:]]|$))/
+}
+
+# 1 行を走査して、次のグローバルを埋める。
+#   sed_text      … sed のプログラムとして渡された文字列
+#   npipes        … パイプの数
+#   pipe_pos[k]   … パイプの位置
+#   pipe_cond[k]  … そのパイプを囲むコマンド置換が、条件文脈の中にあるか
+#   pipe_seg[k]   … 生産側コマンドの開始位置
+#
+# 引用の中へは入らない（シェルの語彙で追う）。コマンド置換は二重引用の中でも開く
+# ので、状態を退避して中を素の文脈として読む。
+#
+# carry が真なら、前の物理行から状態を引き継ぐ。**行末の `\` で続く論理行を 1 行ずつ
+# 独立に読むと、前の行で開いたコマンド置換が見えない。** 続きの行のパイプが「置換の
+# 外にある」と誤判定され、終了コードを誰も読まない代入が赤くなる（実測で 4 件踏んだ）。
+#
+# 条件文脈かどうかを位置ではなくフラグで覚えるのも同じ理由である。位置は行をまたぐと
+# 意味を失う。
+# 引用の中の 1 片を、いま追っているコマンドの引数へ足す。持ち主ごとに別の変数へ
+# 溜めるのは、判定を持ち主で絞るためである（awk の間隔指定は awk の引数だけを見る）。
+function accum(piece) {
+  if (owner == "sed") sed_text = sed_text piece
+  else if (owner == "awk") awk_text = awk_text piece
+  else if (owner == "awkv") awk_v_text = awk_v_text piece
+  else if (owner == "grep") grep_text = grep_text piece
+}
+
+function scan(s, carry,   n, i, c) {
+  sed_text = ""
+  awk_text = ""
+  awk_v_text = ""
+  grep_text = ""
+  npipes = 0
+  if (!carry) {
+    state = "OUT"
+    owner = ""
+    depth = 0
+    outer_cond = 0
+  }
+  stmt_start = 1
+  n = length(s)
+  i = 1
+  while (i <= n) {
+    c = substr(s, i, 1)
+
+    if (state == "SQ") {
+      # 単一引用の中にエスケープもコマンド置換も無い。次の ' が必ず閉じ。
+      if (c == "'") { state = "OUT"; owner = ""; i++; continue }
+      accum(c)
+      i++
+      continue
+    }
+
+    if (state == "DQ") {
+      if (c == "\\") {
+        accum(substr(s, i, 2))
+        i += 2
+        continue
+      }
+      if (c == "$" && substr(s, i + 1, 1) == "(") {
+        depth++
+        save_state[depth] = "DQ"
+        save_owner[depth] = owner
+        save_stmt[depth] = stmt_start
+        if (depth == 1) outer_cond = conditional_ctx(substr(s, stmt_start))
+        state = "OUT"
+        owner = ""
+        stmt_start = i + 2
+        i += 2
+        continue
+      }
+      if (c == "\"") { state = "OUT"; owner = ""; i++; continue }
+      accum(c)
+      i++
+      continue
+    }
+
+    # state == "OUT"
+    # 引用の外の # 以降は行末までシェルのコメント。引用状態の追跡へ入れない
+    # （`# don't` のような行で領域が開いたことになり、以降がずれ続ける）。
+    if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
+    if (c == "\\") { i += 2; continue }
+    if (c == "$" && substr(s, i + 1, 1) == "(") {
+      depth++
+      save_state[depth] = "OUT"
+      save_owner[depth] = owner
+      save_stmt[depth] = stmt_start
+      if (depth == 1) outer_cond = conditional_ctx(substr(s, stmt_start))
+      stmt_start = i + 2
+      i += 2
+      continue
+    }
+    # 素の `(` も深さとして数える。プロセス置換 `<( … )` と部分シェルの閉じ括弧が
+    # 外側のコマンド置換を閉じたことにすると、`$(diff <(…) <(…) | head -10)` の
+    # パイプが「コマンド置換の外」と誤判定される（実測で踏んだ）。
+    if (c == "(") {
+      depth++
+      save_state[depth] = "OUT"
+      save_owner[depth] = owner
+      save_stmt[depth] = stmt_start
+      if (depth == 1) outer_cond = conditional_ctx(substr(s, stmt_start))
+      stmt_start = i + 1
+      i++
+      continue
+    }
+    if (c == ")") {
+      if (depth > 0) {
+        state = save_state[depth]
+        owner = save_owner[depth]
+        stmt_start = save_stmt[depth]
+        depth--
+      }
+      i++
+      continue
+    }
+    if (c == ";") { stmt_start = i + 1; i++; continue }
+    if (c == "&" && substr(s, i + 1, 1) == "&") { stmt_start = i + 2; i += 2; continue }
+    if (c == "|" && substr(s, i + 1, 1) == "|") { stmt_start = i + 2; i += 2; continue }
+    if (c == "|") {
+      npipes++
+      pipe_pos[npipes] = i
+      pipe_cond[npipes] = (depth == 0) ? 1 : outer_cond
+      pipe_seg[npipes] = stmt_start
+      stmt_start = i + 1
+      i++
+      continue
+    }
+    if (c == "'" || c == "\"") {
+      prefix = last_segment(substr(s, 1, i - 1))
+      # awk のプログラムは検査対象が無いが、持ち主として区別しておく。空にすると
+      # sed の直後に awk が続く行で領域を sed とみなしうる。
+      if (has_cmd(prefix, "awk")) {
+        # `-v name=` の右辺は、それ自体が正規表現として使われうる。プログラム本文とは
+        # 別に溜める（本文は /…/ と ~ の右辺だけを見るため、同じ扱いにできない）。
+        owner = (prefix ~ /-v[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$/) ? "awkv" : "awk"
+      }
+      else if (has_cmd(prefix, "sed")) owner = "sed"
+      else if (has_cmd(prefix, "grep")) owner = grep_fixed(prefix) ? "" : "grep"
+      else owner = ""
+      state = (c == "'") ? "SQ" : "DQ"
+    }
+    i++
+  }
+}
+
+# 行末が（エスケープされていない）バックスラッシュで終わるか。奇数個なら継続。
+function continues(s,   i, n) {
+  n = 0
+  i = length(s)
+  while (i >= 1 && substr(s, i, 1) == "\\") { n++; i-- }
+  return (n % 2) == 1
+}
+
+function report(kind, lineno, message, line) {
+  printf "%s\t%s\t%d\t%s\t%s\n", ENVIRON["PORTABILITY_PATH"], kind, lineno, message, line
+}
+
+BEGIN {
+  nrules = 0
+  while ((getline ln < rulesfile) > 0) {
+    if (ln ~ /^[[:space:]]*$/) continue
+    tab = index(ln, "\t")
+    if (tab == 0) continue
+    rule_re[++nrules] = substr(ln, 1, tab - 1)
+    rest = substr(ln, tab + 1)
+    tab2 = index(rest, "\t")
+    rule_msg[nrules] = (tab2 > 0) ? substr(rest, 1, tab2 - 1) : rest
+    rule_branch[nrules] = ""
+    if (tab2 > 0) {
+      rest = substr(rest, tab2 + 1)
+      tab3 = index(rest, "\t")
+      rule_branch[nrules] = (tab3 > 0) ? substr(rest, 1, tab3 - 1) : rest
+    }
+  }
+  close(rulesfile)
+  skipped = 0
+  scanned = 0
+  inside = 0
+  cont = 0
+}
+
+# ── 1 度目: ファイル全体の性質を拾う ────────────────────────────────────────
+NR == FNR {
+  src[FNR] = $0
+  sub(/\r$/, "", src[FNR])
+  nsrc = FNR
+  if ($0 ~ /^[[:space:]]*set[[:space:]]/ && $0 ~ /pipefail/) has_pipefail = 1
+  next
+}
+
+# 前後 1 行までのどこかに、分岐とみなす綴りがあるか。
+function branch_near(re, n) {
+  if (src[n] ~ re) return 1
+  if (n > 1 && src[n - 1] ~ re) return 1
+  if (n < nsrc && src[n + 1] ~ re) return 1
+  return 0
+}
+
+# ── 2 度目: 本走査 ──────────────────────────────────────────────────────────
+{
+  line = $0
+  sub(/\r$/, "", line)
+
+  if (mode == "md") {
+    # フェンスの開閉は単純な反転で判定しない。文書では「コードブロックの書き方」を
+    # 示すためにフェンスを入れ子にすることがあり（外側を 4 個以上で囲む）、反転だと
+    # 内側の開始で外へ出たことになる。以降の内外がずれ続け、コード内の綴りを見落とし、
+    # 地の文を誤検出する。開いたときの長さを覚え、それ以上の長さで、かつ言語指定を
+    # 持たない行だけを閉じとして扱う（CommonMark のフェンス規則）。
+    fc = fence_char(line)
+    fl = (fc == "") ? 0 : fence_len(line, fc)
+    if (fl >= 3) {
+      if (!inside) { inside = 1; open_len = fl; open_char = fc; next }
+      if (fc == open_char && fl >= open_len && fence_only(line, fc)) { inside = 0; next }
+      next
+    }
+    if (!inside) next
+  }
+
+  scanned++
+
+  # 継続の判定は、行を読み飛ばす前に済ませる。飛ばした行でも論理行は続いている。
+  carry = cont
+  cont = continues(line)
+
+  if (is_comment(line)) next
+  if (has_bsd_ok(line)) { skipped++; next }
+
+  # **存在確認は逃げ道そのものである。** `command -v foo` は「foo があるか」を見る
+  # 書き方で、可搬性のための分岐を書く唯一の手段である。呼び出しではない。
+  # 規則表に依らない一般の除外なので、ここで落とす。
+  if (line ~ /(^|[^[:alnum:]_.-])command[[:space:]]+-v([[:space:]]|$)/) next
+
+  scan(line, carry)
+
+  if (bracket_escape(sed_regex_parts(sed_text), "t"))
+    report("SED_BRACKET_TAB", FNR, "ブラケット式の中の \\t は BSD 系の sed でタブにならない。[[:space:]] を使うか、タブを変数へ作って渡す", line)
+
+  if (bracket_escape(sed_regex_parts(sed_text), "n") || bracket_escape(awk_regex_parts(awk_text), "n") || bracket_escape(awk_v_text, "n") || bracket_escape(grep_text, "n"))
+    report("BRACKET_BACKSLASH_N", FNR, "ブラケット式の中の \\n は改行にならない（バックスラッシュと n の集合になり、n を含む行を落とす）。行を絞ってから固定文字列で判定するか、意図する集合を明示する", line)
+
+  if (awk_interval(awk_regex_parts(awk_text)) || awk_interval(awk_v_text))
+    report("AWK_INTERVAL", FNR, "下限 2 以上の間隔指定は mawk が下限ちょうどにしか一致させない。回数を列挙するか、grep -E へ渡す。下限 1 の形は影響しない", line)
+
+  if (grep_z_flag(line))
+    report("GREP_DASH_Z_FLAG", FNR, "grep -Z は GNU 拡張で BSD 系には無い。1 ファイルずつ走査するか、別の手段で NUL 区切りを作る", line)  # bsd-ok: 報告文が検出対象の綴りそのものを持つ
+
+  for (r = 1; r <= nrules; r++) {
+    if (line !~ rule_re[r]) continue
+    # 近く（前後 1 行まで）に BSD 側の綴りがあれば、分岐が完成しているとみなす。
+    if (rule_branch[r] != "" && branch_near(rule_branch[r], FNR)) continue
+    report("RULE", FNR, rule_msg[r], line)
+  }
+
+  if (has_pipefail) {
+    for (k = 1; k <= npipes; k++) {
+      if (!early_consumer(line, pipe_pos[k])) continue
+      # 既存の `|| true` / `|| :` は意図的なガード。対象から外す。
+      if (line ~ /\|\|[[:space:]]*(true|:)([[:space:]]|;|$)/) continue
+      if (safe_producer(substr(line, pipe_seg[k], pipe_pos[k] - pipe_seg[k]))) continue
+      # コマンド置換の中は、囲む文が条件文脈のときだけ報告する（冒頭参照）。
+      if (!pipe_cond[k]) continue
+      report("PIPEFAIL_SIGPIPE", FNR, "pipefail 下で早期終了する消費側へパイプしている。生産側が SIGPIPE で死ぬと判定が反転する。-print -quit や sed -n 1p のようにパイプを読み切る形へ直す", line)
+    }
+  }
+}
+
+END { printf "#STATS\t%d\t%d\n", skipped, scanned }
+SCAN_EOF
+
+# ── 自己診断 ─────────────────────────────────────────────────────────────────
+#
+# 両方向を見る。当たること（偽陰性＝常に緑になる壊れ方）と、当たらないこと（偽陽性）。
+#
+# **見本はこの行の外へ書けない。** 検出したい綴りそのものなので、ファイルへ書くと
+# この検査が自分自身を拾う。見本は printf の引数として組み立て、**印はシェルの行
+# コメントとして置く**（印が見本の中へ入ると、自己診断が逃げ道で素通りしてしまう）。
+SELFTEST="$WORK/selftest"
+mkdir -p "$SELFTEST"
+
+# **`--` を渡さない。** BSD 系の awk が `--` を「オプションの終わり」として扱うか
+# どうかを、この環境では確かめられない。扱わなければ `--` という名前のファイルを
+# 開こうとして、配布先の macOS で自己診断が起動できずに落ちる。`--` の目的は
+# オプションと紛れる名前を守ることなので、**絶対パスや `./` 前置で同じ目的を満たす。**
+selftest_scan() {
+  PORTABILITY_PATH="$2" awk -v rulesfile="$RULES" -v mode="$1" -f "$SCAN" "$2" "$2" 2>&1 \
+    | sed '/^#STATS/d'
+}
+
+# 当たるべき見本（KIND<TAB>本文）。
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+{
+  printf 'SED_BRACKET_TAB\t%s\n' "sed -n 's/^[ \t]*x//p' f"                       # bsd-ok: 自己診断の見本
+  printf 'SED_BRACKET_TAB\t%s\n' "sed -n 's/^[[:space:]\t]*x//p' f"               # bsd-ok: 自己診断の見本
+  printf 'SED_BRACKET_TAB\t%s\n' "sed -n '/^[ \t]*x/p' f"                          # bsd-ok: 自己診断の見本
+  printf 'BRACKET_BACKSLASH_N\t%s\n' "sed 's|^[^\\n]*x||' f"                       # bsd-ok: 自己診断の見本
+  printf 'BRACKET_BACKSLASH_N\t%s\n' "sed 's1^[^\\n]*x1y1' f"                       # bsd-ok: 自己診断の見本
+  printf 'SED_BRACKET_TAB\t%s\n' "sed 'sX^[ \t]*xXyX' f"                          # bsd-ok: 自己診断の見本
+  printf 'GREP_DASH_Z_FLAG\t%s\n' 'xargs -0 grep -l -Z -a -f "$P" -- < "$T"'      # bsd-ok: 自己診断の見本
+  printf 'GREP_DASH_Z_FLAG\t%s\n' 'grep -lZa -f pattern.txt -- "$path"'           # bsd-ok: 自己診断の見本
+  printf 'RULE\t%s\n' 'd="$(mktemp -d)"'                                          # bsd-ok: 自己診断の見本
+  printf 'RULE\t%s\n' 'readlink -f "$path"'                                       # bsd-ok: 自己診断の見本
+  printf 'RULE\t%s\n' "sed -i 's/a/b/' f"                                        # bsd-ok: 自己診断の見本
+  printf 'RULE\t%s\n' 'sed -i.bak s/a/b/ f'                                      # bsd-ok: 自己診断の見本
+  printf 'RULE\t%s\n' 'stamp="$(date +%s%N)"'                                     # bsd-ok: 自己診断の見本
+  printf 'AWK_INTERVAL\t%s\n' "awk '/^x{2,3}\$/ { print }' f"                       # bsd-ok: 自己診断の見本
+  printf 'AWK_INTERVAL\t%s\n' "awk -v p=\"a{3,}\" '\$0 ~ p' f"                        # bsd-ok: 自己診断の見本
+  printf 'AWK_INTERVAL\t%s\n' "awk '\$0 ~ \"a{3,}\"' f"                                 # bsd-ok: 自己診断の見本
+  printf 'BRACKET_BACKSLASH_N\t%s\n' "grep -E 'A[^\\n]*B' f"                          # bsd-ok: 自己診断の見本
+  printf 'BRACKET_BACKSLASH_N\t%s\n' "awk '/[^\\n]/ { print }' f"                      # bsd-ok: 自己診断の見本
+  printf 'BRACKET_BACKSLASH_N\t%s\n' "sed -n 's/^[^\\n]*x//p' f"                       # bsd-ok: 自己診断の見本
+  printf 'PIPEFAIL_SIGPIPE\t%s\n' 'if ! find . -name "*.md" | grep -q .; then :; fi'  # bsd-ok: 自己診断の見本
+  printf 'PIPEFAIL_SIGPIPE\t%s\n' 'first="$(find . -type d | head -n 1)"; if ! v="$(find . | head -n 1)"; then :; fi'  # bsd-ok: 自己診断の見本
+} > "$SELFTEST/must-hit.tsv"
+
+# 当たってはいけない見本（本文のみ）。
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+{
+  printf '%s\n' "sed 's/\t/X/' f"                                                 # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 's/x/a\nb/' f"                                               # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 's/x/[\\n]/' f"                                              # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 's/x/[\\t]/' f"                                              # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 'y/ab/[\\n]/' f"                                             # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 'y/[\\n]/xyz/' f"                                            # bsd-ok: 自己診断の見本
+  printf '%s\n' "awk '/^x{1,3}\$/ { print }' f"                                   # bsd-ok: 自己診断の見本
+  printf '%s\n' "grep -oE 'x{2,3}' f"                                             # bsd-ok: 自己診断の見本
+  printf '%s\n' "grep -F '[^\\n]' f"                                               # bsd-ok: 自己診断の見本
+  printf '%s\n' "grep --fixed-strings '[^\\n]' f"                                   # bsd-ok: 自己診断の見本
+  printf '%s\n' "awk 'BEGIN { print \"{2,3}\" }' f"                                  # bsd-ok: 自己診断の見本
+  printf '%s\n' "awk 'BEGIN { print \"[^\\n]\" }' f"                                 # bsd-ok: 自己診断の見本
+  printf '%s\n' "awk '{ print \$1 }' f | grep -E 'x{2,3}'"                         # bsd-ok: 自己診断の見本
+  printf '%s\n' "if [[ \"\${t:0:1}\" == \$'\\n' ]]; then :; fi"                      # bsd-ok: 自己診断の見本
+  printf '%s\n' "printf '%s\\n' \"\$v\""                                            # bsd-ok: 自己診断の見本
+  printf '%s\n' 'grep -z -f pattern.txt -- "$path"'                               # bsd-ok: 自己診断の見本
+  printf '%s\n' 'sed -E "s/a/b/" f'                                              # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed -n 's/^- //p' f"                                            # bsd-ok: 自己診断の見本
+  printf '%s\n' "sed 's/x1/y/' f"                                                # bsd-ok: 自己診断の見本
+  printf '%s\n' 'grep --null -f pattern.txt -- "$path"'                           # bsd-ok: 自己診断の見本
+  printf '%s\n' 'some-other-tool -Z "$path"'                                      # bsd-ok: 自己診断の見本
+  printf '%s\n' 'd="$(mktemp -d "${TMPDIR:-/tmp}/x.XXXXXX")"'                      # bsd-ok: 自己診断の見本
+  printf '%s\n' 'run_with_mktemp;'                                                # bsd-ok: 自己診断の見本
+  printf '%s\n' 'if printf "%s" "$k" | grep -qi secret; then :; fi'               # bsd-ok: 自己診断の見本
+  printf '%s\n' 'elif ! printf "%s" "$out" | grep -q PASS; then :'                # bsd-ok: 自己診断の見本
+  printf '%s\n' 'if [ -n "$n" ] && ! printf "%s" "$o" | grep -qF "$n"; then :; fi' # bsd-ok: 自己診断の見本
+  printf '%s\n' 'v="$(grep -n x f | head -n 1 | cut -d: -f1)"'                     # bsd-ok: 自己診断の見本
+  printf '%s\n' 'if grep -q uv "$dc"; then fail "x: $(grep -n uv "$dc" | head -1)"; fi'  # bsd-ok: 自己診断の見本
+  printf '%s\n' 'first="$(find . -type d | head -n 1 || true)"'                    # bsd-ok: 自己診断の見本
+  printf '%s\n' 'if [ -z "$(find . -name "*.md" -print -quit)" ]; then :; fi'      # bsd-ok: 自己診断の見本
+  printf '%s\n' 'if git ls-remote origin | grep refs/tags/v1 >/dev/null; then :; fi'  # bsd-ok: 自己診断の見本
+} > "$SELFTEST/must-miss.txt"
+
+# 当たるべき見本を 1 件ずつ走査する。KIND が一致しなければ検査が成立していない。
+selftest_index=0
+while IFS="$(printf '\t')" read -r want body; do
+  [ -n "$want" ] || continue
+  selftest_index=$((selftest_index + 1))
+  sample="$SELFTEST/hit-$selftest_index.sh"
+  printf 'set -euo pipefail\n%s\n' "$body" > "$sample"
+  got="$(selftest_scan sh "$sample" | cut -f2 | sort -u | tr '\n' ' ')"
+  case " $got " in
+    *" $want "*) : ;;
+    *) fail "自己診断に失敗しました: 「$body」から $want を検出できません（得た種別: ${got:-なし}）。検査が成立していないため失敗させます。" ;;
+  esac
+done < "$SELFTEST/must-hit.tsv"
+
+while IFS= read -r body; do
+  [ -n "$body" ] || continue
+  selftest_index=$((selftest_index + 1))
+  sample="$SELFTEST/miss-$selftest_index.sh"
+  printf 'set -euo pipefail\n%s\n' "$body" > "$sample"
+  got="$(selftest_scan sh "$sample")"
+  if [ -n "$got" ]; then
+    fail "自己診断に失敗しました: 「$body」を誤検出します（$got）。検査が成立していないため失敗させます。"
+  fi
+done < "$SELFTEST/must-miss.txt"
+
+# 文書のフェンス判定も両方向で確かめる。地の文を拾うと、検査が文章の書き方に依存する。
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+{
+  printf '%s\n' '素の `mktemp` は macOS で落ちる。'                              # bsd-ok: 自己診断の見本
+  printf '%s\n' '```bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' 'd="$(mktemp -d)"'                                              # bsd-ok: 自己診断の見本
+  printf '%s\n' '```'
+  printf '%s\n' '`mktemp -d` を使う場合は注意する。'                              # bsd-ok: 自己診断の見本
+} > "$SELFTEST/doc.md"
+doc_hits="$(selftest_scan md "$SELFTEST/doc.md" | cut -f3 | tr '\n' ' ')"
+if [ "$doc_hits" != "4 " ]; then
+  fail "自己診断に失敗しました: 文書のフェンス内 4 行目だけを拾えません（得た行: ${doc_hits:-なし}）。検査が成立していないため失敗させます。"
+fi
+
+# 入れ子のフェンス。反転で判定すると内外がずれ続ける。
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+{
+  printf '%s\n' '````markdown'
+  printf '%s\n' '```bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' 'd="$(mktemp -d)"'                                              # bsd-ok: 自己診断の見本
+  printf '%s\n' '```'
+  printf '%s\n' '````'
+  printf '%s\n' '素の `mktemp` は macOS で落ちる。'                              # bsd-ok: 自己診断の見本
+} > "$SELFTEST/nested.md"
+nested_hits="$(selftest_scan md "$SELFTEST/nested.md" | cut -f3 | tr '\n' ' ')"
+if [ "$nested_hits" != "4 " ]; then
+  fail "自己診断に失敗しました: 入れ子フェンスの 4 行目だけを拾えません（得た行: ${nested_hits:-なし}）。検査が成立していないため失敗させます。"
+fi
+
+# 逃げ道の印。理由付きは黙り、理由の無い印は黙らない。
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+printf 'set -euo pipefail\nreadlink -f "$p" # bsd-ok: 代替を別経路で用意済み\n' > "$SELFTEST/marked.sh"
+if [ -n "$(selftest_scan sh "$SELFTEST/marked.sh")" ]; then
+  fail "自己診断に失敗しました: 理由付きの逃げ道の印が効いていません。検査が成立していないため失敗させます。"
+fi
+# shellcheck disable=SC2016  # 見本の $ はリテラル。展開させると見本にならない
+printf 'set -euo pipefail\nreadlink -f "$p" # bsd-ok:\n' > "$SELFTEST/unmarked.sh"
+if [ -z "$(selftest_scan sh "$SELFTEST/unmarked.sh")" ]; then
+  fail "自己診断に失敗しました: 理由の無い逃げ道の印を認めてしまっています。検査が成立していないため失敗させます。"
+fi
+
+# ── 検査対象の列挙 ───────────────────────────────────────────────────────────
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "git の作業ツリーではありません。追跡ファイルを列挙できないため失敗させます。"
+
+# 列挙は NUL 区切り。パス名に改行を含むファイルでも 1 レコードのまま崩れずに読める。
+# ただし**報告の書式は行区切り**なので、改行を含むパスは報告の見た目が崩れる
+# （検出そのものは効く）。走査の可否と報告の見やすさを分けて考える。
+git ls-files -z -- '*.sh' '*.md' > "$TRACKED" \
+  || fail "git ls-files に失敗しました。追跡ファイルを列挙できません。"
+
+tracked_count=0
+target_count=0
+skipped_paths=0
+bsd_ok_marks=0
+scanned_lines=0
+
+: > "$REPORT"
+: > "$AWK_ERR"
+
+while IFS= read -r -d '' path; do
+  tracked_count=$((tracked_count + 1))
+  # シンボリックリンクと実体の無いものは走査対象が無い。
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    skipped_paths=$((skipped_paths + 1))
+    continue
+  fi
+  target_count=$((target_count + 1))
+  case "$path" in
+    *.md) scan_mode="md" ;;
+    *)    scan_mode="sh" ;;
+  esac
+  # パスは環境変数で渡す（上記 scan.awk 冒頭の理由）。`./` を前置してオプションと
+  # 紛れる名前を避け、`--` は渡さない（同）。
+  out="$(PORTABILITY_PATH="$path" awk -v rulesfile="$RULES" -v mode="$scan_mode" -f "$SCAN" "./$path" "./$path" 2>>"$AWK_ERR")" \
+    || fail "awk が異常終了しました（$path）。検査が成立していないため失敗させます。"
+  # 統計行と欠陥行を分ける。パイプの読み手に早期終了するものを置かない
+  # （この検査自身が禁じている形である）。
+  stats="$(printf '%s\n' "$out" | sed -n 's/^#STATS\t//p')"
+  bsd_ok_marks=$((bsd_ok_marks + $(printf '%s' "$stats" | cut -f1)))
+  scanned_lines=$((scanned_lines + $(printf '%s' "$stats" | cut -f2)))
+  printf '%s\n' "$out" | sed '/^#STATS/d' >> "$REPORT"
+done < "$TRACKED"
+
+if [ -s "$AWK_ERR" ]; then
+  printf '[portability] 走査中にエラーが出ました。検査が成立していないため失敗させます:\n' >&2
+  sed 's/^/[portability]     /' "$AWK_ERR" >&2
+  echo "SHELL_PORTABILITY_FAIL"
+  exit 1
+fi
+
+[ "$tracked_count" -gt 0 ] \
+  || fail "追跡している *.sh / *.md が 1 件もありません。検査していないことと、綴りが無いことは別なので失敗させます。"
+[ "$target_count" -gt 0 ] \
+  || fail "走査できる追跡ファイルが 1 件もありません（全件が実体なし、またはリンク）。検査が成立していないため失敗させます。"
+
+# ── 結果 ─────────────────────────────────────────────────────────────────────
+
+violations="$(sed -n '/./p' "$REPORT" | sed -n '$=')"
+[ -n "$violations" ] || violations=0
+
+printf '[portability] 照合したパス: 追跡 %s 件 / 走査 %s 件（実体なし・リンク %s 件）/ %s 行（逃げ道の印 %s 件）\n' \
+  "$tracked_count" "$target_count" "$skipped_paths" "$scanned_lines" "$bsd_ok_marks"
+
+if [ "$violations" -gt 0 ]; then
+  while IFS="$(printf '\t')" read -r path kind lineno message line; do
+    [ -n "$path" ] || continue
+    printf '[portability] %s:%s: [%s] %s\n' "$path" "$lineno" "$kind" "$message" >&2
+    printf '[portability]     %s\n' "$line" >&2
+  done < "$REPORT"
+  printf '[portability] BSD 系（macOS）で落ちる綴りを %s 件検出しました。\n' "$violations" >&2
+  printf '[portability] 代替を用意した上での意図的な使用なら、その行へ「# bsd-ok: 理由」を付けること。\n' >&2
+  echo "SHELL_PORTABILITY_FAIL"
+  exit 1
+fi
+
+echo "SHELL_PORTABILITY_PASS"
+exit 0
+TMPL
+      ;;
+    'scripts/check-table-breaks.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-table-breaks.sh — Markdown の表の途中へ段落が差し込まれ、続く行が表として
+# 描画されなくなっていないかを機械で見る
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# なぜ機構で押さえるか
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# ある利用プロジェクトでは、複数のセッションが同じ文書を同時に触り、表の途中へ
+# 段落を差し込む形で実際に踏んだ。表の途中へ段落を差し込むと、**続く行は表では
+# なくなる**——GFM の表は「見出し行＋区切り行」で始まる 1 つのブロックなので、
+# 間に段落が入るとそこで表が終わり、残りの行は `| a | b |` という**ただの文字列の
+# 段落**として描画される。
+#
+# **git も、既存のどの検査も捕まえない。** 差分としては正しい行の追加であり、
+# 綴りも壊れていない。壊れているのは**ブロックの境界**だけで、これは描画するまで
+# 見えない。崩れた先の情報は、表の一部ではない浮いた文字列になり、規範として
+# 読めなくなる。
+#
+# 目で見て気づけるなら人のレビューでよい。**描画しないと見えないものは、読んでも
+# 気づけない。** `.ai-playbook/shared-ai-rules.md` 12 章「機構化の判断基準」に
+# 照らして機構へ移す。ここで見るのは「気をつけたか」ではなく「崩れているか」なので、
+# 儀式では通過できない。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 何をもって「崩れている」とするか
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# **`|` で始まる行が連続する塊の先頭を、表の先頭とみなす。** 表の先頭であるなら、
+# **次の行は区切り行（`|---|---|` 等）でなければならない。** そうでないものを数え、
+# 0 件であることを見る。塊の先頭は「直前が `|` 行ではない行」で決まり、直前が
+# 空行（BLANK）でも本文の段落（TEXT）でも同じに扱う——GFM は表が段落へ空行なしで
+# 割り込むことを許すため、直前が段落であることは「表ではない」根拠にならない。
+#
+#   | a | b |     ← 塊の先頭。次が区切り行なので、これは正しい表の始まり
+#   |---|---|
+#   | 1 | 2 |
+#
+#   （段落が差し込まれた）
+#
+#   | 3 | 4 |     ← 塊の先頭だが、次が区切り行ではない → **崩れている**
+#   | 5 | 6 |
+#
+# 表の残骸が 1 行だけ（次が空行や本文）の場合も同じ判定で当たる。区切り行だけが
+# 取り残された形（見出し行と区切り行の間に段落が入った場合）も、`|` で始まる行と
+# して同じ経路で当たる。段落の直後に空行を挟まず `|` 行が続く形（段落が表へ
+# 割り込んだ結果、続く行が本文の直後に取り残される形そのもの）も同じ経路で当たる。
+#
+# ── blockquote の中も対象にする ──────────────────────────────────────────────
+#
+# **`> |` で始まる表も同じように崩れる。** 引用の中でも GFM の表はブロックとして
+# 解釈されるため、性質はまったく同じである。行頭の `>` を（入れ子も含めて）取り
+# 除いてから判定する。引用の中の空行は `>` だけの行なので、取り除いた結果が空に
+# なることで自然に空行として扱われる。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 何を見ないか（意図的に範囲外。この検査が見ていると誤解しないために明記する）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# - **コードブロック（``` / ~~~ で囲まれた範囲）の中は見ない。** そこに書かれた `|` は
+#   表ではなく**出力例の文字**であり、区切り行を足して直すことができない（直したら
+#   実際の出力ではなくなる）。**直せない指摘を出す検査は、そのうち丸ごと外される。**
+#
+#   出力例の貼り直しは日常的に起きるため、除外を入れておかないと次の形で偽陽性が
+#   起きる。
+#
+#     ```
+#     $ report
+#                       ← 出力に含まれる空行
+#     | 品質 | 時間 |    ← 除外が無いと、ここが「表の先頭」に見える
+#     | q9 | 5,359 ms |
+#     ```
+# - **区切り行の桁数は数えない。** GFM は見出し行と区切り行の桁数一致を要求するが、
+#   ここでは「区切り行の形をしているか」までしか見ない。桁数のずれは**描画は
+#   されるが列がずれる**という別の崩れ方で、この検査の関心事（続く行が表でなくなる）
+#   とは別である。要るなら別の検査として足すこと。
+# - **先頭に `|` を持たない表は見ない**（`a | b` / `--|--` の形）。GFM では書けるが、
+#   判定を広げると本文中の `|` を含む段落を拾い始める。**偽陽性を出さないほうを採る。**
+#   ただし区切り行だけは例外で、先頭 `|` の有無に関わらず区切り行として認識する
+#   （`| a | b |` の次の行が `--- | ---` の形でも GFM は妥当な表として描画するため、
+#   ここを見ないと先頭 `|` の無い区切り行を使うだけの正しい表を誤検知する）。
+#
+#   **この除外はヘッダー行にも及ぶ。** ヘッダー行自体が先頭 `|` を持たない形
+#   （`a | b` / `--- | ---` / `c | d` のように全行が先頭 `|` を省略した表）は、
+#   ヘッダー行が `cls[]` 上そもそも ROW に分類されないため、この検査の走査対象に
+#   一切乗らない。その表が段落で分断されても検知しない。GFM としては有効な表で
+#   あり、これは**意図的な対象外**であって見落としではない（判定を広げると上記の
+#   偽陽性が増えるため、偽陽性を出さないほうを選んでいる）。**自動修正や検知の
+#   拡張は行わない。** テスト（`packages/devcontainer-bootstrap/tests/test-check-table-breaks.sh`）
+#   にこの対象外の挙動を固定するフィクスチャを置き、黙って挙動が変わらないようにする。
+# - **Markdown 全般の lint はしない。** 汎用 linter の導入は影響範囲が変更行数に
+#   比例せず、別の判断が要る。**この 1 形だけを見る。**
+#
+# 承知のうえで受け入れた寛容さ:
+#   - 字下げ 4 文字以上の `|` 行も表の行として扱う。Markdown では字下げコードブロック
+#     になりうる形だが、箇条書きの中に字下げされた表を書く文書は実在しうる一方、
+#     字下げコードブロックはコード例をすべてフェンスで書く運用であれば存在しない。
+#     **実在するほうを拾う。**
+#   - `---` のように桁が 1 つしかない行も区切り行とみなす。水平線と区別できないが、
+#     **区切り行と読めるものを広く通す向き**なので、偽陽性は増えない。
+#   - CRLF 改行の文書も扱う。行末の `\r` は読み込み直後に取り除く（`scripts/check-control-chars.sh`
+#     が CR を CRLF という改行の流儀の一部として許容しているのに対し、こちらが `\r` を
+#     未処理のまま残すと、空行・区切り行・閉じフェンスの判定がことごとく揃わなくなり、
+#     CRLF の文書だけ誤検知する）。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 決めた 3 点とその理由
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# ── 1. 対象範囲: **追跡している Markdown 全部**
+#
+# 崩れ方は文書に固有ではない。表を持つ文書なら等しく起きる。踏んだ 1 本だけを
+# 見る検査は、次に踏む文書を見ていない。
+#
+# **一覧をここへ書き並べない。** 書き並べると、文書を 1 本足した日から検査だけが
+# 古い一覧を見続ける（`.ai-playbook/shared-ai-rules.md` 12 章「一覧の複製は機械照合
+# で担保する」）。`git ls-files` から受け取れば、足した文書はその日から対象になる。
+#
+# README や規範文書も含める。**追跡されている＝共有される＝誰かが読む**からで、
+# 読まれる文書が崩れることに違いは無い。範囲を絞って得られるものが無い。
+#
+# ── 2. 単一入口へ入れる: **`scripts/acceptance.sh` の衛生検査の並びへ置く**
+#
+# **入れる。** bash と awk と git しか要らず、ネットワークも認証も外部の道具も
+# 要らない検査は、ローカル層にそのまま収まる。
+#
+# **そして、外すと意味を失う種類の検査である。** 複数のセッションが同じ文書を
+# 同時に触った日で、そのとき誰も手で叩かなかったから通り抜けた。思い出して
+# 叩く運用は破綻する。
+#
+# `scripts/verify.sh` から直接呼ばず `scripts/acceptance.sh` へ置くのは、verify.sh が
+# 直接呼ぶのを機密混入という別格の関心事に限っているためである
+# （`scripts/check-no-secrets.sh` と同じ扱い）。並びは制御文字検査の直後、
+# 言語のマニフェストに依存しない衛生検査の層に置く。
+#
+# ── 3. 既存文書の扱い: **除外規定は設けない**
+#
+# 除外を設けない。**将来この検査が当たったときは直すこと。** ここへ除外を足す前に
+# 考えること: この検査が当たるのは「読み手に表として見えていない箇所」であり、
+# **除外するとは、崩れたままにすると決めることである。** 表として見せる意図が無い
+# のなら、それは表ではないので `|` で書かない形（コードブロックか箇条書き）へ
+# 直すのが素直である。除外を足すなら、**その文書のその箇所をなぜ崩れたままに
+# するのかをここへ書く。**
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 検査が成立していないことを合格にしない
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# git 管理外での実行と、git コマンド自体の失敗（`git ls-files` が異常終了するなど）は、
+# 「表が崩れていない」ことを意味しない。空の出力を「該当なし」と読むと、検査して
+# いないのに合格になる。この 2 つは失敗として扱う。
+#
+# 一方、**追跡している Markdown が 1 件も無い場合と、Markdown はあるが表（正しい
+# ものも崩れたものも）が 1 つも無い場合は、失敗させない。** どちらも「表が無い」
+# 状態であり、「表が崩れていない」ことと両立する正当な状態である。配布直後の
+# プロジェクト（`--with-playbook` を選ばない既定構成は Markdown を 1 本も生成
+# しない）や、箇条書き中心で表を使わない文書はこの状態に日常的になる。プロジェクトの
+# 実体に表の実在を要求すると、表を使わない配布先で常に失敗する検査になってしまう。
+#
+# 判定の要であるフェンス追跡や引用符の除去が壊れて全部コード扱いになるような
+# リグレッションは、プロジェクトの実体に表が実在するかどうかとは別に、**起動時の
+# 自己診断**（崩れた表を必ず検出すること、正しい表・引用内の表・コードブロック内の
+# `|` を誤検出しないこと、正しい表を合成入力から 2 つ数えられることを、毎回合成した
+# 入力で確かめる）が独立に検出する。
+#
+# 速度:
+#   ファイルごとに awk を 1 回起こすので、費用はファイル数にほぼ比例する。目に見えて
+#   遅くなったら、awk を 1 回にまとめる（FILENAME ごとの状態を持たせる）のが素直である。
+#
+# 使い方:
+#   bash scripts/check-table-breaks.sh
+#
+# 終了コード:
+#   0 = TABLE_BREAKS_PASS
+#   1 = TABLE_BREAKS_FAIL（表が崩れている、または検査が成立しなかった）
+set -euo pipefail
+
+# 正規表現の照合順をバイト順に固定する
+# （scripts/check-control-chars.sh / check-no-secrets.sh と同じ理由）。
+export LC_ALL=C
+
+# 検査はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+# 任意の作業ディレクトリから起動しても結果が不変になるよう、起動時 CWD に依存しない。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+fail() {
+  printf '[table-breaks] %s\n' "$1" >&2
+  echo "TABLE_BREAKS_FAIL"
+  exit 1
+}
+
+# ── 判定本体 ─────────────────────────────────────────────────────────────────
+#
+# 1 ファイルを丸ごと読み、2 段で見る。
+#   1 段目: 全行を分類する（フェンスの内外・空行・区切り行・表の行）。フェンスの
+#           開閉は順に見ないと決まらないので、必ず先頭から通す。
+#   2 段目: 分類の並びだけを見て判定する。次の行の分類が要るため、1 段目とは分ける。
+#
+# 出力は種別付きの行（HIT / NEXT / UNCLOSED / STAT）で、集計は呼び出し側が行う。
+#
+# awk は mawk（Debian 既定）を前提に、POSIX の範囲だけで書く
+# （gensub 等の gawk 拡張は使わない。scripts/check-shell-portability.sh が固定している
+# 移植性方針と同じ考え方）。
+#
+# awk プログラム全体を単一引用符で囲む。中の $0 / $1 等はシェルではなく awk が
+# 解釈する変数で、シェル側で展開させてはならない。
+# shellcheck disable=SC2016
+AWK_PROG='
+# 行頭の空白と blockquote の `>`（入れ子を含む）を取り除く。
+function strip_quote(line,   s) {
+  s = line
+  sub(/^[ \t]+/, "", s)
+  while (s ~ /^>/) {
+    sub(/^>/, "", s)
+    sub(/^[ \t]+/, "", s)
+  }
+  return s
+}
+
+# 区切り行（`|---|---|` / `| :--- | ---: |` / `---`）の形をしているか。
+# `-` を 1 つ以上含むことを併せて見る（空行が範囲指定の隙間で当たらないように）。
+function is_delim(s) {
+  if (s !~ /-/) return 0
+  return s ~ /^\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
+}
+
+# フェンス（``` / ~~~）の記号の連なりの長さ。フェンスでなければ 0。
+function fence_len(s,   c, n) {
+  c = substr(s, 1, 1)
+  if (c != "`" && c != "~") return 0
+  n = 0
+  while (substr(s, n + 1, 1) == c) n++
+  if (n < 3) return 0
+  return n
+}
+
+BEGIN { n = 0 }
+{
+  # CRLF 改行の文書では、RS="\n" の既定分割でも各行末に \r が残る。scripts/check-control-chars.sh
+  # は CR を CRLF という改行の流儀の一部として許容しており、それと矛盾しないよう、ここでも
+  # \r を行の一部として扱わない（空行判定・区切り行判定・閉じフェンス判定のいずれも
+  # 末尾の [ \t]*$ で \r を吸収できず、CRLF の文書だけ誤検知する経路になるため）。
+  sub(/\r$/, "", $0)
+  raw[++n] = $0
+}
+
+END {
+  # ── 1 段目: 分類 ──────────────────────────────────────────────────────────
+  #
+  # cls[i]: "CODE"（フェンスの行、およびその中身）/ "BLANK" / "ROW"（`|` 始まり）/ "TEXT"
+  # delim[i]: その行が区切り行の形をしているか（フェンスの外だけで意味を持つ）
+  infence = 0
+  fch = ""
+  flen = 0
+  for (i = 1; i <= n; i++) {
+    s = strip_quote(raw[i])
+    delim[i] = 0
+    fl = fence_len(s)
+    if (fl > 0) {
+      c = substr(s, 1, 1)
+      if (!infence) {
+        infence = 1; fch = c; flen = fl
+      } else if (c == fch && fl >= flen) {
+        # 閉じるフェンスは記号の後ろに空白しか置けない（開くほうは情報文字列を取れる）。
+        rest = substr(s, fl + 1)
+        if (rest ~ /^[ \t]*$/) { infence = 0; fch = ""; flen = 0 }
+      }
+      cls[i] = "CODE"
+      continue
+    }
+    if (infence) { cls[i] = "CODE"; continue }
+    if (s == "") { cls[i] = "BLANK"; continue }
+    delim[i] = is_delim(s)
+    if (substr(s, 1, 1) == "|") { cls[i] = "ROW"; continue }
+    cls[i] = "TEXT"
+  }
+
+  # フェンスが閉じないまま終わった場合、そこから後ろを全部コードとして黙らせている。
+  # 検査が届かなかった範囲があることを呼び出し側へ伝える（緑にしない材料になる）。
+  #
+  # 出力に FILENAME を含めない。呼び出し側（シェル）はファイルを 1 本ずつ処理して
+  # おり、対象パスは既に呼び出し側が知っている。ここへ含めると、パス名に改行を
+  # 含むファイル（レアだが実在しうる。scripts/check-no-secrets.sh が NUL 区切りの
+  # 列挙へ移った経緯そのもの）で 1 レコードが複数行へ割れ、呼び出し側のタブ区切り
+  # 読み取りがフィールド境界を誤り、以降の HIT/STAT が数え損なわれる（検査が
+  # 壊れているのに TABLE_BREAKS_PASS になりうる、実害の大きい形）。
+  if (infence) print "UNCLOSED"
+
+  # ── 2 段目: 判定 ──────────────────────────────────────────────────────────
+  #
+  # `|` 始まりの行が連続する塊（ROW の連なり）の**先頭**を表の先頭候補とみなし、
+  # 次の行が区切り行かを見る。塊の 2 行目以降（直前も ROW）は継続行として
+  # スキップする——判定は塊ごとに 1 回でよく、継続行まで毎回見直す必要はない。
+  #
+  # 直前が BLANK かどうかは条件にしない。**段落の直後に空行を挟まず `|` 行が
+  # 続く形**（表の途中へ段落を差し込んだ結果、続く行が本文の直後に取り残される
+  # 形そのもの）も表の先頭候補として扱わないと、まさにこの検査が捕まえたい壊れ方の
+  # 一部を見落とす。GFM は表が段落へ割り込むこと（空行なしで表が始まること）を
+  # 許すため、直前が TEXT であることは「表ではない」根拠にならない。
+  #
+  # 継続行かどうかは「直前が ROW かどうか」の単純な 1 行前参照では決まらない。
+  # 区切り行は先頭 `|` を省略できる（`| a | b |` の次の行が `--- | ---` でも GFM は
+  # 妥当な表として描画する）ため、先頭 `|` を持たない区切り行は cls[] 上は TEXT の
+  # ままだが、delim[] では区切り行として認識している。
+  #
+  # state は 3 値を持つ（2 値の in_table では表せない区別がある）。
+  #   0 = IDLE          表の外。
+  #   1 = HEADER        直前の行を表のヘッダー行として確定させた直後で、次の 1 行が
+  #                      その区切り行（先頭 `|` の有無を問わない）であることを期待する。
+  #   2 = BODY          区切り行まで確定し、データ行を読んでいる区間。
+  #
+  # **2 と 1 を分けるのが要点。** state を 1 か所（in_table のような 2 値）にまとめると、
+  # データ行を読んでいる区間（本来の BODY）でも「直前が区切り行の形」を無条件に
+  # 継続として受け入れてしまい、**表と無関係な水平線（`---` だけの行）がデータ行の
+  # 直後に来ただけで、その先の取り残された残骸を見落とす**——水平線も is_delim() を
+  # 満たすため、「区切り行の形をした行」というだけでは、それが今読んでいる表の
+  # 区切り行なのか、表が終わったあとの無関係な水平線なのかを区別できない。
+  # delim[] の形をした TEXT 行を「区切り行として消費してよい」のは、**ヘッダー行を
+  # 確定させた直後（state == HEADER）に限る。** BODY（state == 2）でその形に出会っても
+  # 区切り行としては消費せず、表の終わりとして扱う（IDLE へ戻す）。
+  IDLE = 0; HEADER = 1; BODY = 2
+  tables = 0
+  hits = 0
+  state = IDLE
+  for (i = 1; i <= n; i++) {
+    if (cls[i] == "BLANK") { state = IDLE; continue }
+    if (cls[i] == "CODE") { state = IDLE; continue }
+    if (cls[i] == "TEXT") {
+      # ヘッダー行確定の直後だけ、区切り行の形をした行を消費して BODY へ進む。
+      if (state == HEADER && delim[i]) { state = BODY; continue }
+      state = IDLE
+      continue
+    }
+    # cls[i] == "ROW"
+    if (state == BODY) continue
+    if (state == HEADER) {
+      # 先頭 `|` を持つ区切り行（`|---|---|` 等）はここで消費する。HEADER へ遷移した
+      # 時点で delim[i] は確認済み（tables++ の条件そのもの）なので、ここでは
+      # 判定し直さず BODY へ進むだけでよい。
+      state = BODY
+      continue
+    }
+    # state == IDLE: 表の先頭候補。
+    if (i < n && delim[i + 1]) { tables++; state = HEADER; continue }
+    hits++
+    printf "HIT\t%d\t%s\n", i, raw[i]
+    if (i < n) printf "NEXT\t%d\t%s\n", i + 1, raw[i + 1]
+    else printf "NEXT\t%d\t（ファイル末尾）\n", i
+    # 取り残された残骸のブロックにつき 1 回だけ報告する。BODY へ進めておき、
+    # 同じ塊の続く行（cls が ROW のまま連なる行）を継続として黙らせる——1 つの
+    # 壊れ方を行ごとに重複して報告しないため（BLANK / CODE に出会えば次の塊として
+    # 改めて判定される）。
+    state = BODY
+  }
+  printf "STAT\t%d\t%d\t%d\n", n, tables, hits
+}
+'
+
+# 1 ファイルを走査し、種別付きの行を標準出力へ返す。
+scan_one() {
+  awk "$AWK_PROG" "$1"
+}
+
+# ── 自己診断 ─────────────────────────────────────────────────────────────────
+#
+# 両方向を見る。当たること（偽陰性＝常に緑になる壊れ方）と、当たらないこと（偽陽性）。
+# awk が早期終了しても影響しないよう、標準入力ではなくプロセス置換のファイルで渡す。
+
+# (1) 表の途中へ段落が差し込まれた形は、必ず当たること。
+selftest_broken="$(scan_one <(printf '| a | b |\n|---|---|\n| 1 | 2 |\n\n差し込まれた段落。\n\n| 3 | 4 |\n| 5 | 6 |\n') || true)"
+case "$selftest_broken" in
+  *HIT*) ;;
+  *) fail "自己診断に失敗しました: 段落が差し込まれた表を検出できません。検査が成立していないため失敗させます。" ;;
+esac
+
+# (1b) 段落の直後に空行を挟まず取り残された行（空行を挟む形より見落としやすい）も、
+# 必ず当たること。
+selftest_broken_noblank="$(scan_one <(printf '本文。\n差し込まれた続きの行です。\n| reviewer | 取り残された行 |\n') || true)"
+case "$selftest_broken_noblank" in
+  *HIT*) ;;
+  *) fail "自己診断に失敗しました: 空行を挟まず取り残された行を検出できません。検査が成立していないため失敗させます。" ;;
+esac
+
+# (1c) 先頭 `|` の無い区切り行を使う正しい表は当たらないこと。区切り行の直後の
+# データ行を「新しい表の先頭」と誤認していないかの確認。
+selftest_nopipe_delim="$(scan_one <(printf '| a | b |\n--- | ---\n| 1 | 2 |\n| 3 | 4 |\n') || true)"
+case "$selftest_nopipe_delim" in
+  *HIT*) fail "自己診断に失敗しました: 先頭 | の無い区切り行を使う正しい表を誤検出します。検査が成立していないため失敗させます。" ;;
+esac
+
+# (1d) 表と無関係な水平線（`---` だけの行）の直後に取り残された表の残骸は、
+# 必ず当たること。水平線も is_delim() を満たすため、直前行が delim[] の形を
+# しているというだけで継続扱いにすると、この形を見落とす。
+selftest_broken_after_hr="$(scan_one <(printf 'text\n---\n| c | d |\n| e | f |\n') || true)"
+case "$selftest_broken_after_hr" in
+  *HIT*) ;;
+  *) fail "自己診断に失敗しました: 無関係な水平線の直後に取り残された残骸を検出できません。検査が成立していないため失敗させます。" ;;
+esac
+
+# (1e) 正しい表の**データ行の直後**に無関係な水平線が来て、その先に残骸が続く形も、
+# 必ず当たること（(1d) はヘッダー行の前、こちらはデータ行の後という別の位置）。
+# state を HEADER / BODY で分けずに 1 つの真偽値へ畳むと、BODY（データ行を読んで
+# いる区間）でも「直前が区切り行の形」を無条件の継続とみなしてしまい、この形を
+# 見落とす。
+selftest_broken_after_data_hr="$(scan_one <(printf '| a | b |\n|---|---|\n| 1 | 2 |\n---\n| 残骸 |\n') || true)"
+case "$selftest_broken_after_data_hr" in
+  *HIT*) ;;
+  *) fail "自己診断に失敗しました: データ行の直後の無関係な水平線に続く残骸を検出できません。検査が成立していないため失敗させます。" ;;
+esac
+
+# (2) 正しい表・引用内の表・コードブロック内の `|`・表の直後に空行を挟んだ段落は、
+#     いずれも当たらないこと。**この 4 つが偽陽性の主な候補である。**
+# バッククォート（コードフェンス）を含む単一引用符文字列。展開させない意図で
+# 単一引用符にしている。
+# shellcheck disable=SC2016
+selftest_clean="$(scan_one <(printf '| a | b |\n|---|---|\n| 1 | 2 |\n\n表の直後の段落。\n\n> | c | d |\n> |---|---|\n> | 3 | 4 |\n\n```\n| これは出力例 |\n| 区切り行を持たない |\n```\n\n本文。\n') || true)"
+case "$selftest_clean" in
+  *HIT*) fail "自己診断に失敗しました: 正しい表（引用内・コードブロック内を含む）を誤検出します。検査が成立していないため失敗させます。" ;;
+esac
+# STAT の tables=2（本文の表と引用内の表）/ hits=0 まで見る。「当たらない」だけだと、
+# 全部をコード扱いする壊れ方（常に緑）を見逃す。
+case "$selftest_clean" in
+  *"	2	0") ;;
+  *) fail "自己診断に失敗しました: 正しい表を 2 つ数えられません。フェンスや引用の扱いが壊れています。" ;;
+esac
+
+# ── 検査対象の列挙 ───────────────────────────────────────────────────────────
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "git の作業ツリーではありません。対象文書を列挙できないため失敗させます。"
+
+# 列挙は NUL 区切り。パス名に改行を含むファイルでも 1 レコードのまま崩れずに読める
+# （scripts/check-control-chars.sh と同じ扱い）。
+#
+# 一時ファイルへ書き出してから読む。`done < <(git ls-files ...)` のようにプロセス
+# 置換へ直接つなぐと、bash はプロセス置換内のコマンドの終了コードを呼び出し元へ
+# 伝播しない（set -e でも捕まらない）。index の破損等で git ls-files が異常終了
+# しても targets が空のまま次段へ進み、「表が無いので合格」という別の正当な経路と
+# 区別が付かなくなる（検査が成立していないことを合格にしない、に反する）。
+LIST_FILE="$(mktemp "${TMPDIR:-/tmp}/check-table-breaks-list.XXXXXX")" \
+  || fail "一時ファイルを作成できません。対象文書の列挙が成立しません。"
+# SCAN_OUT は下の走査段で使う。ここでまとめて作り、1 つの trap で両方を消す。
+SCAN_OUT="$(mktemp "${TMPDIR:-/tmp}/check-table-breaks-scan.XXXXXX")" \
+  || fail "一時ファイルを作成できません。走査結果を保存できません。"
+trap 'rm -f "$LIST_FILE" "$SCAN_OUT"' EXIT
+
+git ls-files -z '*.md' '*.markdown' > "$LIST_FILE" \
+  || fail "git ls-files に失敗しました。対象文書を列挙できません。"
+
+targets=()
+while IFS= read -r -d '' path; do
+  # 実体が無いもの（削除済み・サブモジュール）とシンボリックリンクは走査しない。
+  [[ -L "$path" ]] && continue
+  [[ -f "$path" ]] || continue
+  targets+=("$path")
+done < "$LIST_FILE"
+
+# 追跡している Markdown が 1 件も無くても、ここでは失敗させない（理由は冒頭
+# 「検査が成立していないことを合格にしない」を参照）。targets が空のまま次段へ進む。
+
+# ── 走査 ─────────────────────────────────────────────────────────────────────
+
+total_lines=0
+total_tables=0
+total_hits=0
+unclosed=0
+
+# 空配列を "${targets[@]}" で展開すると、bash 3.2（macOS の既定）では set -u 下で
+# unbound variable エラーになる（4.4 で修正された既知の差）。0 件のときは展開せず
+# ループを素通りさせる。
+if [[ "${#targets[@]}" -gt 0 ]]; then
+  for path in "${targets[@]}"; do
+    # scan_one（awk）の結果を一時ファイルへ落としてから読む。
+    # `done < <(scan_one "$path")` のようにプロセス置換へ直接つなぐと、bash は
+    # プロセス置換内のコマンドの終了コードを呼び出し元へ伝播しない（set -e でも
+    # 捕まらない）。読み取り不能・awk 自体の異常終了などで scan_one が失敗しても、
+    # 出力が空のまま次のファイルへ進んでしまい、total_tables / total_hits が
+    # 0 のまま「表が無いので合格」という正当な経路と区別が付かなくなる
+    # （検査が成立していないことを合格にしない、に反する）。
+    scan_rc=0
+    scan_one "$path" > "$SCAN_OUT" || scan_rc=$?
+    [[ "$scan_rc" -eq 0 ]] \
+      || fail "$path の走査に失敗しました（awk 終了コード ${scan_rc}）。検査が成立していないため失敗させます。"
+
+    while IFS=$'\t' read -r kind a b c; do
+      case "$kind" in
+        HIT)
+          printf '[table-breaks] %s:%s: 表の先頭に見えますが、次の行が区切り行ではありません。\n' "$path" "$a" >&2
+          printf '[table-breaks]     %s\n' "$b" >&2
+          ;;
+        NEXT)
+          printf '[table-breaks]   次の行 %s: %s\n' "$a" "$b" >&2
+          ;;
+        UNCLOSED)
+          printf '[table-breaks] %s: コードブロックが閉じていません。閉じ忘れた位置から先は走査できていません。\n' "$path" >&2
+          unclosed=$((unclosed + 1))
+          ;;
+        STAT)
+          total_lines=$((total_lines + a))
+          total_tables=$((total_tables + b))
+          total_hits=$((total_hits + c))
+          ;;
+      esac
+    done < "$SCAN_OUT"
+  done
+fi
+
+# ── 結果 ─────────────────────────────────────────────────────────────────────
+
+printf '[table-breaks] %s ファイル / %s 行を走査し、正しい表を %s 個数えました。\n' \
+  "${#targets[@]}" "$total_lines" "$total_tables"
+
+# 正しい表・崩れた表のどちらも 1 件も無いのは、**このプロジェクトが表を持たない**
+# 場合に日常的に起きる（配布直後のプロジェクトや、箇条書き中心の README 等）。
+# 「表が無いこと」と「表が崩れていないこと」は両立するので、これを不合格にはしない。
+#
+# 判定の要であるフェンス追跡や引用符の除去が壊れる（全部コード扱いになる等）
+# リグレッションは、この後の走査ではなく**起動時の自己診断**（合成した入力で
+# 正しい表を 2 つ数えられることを毎回確かめる）が独立に検出する。したがって
+# ここでプロジェクトの実体に表が実在することまでは要求しない。
+if [[ "$total_tables" -eq 0 && "$total_hits" -eq 0 ]]; then
+  # 単一引用符内のバッククォートはリテラル表示のためで、展開させない。
+  # shellcheck disable=SC2016
+  printf '[table-breaks] 追跡した Markdown に表（`|` 区切りのブロック）が見つかりませんでした。検証対象が無いため合格として扱います。\n'
+fi
+
+# 閉じないコードブロックは、その先を丸ごと走査対象から落とす。表の崩れとしては
+# 報告しないが、**見ていない範囲がある**まま緑にはしない。
+if [[ "$unclosed" -gt 0 ]]; then
+  printf '[table-breaks] コードブロックが閉じていない文書が %s 件あります。閉じてください。\n' "$unclosed" >&2
+  echo "TABLE_BREAKS_FAIL"
+  exit 1
+fi
+
+if [[ "$total_hits" -gt 0 ]]; then
+  # 単一引用符内のバッククォートはリテラル表示のためで、展開させない。
+  # shellcheck disable=SC2016
+  printf '[table-breaks] 表として描画されない `|` の並びを %s 件検出しました。\n' "$total_hits" >&2
+  printf '[table-breaks] 表の途中へ段落を差し込むと、そこで表は終わり、続く行はただの段落になります。\n' >&2
+  printf '[table-breaks] 対処: 差し込んだ段落を表の前か後ろへ移す。表を分けたいなら、\n' >&2
+  printf '[table-breaks]       後半にも見出し行と区切り行（|---|---|）を書く。\n' >&2
+  echo "TABLE_BREAKS_FAIL"
+  exit 1
+fi
+
+echo "TABLE_BREAKS_PASS"
+exit 0
+TMPL
+      ;;
     'scripts/acceptance.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
@@ -2464,9 +4654,18 @@ TMPL
 #!/usr/bin/env bash
 # loop-gate.sh — ローカル事前ゲート（ループコーディングの収束点）
 #
-# push / PR 作成の前に、機械判定の受け入れ検証（verify.sh）と、任意の第二意見
-# レビューを直列で通す単一入口。verify が通り、第二意見があればそれも通ったときだけ
-# 通過する。
+# push / PR 作成の前に、コミット identity の検証（verify-commit-identity.sh）、
+# 機械判定の受け入れ検証（verify.sh）、任意の第二意見レビューを直列で通す単一入口。
+# 全段が通ったときだけ通過する。
+#
+# 段の順序（安く・早く落ちる検査を先に置く）:
+#   1. commit identity（verify-commit-identity.sh） — 判定は数 ms で終わる。許可外の
+#      identity が混じったコミットは、他の段の結果を待たずにここで検知する。許可
+#      email（ALLOWED_AUTHOR_EMAILS / .env の GIT_IDENTITY_EMAIL）を解決できない
+#      場合もここで fail-closed に落ちる。判定ロジックはこのスクリプトへ書き写さず
+#      verify-commit-identity.sh 側に置く（判定を二重管理しない）。
+#   2. verify（受け入れ検証。手前で機密混入検査も走る）
+#   3. 第二意見レビュー（存在すれば）
 #
 # このスクリプトは単体で動作する。第二意見レビューは存在すれば直列化し、
 # 無ければ優雅にスキップする（外部パッケージの導入を前提にしない）。
@@ -2507,10 +4706,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 解決できない場合は、従来どおり引数なしで呼ぶ。範囲を解決できないことは
 # reviewer を呼べない理由にならないため、ここでは落とさない。
 #
-# なお、git 管理外ではこの関数へ到達する前に step 1（verify.sh）が落ちる。
-# verify.sh が呼ぶ機密混入検査（check-no-secrets.sh）が git の作業ツリーを前提に
-# しており、検査が成立しない状態を合格にしないため。この関数が git 外の経路を
-# 持つのは、範囲解決を単体で使えるようにしておくためである。
+# なお、git 管理外ではこの関数へ到達する前に、先行する段で必ず落ちる。commit
+# identity 検査（step 1）は git log を、verify.sh が呼ぶ機密混入検査（step 2 の中、
+# check-no-secrets.sh）は git の作業ツリーを前提にしており、検査が成立しない状態を
+# 合格にしないため。この関数が git 外の経路を持つのは、範囲解決を単体で使える
+# ようにしておくためである。
 REVIEW_RANGE=""
 # 範囲は解決できたが差分が空だった（= レビューできる対象が無い）状態を表す。
 # REVIEW_RANGE="" とは区別する。この状態を reviewer の既定へ流すと、空の
@@ -2665,14 +4865,21 @@ main() {
   # resolve_review_range を呼ぶ。
   cd "$(dirname "$HERE")"
 
-  echo "[loop-gate] step 1: verify (acceptance)"
+  echo "[loop-gate] step 1: commit identity"
+  if ! bash "$HERE/verify-commit-identity.sh"; then
+    echo "[loop-gate] commit identity not passed" >&2
+    echo "GATE_FAIL"
+    exit 1
+  fi
+
+  echo "[loop-gate] step 2: verify (acceptance)"
   if ! bash "$HERE/verify.sh"; then
     echo "[loop-gate] verify not passed" >&2
     echo "GATE_FAIL"
     exit 1
   fi
 
-  echo "[loop-gate] step 2: second opinion"
+  echo "[loop-gate] step 3: second opinion"
   if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
     if [[ -f "$HERE/second-opinion-review.sh" ]]; then
       resolve_review_range
@@ -2777,8 +4984,74 @@ TMPL
 # `pulls/1/merge`（マージ済みか調べるだけ）まで確認を要求する。確認が頻発すれば内容を
 # 読まずに承認する習慣ができ、機構は形だけになる。
 #
-# コマンド位置は「行頭、または ; && || | ( の直後」とし、先行する環境変数代入は読み飛ばす。
+# ── コマンド位置の判定: クォート認識の解析 1 つに集約する ─────────────────────
+#
+# 「コマンド位置か」は command_position_has（下で定義）だけで判定する。クォート
+# を認識しながら文字単位で区切り文字を走査し（for_each_clause）、単純コマンド
+# ごとの語のリストを組み立てて、期待する語列と完全一致するかを見る。
+#
+# かつては、同じ問いをもう 1 つの独立した経路（制御語などを前置きとして列挙した
+# 正規表現。クォートを認識しない grep）でも判定し、どちらか一致すれば ask にする
+# 二重化を採っていた。役割としては、列挙が実測した迂回を確実に塞ぐ下限の保証、
+# 解析が未知の書き方（グループコマンドの入れ子など）に届く担当という住み分け
+# だったが、OR で結ぶ限り、クォートを見ない側だけが起こす誤検知は構造として
+# 避けられなかった。`'if' gh pr merge 1`（予約語ではなく if という名前のコマンド
+# を実行する入力）を予約語 if の直後と誤認し、`echo "x; gh pr merge 1"`（二重
+# 引用符の中の ;）を区切り文字と誤認して、どちらも確認を求めていた（実測）。
+# 走査を 1 つにし、この種の食い違いを構造として作れないようにした。
+#
+# 列挙（if / elif / while / until / then / do / else / 否定の !）自体は消して
+# いない。for_each_clause の中の _cmd_start_idx（下で定義）が唯一の置き場所に
+# なった。節の語のリストを先頭から見て、環境変数代入（FOO=bar）とこれらの制御語
+# の繰り返しを読み飛ばし、そこから先を「実コマンドの語」として扱う。**この 2 つは
+# クォートの扱いが違うため、判定条件も分けている。** 予約語として読み飛ばすのは、
+# その語がクォートもバックスラッシュエスケープも含まないときだけにしている。
+# `'if'` や `"if"`、`i\f` のように一部でも引用・エスケープされた語は、bash の
+# 文法上そもそも予約語として認識されず、実際に起動されるコマンド名の一部
+# （＝実コマンドの語そのもの）になるため、ここで読み飛ばしてはならない（実測）。
+# 環境変数代入として読み飛ばすのは逆に、`name=` の部分に引用符を挟んでいない
+# ときだけで、値側の引用符は問わない。`VAR="foo" gh pr merge 1` や
+# `KEY='bar' gh pr merge 1` は値側だけがクォートされた代入で、実際に `gh` が
+# コマンド位置に来る（実測: `env` で代入として効くことを確認）。予約語と同じ
+# 「語にクォートが 1 文字でもあれば読み飛ばさない」を代入にも適用すると、この
+# 2 例を取りこぼして素通りしてしまう（実測。解析を `grep` の列挙へ一本化した
+# ときに、クォートを見ない `grep` 側のフォールバックが無くなったことで露見した
+# 退行）。詳細と判定条件は _cmd_start_idx のコメントを参照。
+#
+# 列挙を解析の外に出さなかった代わりに、実測で踏んだ形（if / elif / while /
+# until / then / do / else / ! それぞれの直後）が確実に ask になることは、
+# 実装の構造にではなくテスト（tests/test-confirm-merge-hook.sh）で固定する。
+# 解析は bash の文法を全部実装したものではなく部分実装であり、取りこぼしうる
+# （範囲は下のコメントに明記する）。「解析が拾うはずだから列挙のテストは要らない」
+# とはしない。
+#
+# 先行する環境変数代入はどちらの語（制御語・実コマンド）の前でも読み飛ばす。
 # 前方一致にしないのは cd との連結を捕捉するためで、逆に引用符の内側は通る。
+#
+# JSON から command を取り出せなかった場合（ペイロード全体を検査対象にしている
+# とき）は command_position_has を使わない。ペイロード全体はシェルの行ではなく
+# JSON テキストであり、位置を解析する土台が無いためである。この場合は位置を
+# 問わない語の並び照合へ落とす（cmd_pos_ask、下で定義）。
+#
+# `{`（グループコマンド）は、その節で「環境変数代入と制御語だけ」を前置きとして
+# 許した上で、まだ実コマンドの語を 1 つも集めていないときだけ、グループコマンド
+# の開始として読み飛ばす（_clause_prefix_is_reserved_only、下で定義）。かつては
+# 「節でまだ語を 1 つも集めていない」を唯一の条件にしていたため、`if { gh pr
+# merge 1; }; then :; fi` のように制御語を 1 つ前置くだけで `{` が語として残り、
+# 解析が gh pr merge へ到達できずに素通りしていた（実測）。正規表現には「その
+# 位置が本当にコマンド位置か」を判定する手段が無く、`{` を素朴に境界へ加えると
+# `echo hi { gh pr merge 1`（`{` 以降も echo の引数でしかなく、実際には実行され
+# ない）のような無害な文字列まで拾ってしまうため、列挙（cmd_pos_ask の grep 側）
+# には `{` を加えていない（実測）。解析は「この節の語が制御語・代入だけで説明
+# できるか」を判定できるため、真にコマンド位置にある `{` だけを区別できる。
+#
+# `case` / `esac` / `fi` / `done` / `}` は予約語としては扱っていない。これらは
+# 必ず直後に区切り文字（; か改行）を要求する構文であり（実測: `fi echo hi` や
+# `done echo hi` は構文エラーで実行されない）、既存の区切り文字判定がそのまま
+# 効くため、独立した対応は要らない。`in`（for / case で使う語）も加えていない。
+# `for x in gh pr merge 1; do ...; done` の `gh pr merge 1` は for のワードリスト
+# （x が順に取る値）であって実行されるコマンドではなく、この節の先頭の語は
+# `for` のままなので gh pr merge との一致は生じない（実測）。
 #
 # ── fail-open にしない ───────────────────────────────────────────────────────
 #
@@ -2787,6 +5060,31 @@ TMPL
 # 飛ばして通す。検知層が黙って無効化されるのは最悪の壊れ方で、このフックが防ごうとして
 # いる「気づかないまま実行できる」状態そのものを再現する。出力側も同じ理由で jq に
 # 依存させない（printf のフォールバックを持つ）。
+#
+# ── この解析は bash の字句解析の部分的な再実装である ──────────────────────────
+#
+# for_each_clause 以下の解析は、bash の字句解析（トークナイザ）を部分的に
+# 再現したものであり、bash の文法を全部実装したものではない（範囲は
+# for_each_clause のコメントに明記している）。ここまでに、少なくとも次の
+# 境界事例が、いずれも実際にこの解析へ入力してから見つかっている。
+#
+#   - コマンド位置の判定を「列挙（クォートを認識しない正規表現）」と「解析
+#     （クォート認識）」の二重化にしていたことに起因する誤検知
+#     （`'if' gh pr merge 1` / `echo "x; gh pr merge 1"`）
+#   - 環境変数代入の判定に、予約語と同じ「語にクォートが 1 文字でもあれば
+#     読み飛ばさない」を適用していたことによる迂回
+#     （`VAR="foo" gh pr merge 1` のように値側だけをクォートした代入）
+#   - 空クォート（`''` / `""`）の中身が空であるために「語が始まった」ことを
+#     記録し損ね、直後の語の切り出し範囲が直前の区切り文字まで巻き込まれた
+#     ことによる迂回・誤検知
+#     （`echo '' ; FOO=bar gh pr merge 1` / `'' gh pr merge 1`）
+#
+# いずれも「新しく入れた処理が別の経路で穴を作っていないか」という観点の
+# 変異テストを実際にかけて初めて見つかっている。この経緯が示すのは、
+# bash の字句規則を部分的に再実装する以上、境界事例は今後も見つかりうる
+# ということである。**「境界事例を網羅した」とは書かない。** 見つかった
+# 形はそのつど実測し、塞いで、テスト（tests/test-confirm-merge-hook.sh）
+# へ固定する、という「踏んだら足す」運用を前提にしている。
 #
 # ── 既知の限界（意図的に塞がない）────────────────────────────────────────────
 #
@@ -2821,8 +5119,614 @@ TMPL
 # では実行できず確認を求められる。ファイル経由（git commit -F、テストスクリプト）で
 # 回避できる。
 #
+# ── squash 本文の CI 抑止の綴り ──────────────────────────────────────────────
+#
+# gh pr merge をコマンド位置で検知したときは、承認の判断材料を増やすため、squash
+# マージの本文になるテキストに CI を飛ばす綴りが無いかも見て、見つかれば理由へ
+# 添える（deny にはしない。上の「保証するのは黙ってマージしないことであって
+# マージさせないことではない」と同じ位置づけ）。ある事例では、この綴りは指示
+# として書かれたのではなく「この検査がコミットメッセージしか見ていないこと」を
+# 説明する文章の中にあった。GitHub は見出しでなく本文のどこにあっても従うため、
+# 検知は行の先頭や見出しの形には絞らない。
+#
+# squash 本文の組み立て方（PR の説明文だけを使うか、各コミットのメッセージを
+# 連ねるか）はリポジトリの設定（squash_merge_commit_message）による。配布物
+# なので特定の設定を前提にせず、設定を読んで検査対象を切り替えることもしない
+# （判定を 2 経路に分けるほど、どちらかの経路だけが古くなる余地が増える）。
+# 代わりに、設定によらず両方（PR 本文と全コミットメッセージ）を常に見る。
+#
+# --body / --subject に明示された文字列も見る（実測で判明した漏れ）。これらは
+# 最終的な squash 本文を CLI 側で直接差し替えるものであり、リモートの PR 本文が
+# 綺麗でも、渡された文面に綴りがあれば CI は飛ぶ。しかも squash 前の人手の手順
+# （land スキル）は「該当行が出たら、その指示を除いた本文をファイルに書き、
+# --body-file で差し替えてマージする」という回復手順を持つ。--body 系を検査
+# しないと、この回復手順そのものがこの検査をすり抜ける経路になる。--body /
+# --subject の値はコマンド文字列から直接取り出して判定でき、gh を待たずに
+# 済む。リモート側（PR 本文・コミットメッセージ）も打ち切らずに別途見るのは、
+# --body 等が実際にどこまで上書きするかを完全には前提にしないためで、見た
+# 結果は「found（後述の優先順位で上書きされない）」側にしか働かない。
+#
+# --body-file の中身は読まない。このフックはコマンドの実行前に走るため、同じ
+# コマンド内で（例: echo ... > file && gh pr merge ... --body-file file）これ
+# から書かれるファイルを正しく読める保証が無く、cwd の想定もフック側とコマンド
+# 側で揃うとは限らない。**読まないと決めた以上、その対象は「綴りが無い」とは
+# 扱わない**（読めなかったことを合格にしない、という下の方針と同じ）。--body-file
+# を検出したら、その対象は unavailable として扱う（他の情報源で found が確定
+# すれば found が優先される。優先順位は下記）。
+#
+# 1 つのコマンド文字列に gh pr merge が複数回現れる場合（例:
+# gh pr merge 1 && gh pr merge 2）、全対象を集約して見る。片方だけを見て
+# 判定を確定させると、承認 1 回で残りの対象が未検査のまま実行されてしまう
+# （実測で判明した漏れ）。
+#
+# 複数の対象・複数の情報源（--body / --subject / リモートの本文・コミット）を
+# 見た結果は、found（綴りあり） > unavailable（確認できていない） > clean
+# （綴りなし）の優先順位で 1 つに集約する。found が 1 件でもあれば、他の対象
+# や情報源の結果に関わらず found を報告する。found が無く、unavailable が
+# 1 件でもあれば、他が clean であっても全体を clean とはしない。
+#
+# 判定できなかったとき（gh コマンドが無い・PR 情報を取得できない・コマンド
+# 文字列を取り出せていない・--body-file の中身を読んでいない、など）は
+# 「綴りが無い」とは扱わない。確認できていないことをそのまま理由文へ書く。
+# 読めなかったことを合格にはしない、という上の「fail-open にしない」と同じ
+# 方針をこの検査にも適用する。
+#
+# 綴りの一覧は、このフックだけの独自の一覧を持たず、squash 前に人手でも同じ
+# 判定を行う手順（land スキルの対応する手順）と同じものを使う。一覧を 2 か所に
+# 複製すると、見つかった綴りを片方にだけ足して他方が古くなる余地ができる。
+# 一致は配布物側のテスト（tests/test-confirm-merge-hook.sh）で検査し、複製の
+# 食い違いを機械的に検知できるようにしている。
+#
+# gh pr merge 以外（REST の PUT / gh api graphql の mergePullRequest）には、この
+# 検査を広げていない。REST 経由の URL は変数展開を含む形が普通にあり（上の
+# 「既知の限界」参照）、PR 番号やリポジトリをそこから安全に取り出せる保証が
+# 無い。誤って別の PR の本文を見にいく（見当違いの結果を確信を持って返す）ほう
+# が、確認しないより悪いと判断した。これらの経路でも既存の ask 自体は変わらず
+# 働く。
+#
+# この追加検査も security boundary ではない。squash 本文に実際に何が入るかは
+# GitHub 側の設定と挙動に依存し、ここでの判定は近似でしかない。
+#
 # 終了コード: 常に 0。判定は標準出力の JSON（permissionDecision）で伝える。
 set -uo pipefail
+
+# ── 節ごとの走査（クォート認識を 1 箇所に集約する）─────────────────────────────
+#
+# 「gh pr merge がコマンド位置にあるか」（語の完全一致）と「PUT と merge
+# エンドポイントが同じコマンド節にあるか」（正規表現一致）は、判定の中身は
+# 違っても「クォートを認識しながら ; & | ( ) と改行でコマンド節へ分ける」という
+# 走査そのものは同じであるべきだった。かつては両者を別々に実装しており、片方
+# （REST 判定側）だけがクォートを見ずに ; & | を機械的に改行へ立て替えていた。
+# その結果、クォートの中身や URL のクエリ文字列に現れる ; & | まで区切りとして
+# 扱ってしまい、同一コマンドを別々の節へ割ってしまっていた（実測:
+# `gh api 'repos/o/r/pulls/1/merge?commit_title=foo&commit_message=bar' -X PUT`、
+# `gh api repos/o/r/pulls/1/merge -f commit_message="fix bug & test" -X PUT`、
+# `gh api -X PUT -f message="fix; test" repos/o/r/pulls/1/merge` のいずれも、
+# PUT とエンドポイントが別の節へ分断されて素通りしていた）。誤検知を直すために
+# 入れた処理が新しい迂回を作っていた形で、この票が塞ごうとしているものと同じ
+# 種類の欠陥である。
+#
+# 対策として、走査そのものを 1 つの関数（for_each_clause）へ集約する。節が
+# 確定するたびに、その節の語のリスト（clause_words。クォートは剥がれる）と、
+# 元のテキストそのもの（clause_text。クォートは残したまま）の両方を用意して
+# から、呼び出し側が渡したハンドラ関数を呼ぶ。語の完全一致判定（コマンド位置か）
+# と正規表現判定（PUT / merge エンドポイントか）は、このハンドラの中身が違う
+# だけで、節を切り出す走査そのものは 1 つしかない。「片方だけクォートを見て、
+# もう片方が見ていない」という食い違いを、構造として作れないようにする。
+#
+# 解析する範囲: ; & && | || ( ) と改行を区切りとして扱う。単一引用符・二重引用符
+# の中身（二重引用符内のバックスラッシュエスケープを含む）、引用符の外の
+# バックスラッシュエスケープは区切りとして扱わない。空白を伴う { は、その節の
+# 語が「環境変数代入と制御語だけ」で説明できる間（＝真にコマンド位置にある間）
+# だけ、その場の語・節テキストへ加えずに読み飛ばす（グループコマンド
+# `{ gh pr merge 1; }` の開始を、制御語や代入だけを前置いた真のコマンド位置に
+# あるときも含めてコマンド位置として扱うため。詳細は上のヘッダを参照）。
+#
+# 語ごとに「クォート・バックスラッシュエスケープを 1 文字でも含むか」も
+# clause_word_quoted（clause_words と対になる配列）へ、「元テキストそのもの
+# （クォートを残したまま）」も clause_word_raw へ記録する。予約語としての判定
+# （_cmd_start_idx、下で定義）は、clause_word_quoted が立っていない語（＝完全に
+# 素の語）に対してだけ行う。`'if'` のように一部でもクォートされた語は bash 上
+# そもそも予約語ではなく実コマンド名になるため、ここで区別できないと予約語だけ
+# を読み飛ばす判定が誤検知を起こす（実測）。環境変数代入としての判定は逆に
+# clause_word_quoted を見ず、clause_word_raw に対して直接正規表現を当てる。
+# `VAR="foo"` のように値側だけがクォートされていても代入として有効なままの
+# ため、語全体のクォート有無では代入かどうかを見分けられない（詳細は
+# _cmd_start_idx のコメントを参照）。
+#
+# 解析しない範囲（意図的に見ない。bash の文法を完全に実装すると雛形として
+# 重くなりすぎるため、範囲を絞っている。ここでの取りこぼしは、実測した形に
+# 限ってはテスト側で固定し、それ以外は取りこぼしうる）:
+#   - 変数展開・コマンド置換・算術展開（$(...) `...` $((...))）の中身。展開の
+#     結果によってコマンドが変わる形までは追わない
+#   - here-document（<<, <<-, <<<）の本体。区切り文字と同じ規則で割ってしまう
+#     （本体に ; や改行があれば、そこで単純コマンドが終わったと誤認する）
+#   - サブシェルの深さ。( と ) は対応を数えず常に境界として扱う
+#   - for / case / function などの構文そのもの（予約語としては扱わない）。ただし
+#     for ... ; do や case ... ) は、; や ) が境界になる副作用で結果的に多くの形を
+#     拾える
+#
+# 引数: $1 = 節ごとに呼び出すハンドラ関数名、$2 = 検査対象テキスト。
+# ハンドラは clause_words（配列。クォートは剥がれる）・clause_word_quoted（配列。
+# 各語がクォート・バックスラッシュエスケープを 1 文字でも含んでいたか）・
+# clause_word_raw（配列。各語の元テキストそのもの。クォートは残したまま）・
+# clause_text（節全体の元テキスト。クォートは残したまま）を読める。
+#
+# clause_word_raw を別に持つ理由: 環境変数代入（FOO=bar）の判定は、bash の
+# 実際の挙動に合わせて「name= の部分が引用符を 1 文字も挟まずに書かれている
+# か」で見る必要がある（実測: `VAR="foo" env` は代入として効くが、`"VAR"=foo env`
+# は代入にならず `VAR=foo` という名前のコマンドを探しにいく）。value 側は引用符
+# で囲んでも代入として有効なままなので、clause_word_quoted（語全体にクォートが
+# 1 文字でもあるか）だけでは name= 部分だけを見分けられない。clause_word_raw
+# （引用符を残した元テキスト）に対して `^[A-Za-z_][A-Za-z0-9_]*=` を当てれば、
+# name 部分に引用符が挟まっている場合は正規表現がそこで止まって一致せず、
+# value 側だけが引用符で囲まれている場合は = より前で一致が確定するため、
+# 追加の状態管理なしで両方を正しく判定できる。
+for_each_clause() {
+  local handler="$1" text="$2"
+  local i n c
+  local word="" have_word=0 word_quoted=0 word_start=-1
+  local in_squote=0 in_dquote=0
+
+  clause_words=()
+  clause_word_quoted=()
+  clause_word_raw=()
+  clause_text=""
+  n=${#text}
+
+  for ((i = 0; i < n; i++)); do
+    c="${text:i:1}"
+
+    if [[ $in_squote -eq 1 ]]; then
+      clause_text+="$c"
+      if [[ "$c" == "'" ]]; then
+        in_squote=0
+      else
+        word+="$c"
+        have_word=1
+        word_quoted=1
+      fi
+      continue
+    fi
+    if [[ $in_dquote -eq 1 ]]; then
+      if [[ "$c" == '"' ]]; then
+        in_dquote=0
+        clause_text+="$c"
+      elif [[ "$c" == $'\\' ]]; then
+        clause_text+="$c"
+        i=$((i + 1))
+        if [[ $i -lt $n ]]; then
+          clause_text+="${text:i:1}"
+          word+="${text:i:1}"
+          have_word=1
+          word_quoted=1
+        fi
+      else
+        clause_text+="$c"
+        word+="$c"
+        have_word=1
+        word_quoted=1
+      fi
+      continue
+    fi
+
+    case "$c" in
+      "'")
+        # クォートが開いた時点で「語が始まった」ことを記録する。空クォート
+        # （'' / ""）は中身の文字を 1 つも追加しないため、内容が付くときにだけ
+        # have_word を立てる実装だと、空クォートだけの語はいつまでも
+        # have_word=0 のまま扱われる（実測）。その結果、空白や区切り文字に
+        # 達しても「語を確定させて word_start をリセットする」処理
+        # （下の空白・区切り文字の分岐、いずれも have_word -eq 1 を条件にする）
+        # が走らず、word_start が空クォートの開始位置に残り続ける。次の語の
+        # 先頭でも word_start が -1 に戻っていないため上書きされず、
+        # clause_word_raw の切り出しに直前の空クォートや区切り文字まで
+        # 巻き込んでしまい、環境変数代入の判定（^[A-Za-z_][A-Za-z0-9_]*=）が
+        # raw の先頭に来るはずの文字の前へ無関係な文字が挟まって外れる
+        # （実測: `echo '' ; FOO=bar gh pr merge 1` が素通りしていた）。逆に
+        # `'' gh pr merge 1` では、空クォートが語として clause_words に入らない
+        # ため gh が誤って先頭語として扱われ、逆方向の誤検知も起きていた
+        # （実測）。クォートが開いた瞬間に have_word と word_quoted を立てる
+        # ことで、中身が空でも「クォートで作った語」を 1 つの語として確定
+        # できるようにする。
+        [[ $word_start -eq -1 ]] && word_start=$i
+        have_word=1
+        word_quoted=1
+        in_squote=1
+        clause_text+="$c"
+        ;;
+      '"')
+        [[ $word_start -eq -1 ]] && word_start=$i
+        have_word=1
+        word_quoted=1
+        in_dquote=1
+        clause_text+="$c"
+        ;;
+      $'\\')
+        [[ $word_start -eq -1 ]] && word_start=$i
+        clause_text+="$c"
+        i=$((i + 1))
+        if [[ $i -lt $n ]]; then
+          clause_text+="${text:i:1}"
+          word+="${text:i:1}"
+          have_word=1
+          word_quoted=1
+        fi
+        ;;
+      ' ' | $'\t')
+        clause_text+="$c"
+        if [[ $have_word -eq 1 ]]; then
+          clause_words+=("$word")
+          clause_word_quoted+=("$word_quoted")
+          clause_word_raw+=("${text:word_start:i-word_start}")
+          word=""
+          have_word=0
+          word_quoted=0
+          word_start=-1
+        fi
+        ;;
+      '{')
+        # グループコマンドの開始として読み飛ばすのは、(1) まだ語の途中でなく、
+        # (2) この節でここまでに集めた語が環境変数代入・制御語だけで説明でき
+        # （＝実コマンドの語をまだ 1 つも集めていない。_clause_prefix_is_reserved_only、
+        # 下で定義）、(3) 直後が空白であるときだけ。それ以外（他のコマンドの
+        # 引数の途中など）は素通しの文字として扱う。(2) を「節の語が空か」だけに
+        # すると、`if { gh pr merge 1; }; then :; fi` のように制御語を 1 つ
+        # 前置くだけで { が語として残り、解析が gh pr merge へ届かなくなる
+        # （実測）。逆に無条件で許すと `echo hi { gh pr merge 1`（{ 以降も echo
+        # の引数でしかなく実際には実行されない）のような無害な文字列まで拾って
+        # しまう（実測）。
+        if [[ $have_word -eq 0 ]] && _clause_prefix_is_reserved_only \
+          && { [[ "${text:$((i + 1)):1}" == ' ' ]] \
+            || [[ "${text:$((i + 1)):1}" == $'\t' ]] \
+            || [[ "${text:$((i + 1)):1}" == $'\n' ]]; }; then
+          :
+        else
+          [[ $word_start -eq -1 ]] && word_start=$i
+          clause_text+="$c"
+          word+="$c"
+          have_word=1
+        fi
+        ;;
+      $'\n' | ';' | '&' | '|' | '(' | ')')
+        if [[ $have_word -eq 1 ]]; then
+          clause_words+=("$word")
+          clause_word_quoted+=("$word_quoted")
+          clause_word_raw+=("${text:word_start:i-word_start}")
+          word=""
+          have_word=0
+          word_quoted=0
+          word_start=-1
+        fi
+        if [[ -n "$clause_text" || ${#clause_words[@]} -gt 0 ]]; then
+          "$handler"
+        fi
+        clause_words=()
+        clause_word_quoted=()
+        clause_word_raw=()
+        clause_text=""
+        # && / || の 2 文字目は読み飛ばす（境界としては 1 回でよい）。
+        if { [[ "$c" == '&' ]] || [[ "$c" == '|' ]]; } \
+          && [[ "${text:$((i + 1)):1}" == "$c" ]]; then
+          i=$((i + 1))
+        fi
+        ;;
+      *)
+        [[ $word_start -eq -1 ]] && word_start=$i
+        clause_text+="$c"
+        word+="$c"
+        have_word=1
+        ;;
+    esac
+  done
+
+  if [[ $have_word -eq 1 ]]; then
+    clause_words+=("$word")
+    clause_word_quoted+=("$word_quoted")
+    clause_word_raw+=("${text:word_start:n-word_start}")
+  fi
+  if [[ -n "$clause_text" || ${#clause_words[@]} -gt 0 ]]; then
+    "$handler"
+  fi
+  clause_words=()
+  clause_word_quoted=()
+  clause_word_raw=()
+  clause_text=""
+}
+
+# clause_words / clause_word_quoted / clause_word_raw（グローバル。for_each_clause
+# が用意する）を先頭から見て、環境変数代入（FOO=bar）とシェルの制御語（if /
+# elif / while / until / then / do / else / 否定の !）の繰り返しを読み飛ばした
+# 次のインデックスを _cmd_start_idx_result へ設定する。
+#
+# 環境変数代入と予約語（制御語・否定）は、クォートの扱いが違うため判定条件も
+# 分けている（実測。以下はいずれも `env` で確認した実際の bash の挙動）。
+#
+#   - 環境変数代入: name= の部分に引用符が 1 文字も挟まっていないことだけを
+#     求める。値側の引用符は問わない。`VAR="foo" env` / `KEY='bar' env` は
+#     どちらも代入として有効に効く。判定は clause_word_raw（引用符を残した
+#     元テキスト）に対して `^[A-Za-z_][A-Za-z0-9_]*=` を当てる。value 側が
+#     引用符で囲まれていても = より前で一致が確定するため代入として読み飛ばす
+#     一方、`"VAR"=foo env` のように name 側に引用符が挟まっていると `"` の
+#     時点で正規表現が止まり一致しないため、代入として読み飛ばさない
+#     （これは実際に `"VAR"=foo` という名前のコマンドを探しにいく入力であり、
+#     env は実行されない）。
+#   - 予約語（制御語・否定 !）: 語がクォート・バックスラッシュエスケープを
+#     1 文字も含まない（clause_word_quoted が 0 の）ときだけ読み飛ばす。
+#     `'if'` や `"if"`、`i\f` のように一部でも引用・エスケープされた語は、
+#     bash の文法上そもそも予約語として認識されず、実際に起動されるコマンド
+#     名の一部（＝実コマンドの語そのもの）になるため、ここで読み飛ばしては
+#     ならない。
+#
+# command_position_has（下）と for_each_clause の `{` 判定
+# （_clause_prefix_is_reserved_only、下）の両方がこの関数だけを参照しており、
+# 列挙（制御語の一覧）の置き場所はここ 1 か所にまとめている。
+_cmd_start_idx() {
+  local idx=0 w
+  while [[ $idx -lt ${#clause_words[@]} ]]; do
+    if [[ "${clause_word_raw[$idx]:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      idx=$((idx + 1))
+      continue
+    fi
+    if [[ "${clause_word_quoted[$idx]:-0}" -eq 0 ]]; then
+      w="${clause_words[$idx]}"
+      case "$w" in
+        if | elif | while | until | then | do | else | '!')
+          idx=$((idx + 1))
+          continue
+          ;;
+      esac
+    fi
+    break
+  done
+  _cmd_start_idx_result=$idx
+}
+
+# for_each_clause の `{` 判定用。ここまでに集めた clause_words が「環境変数代入と
+# 制御語だけ」で説明できる（＝実コマンドの語がまだ 1 つも無い）ときに真を返す。
+# clause_words が空（まだ何も集めていない）ときも、_cmd_start_idx_result が 0 で
+# 長さも 0 になるため真になる。
+_clause_prefix_is_reserved_only() {
+  _cmd_start_idx
+  [[ $_cmd_start_idx_result -eq ${#clause_words[@]} ]]
+}
+
+# for_each_clause のハンドラ。呼び出し側が cph_expect（配列）を用意してから
+# command_position_has を呼ぶ。節の語のリスト（clause_words）が、_cmd_start_idx
+# の読み飛ばし（環境変数代入・制御語の繰り返し。読み飛ばす条件は語の種類ごとに
+# 違う。詳細は _cmd_start_idx のコメントを参照）の直後に、cph_expect と
+# 完全一致すれば cph_found を立てる。
+# shellcheck disable=SC2329  # for_each_clause から "$handler" 経由で間接的に呼ばれる
+_cph_clause_handler() {
+  _cmd_start_idx
+  local idx=$_cmd_start_idx_result
+  local j=0 ok=1
+  while [[ $j -lt ${#cph_expect[@]} ]]; do
+    if [[ "${clause_words[$((idx + j))]:-}" != "${cph_expect[$j]}" ]]; then
+      ok=0
+      break
+    fi
+    j=$((j + 1))
+  done
+  [[ $ok -eq 1 && ${#cph_expect[@]} -gt 0 ]] && cph_found=1
+}
+
+# 引数: 検査対象テキスト、続けて期待する語（可変長。例: gh pr merge）。
+# 戻り値: 0 = 一致する単純コマンドがある、1 = 無い。
+# コマンド位置の判定はこの関数（と for_each_clause / _cmd_start_idx）に集約して
+# いる。上のヘッダ「コマンド位置の判定」を参照。
+command_position_has() {
+  local text="$1"
+  shift
+  cph_expect=("$@")
+  cph_found=0
+  for_each_clause _cph_clause_handler "$text"
+  [[ $cph_found -eq 1 ]]
+}
+
+# コマンド位置に期待する語列があるかを判定する。extracted=="yes"（Bash ツールの
+# tool_input.command を取り出せた）ときは command_position_has だけで判定する。
+# extracted=="no"（JSON からの取り出しに失敗し、ペイロード全体を検査対象にして
+# いる）ときは、そもそも「シェルの行」ではなく JSON テキストであり位置を解析する
+# 土台が無いため、位置を問わない語の並び照合（grep）へ落とし、確認を増やす側へ
+# 振る（fail-open にしない）。
+#
+# 引数: $1 = 検査対象テキスト、$2 = extracted（yes/no）、$3 = 語末境界の正規表現
+# （呼び出し側の word_end）、続けて期待する語（可変長。例: gh pr merge）。
+cmd_pos_ask() {
+  local text="$1" ex="$2" wend="$3"
+  shift 3
+  if [[ "$ex" == "yes" ]]; then
+    command_position_has "$text" "$@"
+    return $?
+  fi
+  local re="" w
+  for w in "$@"; do
+    if [[ -n "$re" ]]; then
+      re="${re}[[:space:]]+"
+    fi
+    re="${re}${w}"
+  done
+  grep -qE "${re}${wend}" <<<"$text"
+}
+
+# for_each_clause のハンドラ。節のテキスト（clause_text。クォートは残ったまま）
+# が、merge エンドポイントと PUT 指定の両方を含めば rest_found を立てる。呼び出し
+# 側が事前に put_re を用意しておく。REST 判定（PUT の指定と merge エンドポイントが
+# 同じコマンド節にあるか）に使う。
+# shellcheck disable=SC2329  # for_each_clause から "$handler" 経由で間接的に呼ばれる
+_rest_clause_handler() {
+  if [[ "$clause_text" =~ pulls/[0-9]+/merge ]] && [[ "$clause_text" =~ $put_re ]]; then
+    rest_found=1
+  fi
+}
+
+# for_each_clause のハンドラ。節が「gh pr merge」をコマンド位置に持つ場合、その
+# 直後に続く語から、対象 1 件ぶんの情報（PR セレクタ・--repo・--body・
+# --subject・--body-file の有無）を取り出し、mth_targets_*（配列。呼び出し側が
+# 用意する）の末尾（mth_count）へ積む。1 つのコマンド文字列に gh pr merge が
+# 複数回現れれば、この関数もその回数だけ呼ばれ、対象が積み上がる（同じコマンド
+# の承認 1 回で複数 PR がマージされうるため、全対象を見る必要がある。実測で
+# 判明した漏れ）。
+#
+# --repo=value・--repo value・-R value、--body=value・--body value、
+# --subject=value・--subject value を認識する。--body-file はどちらの形
+# （--body-file=path・--body-file path）でも中身は読まず、有無だけを記録する
+# （理由はヘッダ「squash 本文の CI 抑止の綴り」を参照）。それ以外の語でハイフン
+# 始まりのものは値を取るかどうかを個別には追わず、素通りする
+# （--match-head-commit の値などを誤って PR セレクタと取り違える余地が残る）。
+# 取り違えた場合、その語は実在しない PR セレクタとして gh へ渡ることになり、
+# _check_one_merge_target（下で定義）側の gh 呼び出しが失敗して「確認できて
+# いない」側へ倒れる。セレクタの取り違えが「綴りが無い」という誤った判定には
+# つながらない設計であるため、ここでは簡便な抽出にとどめている。
+# shellcheck disable=SC2329  # for_each_clause から "$handler" 経由で間接的に呼ばれる
+_gh_pr_merge_target_handler() {
+  _cmd_start_idx
+  local idx=$_cmd_start_idx_result
+  if [[ "${clause_words[$idx]:-}" != gh ]] \
+    || [[ "${clause_words[$((idx + 1))]:-}" != pr ]] \
+    || [[ "${clause_words[$((idx + 2))]:-}" != merge ]]; then
+    return
+  fi
+  local sel="" repo="" body="" subject="" hasfile=0
+  local j=$((idx + 3)) w skip_next=0
+  while [[ $j -lt ${#clause_words[@]} ]]; do
+    w="${clause_words[$j]}"
+    if [[ $skip_next -eq 1 ]]; then
+      skip_next=0
+      j=$((j + 1))
+      continue
+    fi
+    case "$w" in
+      --repo=*) repo="${w#--repo=}" ;;
+      --repo | -R)
+        repo="${clause_words[$((j + 1))]:-}"
+        skip_next=1
+        ;;
+      --body=*) body="${w#--body=}" ;;
+      --body)
+        body="${clause_words[$((j + 1))]:-}"
+        skip_next=1
+        ;;
+      --subject=*) subject="${w#--subject=}" ;;
+      --subject)
+        subject="${clause_words[$((j + 1))]:-}"
+        skip_next=1
+        ;;
+      --body-file=*) hasfile=1 ;;
+      --body-file)
+        hasfile=1
+        skip_next=1
+        ;;
+      -*) : ;;
+      *)
+        [[ -z "$sel" ]] && sel="$w"
+        ;;
+    esac
+    j=$((j + 1))
+  done
+  mth_targets_selector[mth_count]="$sel"
+  mth_targets_repo[mth_count]="$repo"
+  mth_targets_body[mth_count]="$body"
+  mth_targets_subject[mth_count]="$subject"
+  mth_targets_hasfile[mth_count]="$hasfile"
+  mth_count=$((mth_count + 1))
+}
+
+# 対象 1 件ぶん（PR セレクタ・リポジトリ・--body・--subject の文字列・
+# --body-file の有無）について、squash 本文になるテキストに CI 抑止の綴りが
+# 無いかを見る。_one_status（found / clean / unavailable）と _one_detail
+# （unavailable のときの理由）を設定する。ネットワークに出る（gh 経由で PR
+# 情報を取得する）唯一の箇所。
+_check_one_merge_target() {
+  local sel="$1" repo="$2" body="$3" subject="$4" hasfile="$5"
+  _one_status=clean
+  _one_detail=""
+
+  # --body-file の中身は読まない（理由はヘッダ参照）。読まないと決めた以上、
+  # 確認できていないという扱いにする。found で上書きされうる（下）。
+  if [[ "$hasfile" -eq 1 ]]; then
+    _one_status=unavailable
+    _one_detail='--body-file の中身は確認していない'
+  fi
+
+  # --body / --subject に明示された文字列は、gh を待たずにその場で判定できる。
+  local inline="${body}"$'\n'"${subject}"
+  if grep -n -i -E "$SQUASH_CI_SKIP_RE" <<<"$inline" >/dev/null; then
+    _one_status=found
+    return
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    [[ "$_one_status" == clean ]] && { _one_status=unavailable; _one_detail='gh コマンドが無い'; }
+    return
+  fi
+
+  local gh_args=(pr view)
+  [[ -n "$sel" ]] && gh_args+=("$sel")
+  [[ -n "$repo" ]] && gh_args+=(--repo "$repo")
+  gh_args+=(--json "body,commits" --jq '.body, (.commits[] | .messageHeadline, .messageBody)')
+
+  local body_text gh_rc
+  body_text="$(gh "${gh_args[@]}" 2>/dev/null)"
+  gh_rc=$?
+  if [[ $gh_rc -ne 0 ]]; then
+    [[ "$_one_status" == clean ]] && { _one_status=unavailable; _one_detail='PR 情報を取得できなかった'; }
+    return
+  fi
+
+  # land スキルの対応する手順と同じ一覧を使う（ヘッダ参照）。行頭に絞らない
+  # （skip-checks: true 行だけは元の手順どおり行頭を要求する）。GitHub は
+  # 見出しでなく本文のどこにあっても従うため、位置は問わない。
+  if grep -n -i -E "$SQUASH_CI_SKIP_RE" <<<"$body_text" >/dev/null; then
+    _one_status=found
+  fi
+}
+
+# gh pr merge がコマンド位置で見つかったときに呼ぶ。コマンド文字列に含まれる
+# 全対象（_gh_pr_merge_target_handler が積んだもの）それぞれについて
+# _check_one_merge_target で判定し、found > unavailable > clean の優先順位
+# （ヘッダ参照）で 1 つに集約する。squash_ci_skip_status / squash_ci_skip_detail
+# を設定する。
+squash_ci_skip_check() {
+  local text="$1"
+  mth_count=0
+  mth_targets_selector=()
+  mth_targets_repo=()
+  mth_targets_body=()
+  mth_targets_subject=()
+  mth_targets_hasfile=()
+  for_each_clause _gh_pr_merge_target_handler "$text"
+
+  squash_ci_skip_status=unavailable
+  squash_ci_skip_detail=""
+
+  if [[ "$mth_count" -eq 0 ]]; then
+    squash_ci_skip_detail='マージ対象の PR を特定できなかった'
+    return
+  fi
+
+  local overall=clean overall_detail="" i
+  for ((i = 0; i < mth_count; i++)); do
+    _check_one_merge_target \
+      "${mth_targets_selector[$i]}" "${mth_targets_repo[$i]}" \
+      "${mth_targets_body[$i]}" "${mth_targets_subject[$i]}" \
+      "${mth_targets_hasfile[$i]}"
+
+    if [[ "$_one_status" == found ]]; then
+      overall=found
+      overall_detail=""
+      break
+    fi
+    if [[ "$_one_status" == unavailable ]] && [[ "$overall" != found ]]; then
+      overall=unavailable
+      overall_detail="$_one_detail"
+    fi
+  done
+
+  squash_ci_skip_status="$overall"
+  squash_ci_skip_detail="$overall_detail"
+}
 
 payload="$(cat)"
 
@@ -2853,11 +5757,11 @@ else
   # バックスラッシュ行継続（\ + 改行）だけを空白へ正規化する。判定にのみ使い、
   # payload・target 自体や理由文は書き換えない。長い REST 呼び出しを \ で複数行に
   # 分けるのは普通の書き方で、-XPUT / --method=PUT と同じ「うっかり実行」側にあたる。
-  # 分けて書くと pulls/<n>/merge と PUT が別行になり、REST 判定の同一行条件が外れて
+  # 分けて書くと pulls/<n>/merge と PUT が別行になり、REST 判定の同一節条件が外れて
   # 検知漏れになる（実測）。
   #
   # 改行を一律には潰さない。無関係な 2 行（例: echo の次行にたまたま別の gh api 呼び
-  # 出しが続くだけの形）まで 1 行へ結合すると、同一行条件が意味を失い誤検知する。
+  # 出しが続くだけの形）まで 1 行へ結合すると、同一節条件が意味を失い誤検知する。
   # 落とすのは直前にバックスラッシュがある改行だけにする。
   #
   # CRLF を先に処理する。LF だけを落とすと \ + CR が残り、CR が語末境界として働いて
@@ -2866,30 +5770,48 @@ else
   norm_target="${target//$'\\\r\n'/ }"
   norm_target="${norm_target//$'\\\n'/ }"
 
-  # コマンド位置の前置き。行頭、または ; && || | ( の直後で、先行する環境変数代入
-  # （FOO=bar gh ...）を読み飛ばす。grep は行単位で見るため ^ が各行の先頭に効く。
-  #
-  # 取り出しに失敗したときはこの前置きを外す。ペイロード全体はシェルの行ではなく JSON
-  # であり、コマンドは引用符の内側に現れる。位置を問う条件をそのまま当てると必ず外れ、
-  # 「全体を検査対象にする」が実質 fail-open になる（実測: 壊れた JSON
-  # {"tool_input": {"command": "gh pr merge 1" が素通りした）。取り出せていない以上
-  # 位置は判定できないため、位置を問わない照合へ落として確認を増やす側へ振る。
-  cmd_pos='(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
-  if [[ "$extracted" == "no" ]]; then
-    cmd_pos=''
-  fi
-
   # 語末の境界。空白か行末だけにすると、JSON の引用符（"gh pr merge"）に隣接した形を
   # 取りこぼす。逆に境界を置かないと gh pr mergequeue のような別サブコマンドまで拾う。
   word_end='([^A-Za-z0-9_-]|$)'
 
+  # squash 本文に含まれていると CI を飛ばす綴り。land スキルの対応する手順と
+  # 同じ一覧（ヘッダ「squash 本文の CI 抑止の綴り」参照）。ここだけの一覧を
+  # 別に持たない。
+  SQUASH_CI_SKIP_RE='\[(skip ci|ci skip|no ci|skip actions|actions skip)\]|^skip-checks: *true'
+
   # パイプは使わずヒアストリングで渡す。grep -q は一致した時点で終了するため、上流を
   # パイプにすると SIGPIPE で pipefail が発火し、一致したのに条件が偽になる経路ができる。
-  if grep -qE "${cmd_pos}gh[[:space:]]+pr[[:space:]]+merge${word_end}" <<<"$norm_target"; then
+  # cmd_pos_ask（上で定義）はこのヒアストリング渡しをそのまま踏襲する。
+  #
+  # コマンド位置の判定は cmd_pos_ask（extracted に応じて解析と位置を問わない
+  # 照合を切り替える）に一本化している。上のヘッダ「コマンド位置の判定」を参照。
+  if cmd_pos_ask "$norm_target" "$extracted" "$word_end" gh pr merge; then
     reason='gh pr merge をコマンド位置で実行しようとしています。既定の merge 方針は手動承認です。承認の記録を確認してください。'
+
+    # squash 本文の検査（ヘッダ「squash 本文の CI 抑止の綴り」参照）。実際の
+    # コマンド文字列を取り出せた（extracted=yes）ときだけ行う。ペイロード全体
+    # （JSON テキスト）を対象にしているときは、シェルのコマンド節を解析する
+    # 土台が無く、PR セレクタを安全に取り出せない。
+    if [[ "$extracted" == yes ]]; then
+      squash_ci_skip_check "$norm_target"
+    else
+      squash_ci_skip_status=unavailable
+      squash_ci_skip_detail='コマンド文字列を取り出せていない'
+    fi
+
+    case "$squash_ci_skip_status" in
+      found)
+        reason="${reason} squash 本文になるテキスト（PR 本文・コミットメッセージ・--body 等の指定）に CI を飛ばす綴りが見つかりました。除いてよいか確認してからマージしてください。"
+        ;;
+      unavailable)
+        reason="${reason} squash 本文の CI 抑止の綴りは確認できていません（${squash_ci_skip_detail}）。"
+        ;;
+      clean) : ;;
+    esac
   else
-    # REST 経由の merge。PUT の指定と merge エンドポイントが同じ行にあることを条件に
-    # する。GET は「マージ済みか」を調べるだけで状態を変えないため対象にしない。
+    # REST 経由の merge。PUT の指定と merge エンドポイントが同じコマンド節にある
+    # ことを条件にする。GET は「マージ済みか」を調べるだけで状態を変えないため
+    # 対象にしない。
     #
     # --method PUT（空白区切り）に加え、--method=PUT（= 連結）・-XPUT（-X への直接連結）・
     # --method put（小文字）も拾う。value 側の大小混在は [Pp][Uu][Tt] で吸収する
@@ -2898,16 +5820,23 @@ else
     # PUT の直後には word_end を要求する。無いと -XPUTS のような無関係な綴りまで拾う。
     # --method の直後は区切り（= か空白）を要求する。無いと --methodology のような別
     # オプション名の内部にまで一致する。norm_target を見るので、\ 行継続で PUT が
-    # 次行にずれていても同一行条件を満たす。
-    merge_endpoint_lines="$(grep -E 'pulls/[0-9]+/merge' <<<"$norm_target")"
-    if [[ -n "$merge_endpoint_lines" ]] \
-      && grep -qE "(--method(=|[[:space:]]+)|-X[[:space:]]*)[Pp][Uu][Tt]${word_end}" \
-        <<<"$merge_endpoint_lines"; then
+    # 次行にずれていても同一節条件を満たす。
+    #
+    # 節の切り出しは for_each_clause（上で定義）に委ねる。「行」を単位にすると、
+    # クォートの中や URL のクエリ文字列に現れる ; & | まで区切りとして扱ってしまい、
+    # 同一コマンドを別の節へ割ってしまう（実測、詳細は for_each_clause のコメント）。
+    put_re="(--method(=|[[:space:]]+)|-X[[:space:]]*)[Pp][Uu][Tt]${word_end}"
+    rest_found=0
+    for_each_clause _rest_clause_handler "$norm_target"
+
+    if [[ "$rest_found" -eq 1 ]]; then
       reason='PR の merge エンドポイントへ PUT を実行しようとしています（REST 経由の merge）。既定の merge 方針は手動承認です。承認の記録を確認してください。'
     elif grep -qF 'mergePullRequest' <<<"$norm_target" \
-      && grep -qE "${cmd_pos}gh[[:space:]]+api[[:space:]]+graphql${word_end}" <<<"$norm_target"; then
-      # graphql だけは行をまたぐ判定にする。クエリはヒアドキュメントや複数行の
-      # -f query=... で渡されることがあり、同じ行にあることを条件にすると外れる。
+      && cmd_pos_ask "$norm_target" "$extracted" "$word_end" gh api graphql; then
+      # mergePullRequest の有無はクォートを問わない部分一致でよい（クエリは
+      # ヒアドキュメントや複数行の -f query=... で渡されることがあり、行や節を
+      # またいでよいテキストのため）。gh api graphql がコマンド位置にあるかは
+      # cmd_pos_ask（コマンド位置の判定）に委ねる。
       reason='gh api graphql から mergePullRequest を実行しようとしています。既定の merge 方針は手動承認です。承認の記録を確認してください。'
     fi
   fi
@@ -3366,6 +6295,12 @@ build_acceptance_check_block() {
     hint="$(acceptance_install_hint "$lang")"
     out+="if $cond; then"$'\n'
     out+="  command -v $tool >/dev/null 2>&1 || { echo \"[acceptance] ($lang) $tool not found. $hint\" >&2; exit 1; }"$'\n'
+    # 依存の同期はテストの**手前**で見る。ずれたまま走らせると、テストが
+    # Cannot find package で全滅し、自分の変更と無関係な赤で原因が読めなくなる。
+    if [[ "$lang" == "node" ]]; then
+      out+="  echo \"[acceptance] (node) dependency sync\""$'\n'
+      out+="  bash scripts/check-deps-installed.sh"$'\n'
+    fi
     out+="  echo \"[acceptance] ($lang) $cmd\""$'\n'
     out+="  $cmd"$'\n'
     out+="  ran_any=1"$'\n'
@@ -3893,6 +6828,7 @@ apply_file_with_policy() {
   case "$PLAYBOOK_CONFLICT_POLICY" in
     skip)
       echo "skip (exists): $dest"
+      SKIPPED_DESTS="${SKIPPED_DESTS}${dest}"$'\n'
       ;;
     overwrite)
       cp "$src" "$dest"
@@ -3907,6 +6843,7 @@ apply_file_with_policy() {
         echo "write: $dest (overwrite)"
       else
         echo "skip (declined): $dest"
+        SKIPPED_DESTS="${SKIPPED_DESTS}${dest}"$'\n'
       fi
       ;;
   esac
@@ -3955,6 +6892,44 @@ resolve_playbook_source_or_die() {
   if [[ -z "$(find "$PLAYBOOK_DIR" -type f -name '*.md' -print -quit 2>/dev/null)" ]]; then
     echo "error: no rule files found in playbook source: ${PLAYBOOK_FROM:-<adjacent checkout>}" >&2
     exit 1
+  fi
+}
+
+# install_playbook_rules が .ai-playbook/** 以外に配置する相対パスの一覧
+# （規範を配置する構成でのみ意味を持つ）。dry-run の計画表示（下記メイン処理）と
+# write_origin_record の由来記録が、この一覧を共通の抽出元として使う。
+#
+# 以前は由来記録がこの一覧を持たず、template_rel_paths /
+# conditional_template_rel_paths（DCB 自身のテンプレート）しか記録していなかった。
+# この票の動機だったファイル（利用プロジェクトで見つかった「review-gate.yml が
+# 旧版」「second-opinion-review.sh に上流のバグ修正が未反映」）は、まさにこの
+# 一覧が挙げる規範経由の出力であり、記録に無いため doctor.sh が診断できなかった
+# （実測）。
+#
+# .ai-playbook/** 配下（規範ファイル本体・VERSION）は対象外のまま。あちらは
+# --playbook-conflict-policy と .ai-playbook/VERSION が別に担っており、二重に
+# 記録すると片方だけ更新されたときにどちらが正本か読めなくなる。
+playbook_installed_rel_paths() {
+  if should_install_playbook; then
+    printf '%s\n' \
+      '.github/project-ai-rules.md' \
+      'CLAUDE.md' \
+      '.github/copilot-instructions.md' \
+      'scripts/second-opinion-review.sh'
+    if has_with copilot-review; then
+      printf '%s\n' \
+        '.github/workflows/copilot-review.yml' \
+        '.github/workflows/review-gate.yml' \
+        'scripts/review-usable.sh' \
+        'scripts/check-review-usable.sh'
+    fi
+    if has_with claude; then
+      printf '%s\n' \
+        '.claude/skills/intake/SKILL.md' \
+        '.claude/skills/land/SKILL.md' \
+        '.claude/agents/explorer.md' \
+        '.claude/agents/implementer.md'
+    fi
   fi
 }
 
@@ -4014,11 +6989,29 @@ install_playbook_rules() {
   # ことを別の契機（PR 更新・定期実行）から確認する。要求側の契機は届かないことが
   # あり、届かなければ最終ゲートが黙って抜けるため、確認側だけを落として配置する
   # 選択肢は持たせない（規範 review-workflow.md「要求されたことを別の契機で確認する」）。
+  #
+  # 確認側は「要求されたか」に加え「読まれたか」も見る。判定は review-gate.yml へ
+  # 書き写さず、scripts/review-usable.sh に持たせてある。あわせて配置する
+  # scripts/check-review-usable.sh は、その判定を手元と CI の両方で機械的に確かめる
+  # ための表駆動の自己検査で、判定と同じ理由（GitHub 上でしか動かない .yml へ埋めると
+  # 受け入れ条件を確かめる手段が無くなる）で分けて置く。
   if has_with copilot-review; then
     tpl="$(require_playbook_template copilot-review.yml)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/workflows/copilot-review.yml"
     tpl="$(require_playbook_template review-gate.yml)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/workflows/review-gate.yml"
+
+    tpl="$(require_playbook_template review-usable.sh)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/review-usable.sh"
+    if [[ -f "$OUTPUT_DIR/scripts/review-usable.sh" ]]; then
+      chmod +x "$OUTPUT_DIR/scripts/review-usable.sh"
+    fi
+
+    tpl="$(require_playbook_template check-review-usable.sh)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/check-review-usable.sh"
+    if [[ -f "$OUTPUT_DIR/scripts/check-review-usable.sh" ]]; then
+      chmod +x "$OUTPUT_DIR/scripts/check-review-usable.sh"
+    fi
   fi
 
   # Claude Code 向け intake 起点スキル。--with-claude を選んだときだけ配置する
@@ -4028,6 +7021,13 @@ install_playbook_rules() {
   if has_with claude; then
     tpl="$(require_playbook_template claude-skill-intake.md)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/skills/intake/SKILL.md"
+
+    # land（PR 確認・マージ）起点スキル。intake と同じ経路（require_playbook_template
+    # → apply_file_with_policy）で配る。マージ直前の確認そのものは
+    # scripts/confirm-merge-hook.sh（conditional_template_rel_paths 側で配線済み）が
+    # 機構として保証し、このスキルは判定手順を持つだけである。
+    tpl="$(require_playbook_template claude-skill-land.md)"
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/skills/land/SKILL.md"
 
     # 委譲先の model / tools を frontmatter で固定するエージェント定義。同じく
     # --with-claude のときだけ置く。指示文で「haiku を使う」と書いても迂回できるが、
@@ -4072,6 +7072,7 @@ write_file() {
   out="$OUTPUT_DIR/$rel"
   if [[ -e "$out" && "$FORCE" != "true" ]]; then
     echo "skip (exists): $out"
+    SKIPPED_DESTS="${SKIPPED_DESTS}${out}"$'\n'
     return 0
   fi
   mkdir -p "$(dirname "$out")"
@@ -4088,6 +7089,110 @@ write_file() {
   chmod 644 "$out"
   [[ "$out" == *.sh ]] && chmod +x "$out"
   echo "write: $out"
+}
+
+# ── 生成物の由来の記録 ──────────────────────────────────────────────────────
+
+# ファイルの sha256 を計算する。sha256sum は GNU coreutils 前提で macOS 既定には無い
+# （shasum -a 256 を使う）。両方無い環境向けに openssl も試す。いずれも無ければ、
+# 生成そのものは終わっているのに由来だけ記録できない中途半端な状態を隠さず落とす。
+dcb_file_sha256() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$f" | awk '{print $NF}'
+  else
+    echo "error: sha256 を計算できるコマンドが見つかりません（sha256sum / shasum / openssl のいずれかが必要です）" >&2
+    exit 1
+  fi
+}
+
+# 選択された --with-* フラグを、重複を除いた昇順カンマ区切りへ整形する。
+# 順序を固定するのは、フラグの指定順が違っても同じ集合なら記録が一致するようにする
+# ため（受け入れ条件「同じ版・同じフラグで生成し直すと記録が一致する」）。
+with_flags_csv() {
+  local sorted line out="" w
+  sorted="$(for w in ${WITH_SET[@]+"${WITH_SET[@]}"}; do printf '%s\n' "$w"; done | sort -u)"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ -z "$out" ]]; then out="$line"; else out="$out,$line"; fi
+  done <<EOF
+$sorted
+EOF
+  printf '%s' "$out"
+}
+
+# .devcontainer/ORIGIN を生成する。DCB の版・使った --with-* フラグ・各生成物の
+# ハッシュを記録し、doctor.sh が生成後の乖離（生成時からの変更・上流の更新）を
+# 診断するために使う。.ai-playbook/VERSION と同じ、機械可読な
+# key=value 形式にする。
+#
+# ハッシュの対象は sorted_rels（DCB 自身のテンプレート）と
+# playbook_installed_rel_paths（規範経由の非 .ai-playbook 出力）の和集合。
+# .ai-playbook/** 本体と .ai-playbook/VERSION は対象外（あちらは
+# --playbook-conflict-policy と .ai-playbook/VERSION が別に担う。二重に記録すると
+# 片方だけ更新されたときにどちらが正本か読めなくなる）。
+#
+# 記録は「今回の実行で確実に生成された」ことが分かる場合にだけ作る。対象のうち
+# 1 つでも skip（既存を温存）されていれば、その現物の由来を今回の実行は保証
+# できない。それでも作ってしまうと、改造済み・古いファイルが「いま生成した」
+# 記録として残り、README の「記録の無い生成先への遡及はできない」という契約を
+# 実装が破る（実測: 記録だけ消して 1 ファイルを改造 → --force なしで再実行 →
+# 改造後の内容が「変化なし」として記録された）。
+#
+# --force は DCB 自身のテンプレート（write_file）にしか効かない。規範経由の出力
+# （install_playbook_rules）は独立した --playbook-conflict-policy に従うため、
+# 「--force が付いていれば必ず記録する」という設計にはできない（--force を付けても
+# 既定の --playbook-conflict-policy=skip のままなら、規範経由の出力はやはり
+# skip されうる）。そのため「対象のどれか 1 つでも skip されていたら作らない」を
+# 採用する（--force の有無を問わず一律に適用する）。作り直したい場合は、既存の
+# 生成物を直したときと同じく --force（および必要なら
+# --playbook-conflict-policy overwrite）で明示的に再生成すること。
+write_origin_record() {
+  local dest="$OUTPUT_DIR/$ORIGIN_REL_PATH" tmp rel h flags_csv origin_rels skipped_rel=""
+  if [[ -e "$dest" && "$FORCE" != "true" ]]; then
+    echo "skip (exists): $dest"
+    return 0
+  fi
+
+  origin_rels="$( { printf '%s\n' "$sorted_rels"; playbook_installed_rel_paths; } | sort -u)"
+
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    if printf '%s' "$SKIPPED_DESTS" | grep -Fxq -- "$OUTPUT_DIR/$rel"; then
+      skipped_rel="$rel"
+      break
+    fi
+  done <<EOF
+$origin_rels
+EOF
+  if [[ -n "$skipped_rel" ]]; then
+    echo "skip (origin not recorded): $dest — $skipped_rel already existed and was not (re)written this run; cannot vouch for its origin" >&2
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-origin.XXXXXX")"
+  flags_csv="$(with_flags_csv)"
+  {
+    echo "# devcontainer-bootstrap が記録した生成物の由来。"
+    echo "# doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。"
+    echo "version=$DCB_VERSION"
+    echo "flags=$flags_csv"
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      h="$(dcb_file_sha256 "$OUTPUT_DIR/$rel")"
+      echo "hash:$rel=$h"
+    done <<EOF
+$origin_rels
+EOF
+  } > "$tmp"
+  mv "$tmp" "$dest"
+  chmod 644 "$dest"
+  echo "write: $dest"
 }
 
 # ── メイン処理 ──────────────────────────────────────────────────────────────────────
@@ -4134,6 +7239,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
 $sorted_rels
 EOF
 
+  # 由来の記録は装備の選択によらず常に生成する（--with-playbook の有無にも依らない）。
+  echo "plan: $OUTPUT_DIR/$ORIGIN_REL_PATH"
+
   if [[ "$MANAGE_GITIGNORE" == "true" ]]; then
     echo "plan: $OUTPUT_DIR/.gitignore (managed section update)"
     if [[ -n "$GITIGNORE_TARGETS" ]]; then
@@ -4151,19 +7259,12 @@ EOF
       [[ "$rel" == "README.md" || "$rel" == "CHANGELOG.md" ]] && continue
       echo "plan: $OUTPUT_DIR/$PLAYBOOK_REL_ROOT/$rel"
     done < <(find "$PLAYBOOK_DIR" -type f -name '*.md' | sort)
-    echo "plan: $OUTPUT_DIR/.github/project-ai-rules.md"
-    echo "plan: $OUTPUT_DIR/CLAUDE.md"
-    echo "plan: $OUTPUT_DIR/.github/copilot-instructions.md"
-    echo "plan: $OUTPUT_DIR/scripts/second-opinion-review.sh"
-    if has_with copilot-review; then
-      echo "plan: $OUTPUT_DIR/.github/workflows/copilot-review.yml"
-      echo "plan: $OUTPUT_DIR/.github/workflows/review-gate.yml"
-    fi
-    if has_with claude; then
-      echo "plan: $OUTPUT_DIR/.claude/skills/intake/SKILL.md"
-      echo "plan: $OUTPUT_DIR/.claude/agents/explorer.md"
-      echo "plan: $OUTPUT_DIR/.claude/agents/implementer.md"
-    fi
+    # install_playbook_rules が .ai-playbook/** 以外に配置する一覧は
+    # playbook_installed_rel_paths が単一の抽出元（write_origin_record と共有）。
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      echo "plan: $OUTPUT_DIR/$rel"
+    done < <(playbook_installed_rel_paths)
     echo "plan: $OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION"
   fi
   exit 0
@@ -4183,5 +7284,11 @@ fi
 if should_install_playbook; then
   install_playbook_rules
 fi
+
+# 由来の記録は、DCB 自身のテンプレートと、規範経由で配置される非 .ai-playbook
+# 出力（install_playbook_rules）の両方が揃ってから書く。install_playbook_rules
+# より先に書くと、この票の動機だったファイル（review-gate.yml /
+# second-opinion-review.sh 等）が記録に載らない（実測）。
+write_origin_record
 
 echo "[bootstrap] completed"

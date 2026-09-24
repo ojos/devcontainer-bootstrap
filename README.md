@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.11.0`
+- `v0.12.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.11.0
+TAG=v0.12.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -62,12 +62,17 @@ trap 'rm -rf "$d"' EXIT
 curl -sSL "${BASE}/bootstrap.sh" -o "$d/bootstrap.sh"
 curl -sSL "${BASE}/SHA256SUMS"  -o "$d/SHA256SUMS"
 
-# --ignore-missing: SHA256SUMS は doctor.sh も対象にするため、bootstrap.sh だけを
-# 取得した場合は付けないと「doctor.sh が無い」で失敗する。
+# sha256sum は GNU coreutils のコマンドで、macOS には無い。shasum へ分岐する。
+#
+# SHA256SUMS は doctor.sh も対象にするため、取得した行だけを抜き出して検証する。
+# --ignore-missing は実装と版によって有無が違うので使わない。一致する行が 1 件も
+# 無ければ、どちらの実装も「整形された行が無い」として非 0 で終わるため、検証が
+# 成立しないまま通ることはない。
 #
 # 検証と実行は && で連結する。この手順は対話シェルへ貼って使うため set -e が効かず、
 # 行を分けると検証に失敗しても次の bash が走る。
-( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
+( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
   --languages node,go --with-aws --with-claude
 ```
@@ -75,17 +80,24 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 一時ディレクトリから実行するため、次の 2 点に注意してください。
 
 - **`--output-dir` を必ず明示します。** 省略時の既定は `$PWD/<project-name>`、つまり一時ディレクトリの中になり、生成物が `trap` で消えます。
-- **`sha256sum --ignore-missing` は GNU coreutils 8.25 以降が必要です。** それ以前の環境や BSD 系の `shasum` を使う場合は、`doctor.sh` も取得したうえで `--ignore-missing` を外してください。
+- **`sha256sum` は GNU coreutils のコマンドで、macOS には入っていません。** 上の手順は `command -v` で判定して `shasum -a 256` へ分岐します。`--ignore-missing` は実装と版によって有無が違うため使わず、`SHA256SUMS` から**取得したファイルの行だけを抜き出して**検証します。
 
-検証を挟まない `curl | bash` 形式は採りません。`SHA256SUMS` は改ざんと取得失敗の両方を検出する唯一の手段で、省くと配布物の同一性を確認する経路が無くなります。
+検証を挟まない `curl | bash` 形式は採りません。`SHA256SUMS` は**取得の破損・途中切断**と、**公開物どうしの食い違い**を検出します。省くと、手元に落ちたものが公開されたものと同じかを確かめる経路が無くなります。
+
+> **この手順が守る範囲。** 上の検証で分かるのは「公開されている資産を、壊れずに取得できたか」までです。
+>
+> `SHA256SUMS` はスクリプトと同じリリースから同じ経路で取得します。**リリースを書き換えられる立場なら、スクリプトと `SHA256SUMS` の両方を同時に差し替えられます。**
+>
+> 現在のリリースは署名されていません。**この手順は、リリース自体の改ざんには対抗しません。** 取得元のタグを固定し、公開リポジトリのリリース履歴を信頼できる範囲で使ってください。
 
 AI 共通ルールも配置する場合は、ルールの取得元を指定します。一時ディレクトリから実行すると隣接チェックアウトが存在しないため、`--playbook-version` または `--playbook-from` が必要です（[AI 共通ルールの配置](#ai-共通ルールの配置)）。
 
 ```bash
 # 上の手順の最後（検証と実行）を、規範の取得元を足した形へ置き換える。
-( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
+( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.1.4
+  --languages node,go --with-claude --playbook-version v0.4.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -98,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.11.0
+TAG=v0.12.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -106,11 +118,12 @@ trap 'rm -rf "$d"' EXIT
 curl -sSL "${BASE}/doctor.sh"  -o "$d/doctor.sh"
 curl -sSL "${BASE}/SHA256SUMS" -o "$d/SHA256SUMS"
 
-( cd "$d" && sha256sum --ignore-missing -c SHA256SUMS ) &&
+if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
+( cd "$d" && grep ' doctor.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/doctor.sh" --target-dir ./myapp
 ```
 
-診断のたびに取得すれば、生成先のリポジトリへ `doctor.sh` を混入させずに済みます。手元へ置いて繰り返し使う場合は、`bootstrap.sh` と `doctor.sh` を同じディレクトリへ取得し、`--ignore-missing` を付けずに `sha256sum -c SHA256SUMS` で両方を検証してください。
+診断のたびに取得すれば、生成先のリポジトリへ `doctor.sh` を混入させずに済みます。手元へ置いて繰り返し使う場合は、`bootstrap.sh` と `doctor.sh` を同じディレクトリへ取得し、行を抜き出さずに `$sha256c -c SHA256SUMS` で両方を検証してください。
 
 ### リリース資産
 
@@ -120,30 +133,63 @@ bash "$d/doctor.sh" --target-dir ./myapp
 |---|---|
 | `bootstrap.sh` | 生成コマンド本体。単体で動作します |
 | `doctor.sh` | 生成後の自己診断コマンド。単体で動作します |
-| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS` で改ざん・取得失敗を検出します（片方だけ取得した場合は `--ignore-missing` を付けます） |
+| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS`（macOS では `shasum -a 256 -c SHA256SUMS`）で**取得の破損**を検出します（守る範囲は [公開リリースからの利用](#公開リリースからの利用) の但し書きを参照）。片方だけ取得した場合は、その行を `grep` で抜き出して `-c -` へ渡します |
 | `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md`）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合に使います |
 | `RELEASE-MANIFEST.json` | パッケージ名・版・資産一覧・チェックサムを機械可読にまとめたもの。`assets` がそのリリースに添付された資産の一覧、`checksums` が `PACKAGE_ARCHIVE.tar.gz` と `SHA256SUMS` のハッシュです |
 
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.11.0
+TAG=v0.12.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
 curl -sSL "${BASE}/SHA256SUMS" -o SHA256SUMS
 
+# sha256sum は GNU coreutils のコマンドで、macOS には無い。shasum へ分岐する。
+if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
+
 # 1. マニフェストが記録したハッシュと実物を突き合わせる
-jq -r '.checksums | to_entries[] | "\(.value)  \(.key)"' RELEASE-MANIFEST.json | sha256sum -c -
+jq -r '.checksums | to_entries[] | "\(.value)  \(.key)"' RELEASE-MANIFEST.json | $sha256c -c -
 
 # 2. マニフェストが検証した SHA256SUMS で、実行するスクリプトを検証する
 curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
 curl -sSL "${BASE}/doctor.sh" -o doctor.sh
-sha256sum -c SHA256SUMS
+$sha256c -c SHA256SUMS
 
 # アーカイブから中身を取り出す場合
 tar -xzf PACKAGE_ARCHIVE.tar.gz
 ```
+
+### 任意: 署名の検証（artifact attestation）
+
+**この手順は任意です。** 上の 2 段検証は `curl` とチェックサム実装（`sha256sum` か `shasum -a 256`）だけで閉じていますが、こちらは [GitHub CLI](https://cli.github.com/) が要ります。
+
+リリースの `SHA256SUMS` には、GitHub Actions が発行した **artifact attestation**（SLSA provenance）が付いています。**そこから先は上のハッシュチェーンが繋ぐ**ので、検証するのは `SHA256SUMS` 1 つで足ります。
+
+```bash
+# 取得元の owner を BASE から取り出す（固有名を手で書かない）
+OWNER="$(printf '%s' "$BASE" | sed -n 's#^https://github.com/\([^/]*\)/.*#\1#p')"
+
+if gh attestation verify SHA256SUMS --owner "$OWNER"; then
+  echo "attestation: ok"
+else
+  echo "attestation: 検証に失敗しました" >&2
+  exit 1
+fi
+```
+
+**成功しても何も表示されません。** 端末に繋がっていない環境では標準出力も標準エラーも空になります。**判定は終了コードで行ってください**（0 = 成功、非 0 = 失敗）。
+
+**終了コードを表示するだけの書き方（`gh attestation verify …; echo "exit=$?"`）にしないでください。** そのブロック全体の終了コードは `echo` のものになり、**検証の失敗が成功として扱われます**（実測: `( false; echo "exit=$?" )` は 0 を返す）。上のように分岐で受けてください。
+
+**`--owner` に渡すのは、配布リポジトリの owner です。** attestation を発行しているのは同じ owner の別リポジトリ（開発リポジトリ）ですが、`--owner` はその owner に属する attestation をまとめて引くため、これで解決します。**発行元が別の owner へ移った場合、この手順は通らなくなります。**
+
+> **この検証が守る範囲。** 分かるのは「その `SHA256SUMS` が、この owner の GitHub Actions のワークフローによって作られた」ことまでです。
+>
+> **ワークフローを実行できる立場なら、正規の attestation を作れます。** つまりリリースを書き換えられる攻撃者が同時にリポジトリへの書き込み権限を持つ場合、この検証は通ってしまいます。**信頼の起点が「リリースの内容」から「リポジトリへの書き込みの完全性」へ移るだけで、脅威が消えるわけではありません。**
+>
+> それでも、リリース資産だけを差し替える経路（たとえばリリースへの書き込み権限だけを得た場合）には対抗できます。
 
 > 同じタグの資産は差し替えません。`PACKAGE_ARCHIVE.tar.gz` は tar がタイムスタンプを埋めるため内容が同じでもハッシュが変わり、上書きは常に別物への差し替えになるためです。タグを固定すれば内容も固定されます。
 
@@ -178,7 +224,7 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 | `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
 | `--with-antigravity` | Antigravity CLI（`agy`）+ `~/.gemini` 永続化 + テレメトリ無効化。**VS Code 拡張は入りません**。**OAuth のみ**で初回に対話ログインが要ります（下記） |
 | `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
-| `--with-copilot-review` | リモート最終ゲートのワークフロー 2 本（`.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`）。**ローカルの装備は一切入りません。** 規範の配置が前提（下記） |
+| `--with-copilot-review` | リモート最終ゲートのワークフロー 2 本（`.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`）と、確認側が判定に使うスクリプト 2 本（`scripts/review-usable.sh` / `scripts/check-review-usable.sh`）。**ローカルの装備は一切入りません。** 規範の配置が前提（下記） |
 
 - **ローカル装備とリモート機構は別フラグ**: `--with-copilot` が配線するのは手元の開発ツール（CLI・拡張・永続 volume）だけで、リモートのレビュー機構は `--with-copilot-review` が担います。効く場所が違うものを 1 つのフラグで束ねると、「リモートのレビューゲートだけ欲しい」構成を機構で表現できないためです（[リモートレビュー分離への移行](#リモートレビュー分離への移行)）。
 - **`--with-copilot-review` は規範の配置が前提**: 配置するワークフローの雛形は規範パッケージが持つため、規範を配置しない構成では供給元がありません。`--with-playbook` / `--playbook-version` / `--playbook-from` のいずれも指定せずに（または `--without-playbook` と併せて）指定すると、**ファイルを 1 つも書かずに**エラー終了します。
@@ -239,6 +285,7 @@ tar -xzf PACKAGE_ARCHIVE.tar.gz
 | `CLAUDE.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線） |
 | `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外） |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
+| `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
 | `.claude/agents/explorer.md` / `.claude/agents/implementer.md` | Claude Code 向け委譲先エージェント定義（`--with-claude` 指定時のみ）。`model` と `tools` を frontmatter で固定する。判定の導線は規範側（`shared-ai-rules.md` の「実装委譲パターン」）が持ち、ここでは再定義しない |
 
 取得元は次の順で解決します。
@@ -273,13 +320,15 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 | `scripts/acceptance.sh` | このプロジェクトの受け入れ条件（プロジェクトが所有・編集）。選択言語のうち、ルート直下にマニフェストが存在する対象だけを慣習的テストで検証する |
 | `scripts/verify.sh` | `acceptance.sh` を非対話実行し、一意な通過信号（`VERIFY_PASS` / 終了コード 0）を返す接地信号。手前で `check-no-secrets.sh` を実行する |
 | `scripts/check-no-secrets.sh` | 機密混入の検知ゲート（`SECRETS_PASS` / 終了コード 0）。判定の正本で、`verify.sh` と CI が共用する。下記「[機密混入検査](#機密混入検査)」参照 |
-| `scripts/loop-gate.sh` | push / PR 前のローカル事前ゲート。`verify.sh` と、任意の第二意見レビューを直列で通す単一入口（`GATE_PASS` / 終了コード 0） |
+| `scripts/loop-gate.sh` | push / PR 前のローカル事前ゲート。commit identity の検証・`verify.sh`・任意の第二意見レビューを直列で通す単一入口（`GATE_PASS` / 終了コード 0） |
 | `scripts/acceptance-remote.sh` | **外部層**の受け入れ条件（プロジェクトが所有・編集）。`--with-aws` / `--with-gcp` を選んだときだけ配置する骨格のみの雛形。下記「受け入れ条件の二層」参照 |
 
 - `acceptance.sh` は生成時、選択言語ごとに**ルート直下のマニフェストの実在を確認してから**慣習的コマンド（`node`/`package.json`→`npm test`、`go`/`go.mod`→`go test ./...`、`python`/`pyproject.toml`・`requirements.txt`→`python -m pytest`、`php`/`composer.json`→`composer test`、`rust`/`Cargo.toml`→`cargo test`、`ruby`/`Gemfile`→`bundle exec rake`）を実行します。マニフェストが無い言語は理由を出して**スキップ**し（失敗させない）、マニフェストはあるがツールが無い場合は導入手順を添えて**失敗**させます（スキップと混同しない）。1 つも検証を実行できなければ「受け入れ条件が未定義」として**非 0 で終了**します（全スキップで誤って緑になる事故を防ぐ）。スクリプト位置からルートを解決するため、起動時の作業ディレクトリに依存しません。プロジェクトの実態に合わせて編集してください。受け入れ条件が検証可能であるほど、反復が収束しやすくなります。
   - monorepo など、各言語がルート直下ではなくサブディレクトリ（例 `apps/*`）に配置される構成では、生成直後は対象が見つからず「未定義」で失敗します。これは**意図した既定**であり、実配置のマニフェストを見るよう `acceptance.sh` を編集して受け入れ条件を確定させてください。
 - `verify.sh` の受け入れ定義は `VERIFY_ACCEPTANCE` 環境変数で差し替えできます（既定は `scripts/acceptance.sh`）。層を増やすときも同じランナーを使い、受け入れ定義だけを差し替えます（下記「受け入れ条件の二層」）。
 - `verify.sh` は受け入れ条件の**手前**で `scripts/check-no-secrets.sh` を実行します。`acceptance.sh` 側へ置かないのは、あちらがプロジェクトの所有物で受け入れ条件を書き足すたびに触られ、規範由来の検査が消える経路ができるためです。`check-no-secrets.sh` が不在なら `VERIFY_FAIL` で止まります（検査が成立していないことを合格にしないため）。**この検査は git を前提にします**（下記「[機密混入検査](#機密混入検査)」参照）。
+- `loop-gate.sh` は push / PR 前に **3 段を直列**で通します。**1. commit identity の検証**（`scripts/verify-commit-identity.sh`）→ **2. verify**（受け入れ検証。手前で機密混入検査を含む）→ **3. 任意の第二意見レビュー**の順です。identity を最初に置くのは、判定が最も安く（実測数 ms）、許可外の identity が混じったコミットを他の段の結果を待たずに検知するためです（許可外 identity の検知が CI＝push 後まで遅れていた穴を塞ぐ。詳細は下記「Git identity ガード」参照）。判定ロジックは `loop-gate.sh` へ書き写さず `verify-commit-identity.sh` 側に置きます（判定を二重管理しない）。
+  - **移行時の注意:** `verify-commit-identity.sh` は fail-closed です。環境変数 `ALLOWED_AUTHOR_EMAILS` も `.env` の `GIT_IDENTITY_EMAIL` も設定していないプロジェクトでは、`loop-gate.sh` を再生成した時点で**ローカルゲートが緑から赤に変わります**。これは検査が成立しない状態を合格にしない、意図した挙動です。`bash scripts/setup-git-identity.sh` で `.env` の `GIT_IDENTITY_EMAIL` を適用するか、`ALLOWED_AUTHOR_EMAILS` を設定してください（下記「[利用側の設定手順（許可 author email）](#利用側の設定手順許可-author-email)」参照）。
 - `loop-gate.sh` の第二意見は、`scripts/second-opinion-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
 - 第二意見へ渡す**差分の範囲**は次の順で決まります。ステージ済み差分があるときはレビュー実行体の既定に委ね（範囲を渡しません）、空のときだけ commit 済み範囲へ切り替えます。切り替え先の既定は `@{upstream}..HEAD` で、下のいずれかに当たる場合は**既定ブランチとの分岐点（merge-base）を起点**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決し、汚染の判定と分岐点の算出は**同じ枝**を見ます（別々に決めると、汚染ありと判定した枝と分岐点を取った枝が別物になりうるため）。**上流以外を起点に採った場合は、その理由を 1 行出力します**（黙って範囲を変えると、なぜその差分が対象なのかを読み手が追えないため）。
   - **上流との差分が空**（push 済みで上流 == HEAD）。ここで空のまま第二意見を呼ぶと、一度も差分を見ないまま通過する偽の緑になります。
@@ -636,8 +685,16 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
+- `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。単体で `bash scripts/check-control-chars.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する）
+- `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
+- `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
+- `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に使います。下記「生成物の由来の記録」参照）
 - `.gitignore` の managed セクション（言語構成に応じて自動更新。`--no-gitignore` で無効化）
+
+`--languages` に `node` を含めた場合は、次を出力します。
+
+- `scripts/check-deps-installed.sh`（`node_modules` が `package-lock.json` と一致しているかの照合。生成される `scripts/acceptance.sh` が、`npm test` の**手前**で呼びます。ずれたまま走らせるとテストが `Cannot find package` で全滅し、**自分の変更と無関係な赤**になって原因が読み取れなくなるためです。**直しません。落とすだけです**——判定と修復を混ぜると、何が起きたのかが見えないまま結果だけが変わります。対処は `npm ci` です。`package.json` が無い場合は `DEPS_SKIP` を出して飛ばし、**通過（`DEPS_PASS`）とは別の信号にします**。npm 専用で、pnpm / yarn / bun の記録形式は見ません）
 
 `--with-claude` を選んだ場合は、規範の配置とは独立に次を出力します（下記「[マージ確認フック](#マージ確認フックclaude-code)」参照）。
 
@@ -652,8 +709,9 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.github/project-ai-rules.md`
 - `CLAUDE.md` / `.github/copilot-instructions.md`
 - `scripts/second-opinion-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
-- `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`（`--with-copilot-review` を併せて選択した場合のみ。2 本で 1 組。下記参照）
+- `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` / `scripts/review-usable.sh` / `scripts/check-review-usable.sh`（`--with-copilot-review` を併せて選択した場合のみ。4 本で 1 組。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
+- `.claude/skills/land/SKILL.md`（`--with-claude` を併せて指定した場合のみ。PR 確認・マージ起点スキル）
 - `.claude/agents/explorer.md` / `.claude/agents/implementer.md`（`--with-claude` を併せて指定した場合のみ。委譲先エージェント定義）
 
 `--with-aws` / `--with-gcp` のいずれかを選択した場合は、加えて次を出力します（規範の配置は前提としません）。
@@ -661,6 +719,33 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/acceptance-remote.sh`（**外部層**の受け入れ条件の雛形。宣言と実際の外部状態の一致を検証する骨格のみ。上記「受け入れ条件の二層」参照）
 
 なお bootstrap.sh は生成先の README.md を読み書きしません。セットアップ手順を README へ追記する処理は持たないため、生成後の README への反映は利用者側の作業です。
+
+#### 生成物の由来の記録（`.devcontainer/ORIGIN`）
+
+装備の選択によらず常に、`.devcontainer/ORIGIN` へ生成物の由来を記録します。目的は、生成先で**意図的に改造した**箇所と、**単に古い写し**（上流が直したのに追随できていない箇所）を区別できるようにすることです。`.ai-playbook/VERSION` と同じ「取り込み側が生成する機械可読な記録」の流儀に揃えています。
+
+```
+# devcontainer-bootstrap が記録した生成物の由来。
+# doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
+version=v0.11.0
+flags=aws,claude
+hash:.devcontainer/compose.yaml=<sha256>
+hash:.devcontainer/devcontainer.json=<sha256>
+hash:.env.example=<sha256>
+...
+```
+
+| キー | 意味 |
+|---|---|
+| `version` | 生成に使った DCB 自身の版 |
+| `flags` | 指定した `--with-*` フラグの昇順カンマ区切り一覧（指定順によらず同じ集合なら同じ値）。フラグを含めるのは、「`--with-aws` を付け忘れた」と「意図的に外した」を区別するためです |
+| `hash:<相対パス>` | その生成物の sha256（`sha256sum` が無い環境では `shasum -a 256`、それも無ければ `openssl dgst -sha256` を使います） |
+
+- ハッシュの対象は、この実行で生成した DCB 自身のテンプレート一覧（常時生成ぶん・`--with-*` 条件付きぶん）に限ります。`.ai-playbook/**` は対象外です（あちらは `--playbook-conflict-policy` と `.ai-playbook/VERSION` が別に担っており、二重に記録すると片方だけ更新されたときにどちらが正本か読めなくなります）。
+- 衝突ポリシーは他の生成物（`.devcontainer/` / `scripts/` のテンプレート）と同じです。**`--force` を付けない再実行では、既存の記録をそのまま温存します。** `--force` を付けた再実行でのみ書き直します（[再実行したときの挙動](#再実行したときの挙動)）。生成物を意図的に直して `--force` で作り直したときは記録も更新され、それ自体が「直した」証跡になります。
+- **既知の限界**: `.devcontainer/ORIGIN` 自体もこの衝突ポリシーに従うため、既に記録がある生成先へ `--force` を付けずに `--with-*` を追加で指定して再実行すると、新しく増えた生成物のハッシュは記録に追加されません（記録済みファイルの一覧だけが対象になるため）。記録に無いファイルを doctor.sh が誤って「変化した」と報告することはありませんが、その代わりに**診断の対象にも入りません**。取りこぼしなく記録したい場合は、既存の生成物を直した場合と同様に `--force` で作り直してください。
+
+由来をどう診断するかは「[Doctor 自己診断](#doctor-自己診断)」を参照してください。
 
 #### マージ確認フック（Claude Code）
 
@@ -677,11 +762,27 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 | 検査対象 | 条件 |
 |---|---|
-| `gh pr merge` | **コマンド位置**にあるもの（行頭、または `;` `&&` `\|\|` `\|` `(` の直後。先行する環境変数代入は読み飛ばします） |
-| `pulls/<n>/merge` | **かつ `--method PUT` / `-X PUT` を同じ行で指定しているもの。** `--method=PUT`（= 連結）・`-XPUT`（連結形）・`--method put`（小文字）も拾います。GET はマージ済みか調べるだけで状態を変えないため対象外です |
+| `gh pr merge` | **コマンド位置**にあるもの |
+| `pulls/<n>/merge` | **かつ `--method PUT` / `-X PUT` を同じコマンド節で指定しているもの。** `--method=PUT`（= 連結）・`-XPUT`（連結形）・`--method put`（小文字）も拾います。GET はマージ済みか調べるだけで状態を変えないため対象外です。「同じコマンド節」は引用符を認識したうえで `;` `&` `\|` `(` `)` で区切った単位です。`echo repos/o/r/pulls/1/merge; gh api --method PUT repos/o/r/issues/1/labels` のように無関係な 2 コマンドが 1 行に連結されただけの形とは区別し、逆に `gh api 'repos/o/r/pulls/1/merge?a=1&b=2' -X PUT` のように URL のクエリ文字列や引用符の中に `;` `&` があっても、そこで分断はしません |
 | `mergePullRequest` | **かつ `gh api graphql` から呼ばれているもの** |
 
 単純な部分一致にしていないのは、`grep -rn 'mergePullRequest' .` や `git log -S 'gh pr merge'` まで確認を求めると、**内容を読まずに承認する習慣ができて機構が形だけになる**ためです。
+
+**「コマンド位置」の判定は、クォートを認識するコマンド境界解析 1 つに集約しています。** `;` `&` `\|` `(` `)` と改行を区切り文字として、引用符（`'...'` と `"..."`、二重引用符内のエスケープ）を認識しながら文字単位で単純コマンドへ分解し、期待する語列（`gh pr merge` 等）と完全一致するかを見ます。変数展開・コマンド置換・here-document・サブシェルの深さは解析しません。bash の文法を完全に実装すると雛形として重くなりすぎるため、範囲を絞っています。
+
+**シェルの制御語（`if` / `elif` / `while` / `until` / `then` / `do` / `else`、否定の `!`）と環境変数代入（`FOO=bar`）の直後もコマンド位置として扱います。** 区切り文字の直後という条件だけでは、`if gh pr merge 1; then :; fi` のように制御語を 1 つ前置くだけで素通りしていました（実測。`else` も同様に漏れていました）。
+
+**制御語と環境変数代入は、クォートの扱いが違うため判定条件も分けています。** 制御語の判定は、その語がクォートやバックスラッシュエスケープを 1 文字も含まないときだけ行います。`'if' gh pr merge 1` は「`if` という名前のコマンドを実行する入力」であり `gh` は実行されないため、クォートを剥がした語で予約語判定をすると誤って確認を求めてしまいます（実測）。**環境変数代入の判定は逆に、`name=` の部分にクォートが挟まっていないことだけを見て、値側のクォートは問いません。** `VAR="foo" gh pr merge 1` や `KEY='bar' gh pr merge 1` は値側だけがクォートされた代入で、実際に `gh` がコマンド位置に来ます（実測: `env` で代入として効くことを確認）。制御語と同じ「語にクォートが 1 文字でもあれば読み飛ばさない」を代入にも適用すると、この 2 例を取りこぼして素通りしてしまいます（実測。解析をクォート認識の走査 1 つへ一本化した際に、クォートを見ない `grep` 側のフォールバックが失われたことで露見した退行です）。逆に `"VAR"=foo gh pr merge 1` のように `name` 側にクォートが挟まっている形は、bash 上そもそも代入にならず `"VAR"=foo` という名前のコマンドを探しにいくため（実測）、代入としては読み飛ばしません。
+
+**かつては、この判定を「制御語などを前置きとして列挙した、クォートを認識しない正規表現」と「クォート認識の解析」の 2 つの独立した経路の OR で行っていました。** OR で結ぶ限り、クォートを見ない側だけが起こす誤検知は構造として避けられませんでした。`'if' gh pr merge 1` を予約語 `if` の直後と誤認し、`echo "x; gh pr merge 1"`（二重引用符の中の `;`）を区切り文字と誤認して、どちらも確認を求めていました（実測）。走査をクォート認識の解析 1 つへ集約し、この種の食い違いを構造として作れないようにしています。制御語の列挙自体は消しておらず、解析の中（節の語から制御語・代入の繰り返しを読み飛ばす処理）が唯一の置き場所です。
+
+**節の切り出し（コマンド節・上記の単純コマンド分解）は 1 つの走査に集約しています。** かつては REST 判定側の節分割だけを別に実装しており、そちらはクォートを見ずに `;` `&` `\|` を機械的に区切りへ変えていました。結果、引用符の中身や URL のクエリ文字列に現れる `;` `&` `\|` まで区切りとして扱ってしまい、PUT の指定と `merge` エンドポイントが別々の節へ分断されて検知できなくなっていました（実測）。**誤検知を直すために入れた処理そのものが新しい迂回を作っていた形です。** 修正では、節を切り出す走査そのものを 1 つの関数へ集約し、語の完全一致判定と PUT / エンドポイントの正規表現判定の両方がそこから同じ節を受け取るようにしています。
+
+**`{`（グループコマンド）は、その節が「環境変数代入と制御語だけ」で説明できる（＝実コマンドの語をまだ 1 つも集めていない）ときだけ、グループコマンドの開始として読み飛ばします。** `echo hi { gh pr merge 1`（`{` 以降も直前のコマンドの引数でしかなく、実際には実行されない）のような無害な文字列までは拾いません（実測）。かつては「節でまだ語を 1 つも集めていない」だけを条件にしていたため、`if { gh pr merge 1; }; then :; fi` のように制御語を 1 つ前置くだけで `{` が語として残り、解析が `gh pr merge` へ到達できずに素通りしていました（実測）。`case` / `esac` / `fi` / `done` / `}` は追加していません。これらは必ず直後に区切り文字（`;` か改行）を要求する構文で、既存の区切り文字判定がそのまま効くためです。`in`（`for` / `case` で使う語）も追加していません。`for x in gh pr merge 1; do ...; done` の `gh pr merge 1` は `for` が変数へ順に代入する値であって実行されるコマンドではなく、この節の先頭の語は `for` のままなので `gh pr merge` との一致は生じません（実測）。
+
+**解析は bash の文法を全部実装したものではなく部分実装であり、取りこぼしえます。** 「迂回できない」とは書きません。JSON から `tool_input.command` を取り出せなかった場合（ペイロード全体を検査対象にしているとき）は、この解析を使いません。ペイロード全体はシェルの行ではなく JSON テキストであり、位置を解析する土台が無いためです。この場合は位置を問わない語の並び照合へ落とし、確認を増やす側へ振ります。
+
+**この解析（`for_each_clause` 以下）は、bash の字句解析（トークナイザ）を部分的に再現したものです。** ここまでに、少なくとも次の境界事例が、いずれも実際にこの解析へ入力してから見つかっています。（1）コマンド位置の判定を列挙とクォート認識の解析の二重化にしていたことに起因する誤検知、（2）環境変数代入の判定に予約語と同じクォート条件を適用していたことによる迂回、（3）空クォート（`''` / `""`）を語として数え損ねていたことによる迂回・誤検知。いずれも「新しく入れた処理が別の経路で穴を作っていないか」という観点の変異テストをかけて初めて見つかりました。**bash の字句規則を部分的に再実装する以上、境界事例は今後も見つかりうるという意味です。「境界事例を網羅した」とは書きません。** 見つかった形はそのつど実測し、塞いで、テストへ固定する運用を前提にしています。
 
 **`.claude/settings.json` の `permissions.ask` では代替できません。** `allow` / `ask` / `deny` はコマンド名と引数文字列の**前方一致**で判定するため、次を表現できません（実測値は無害な `echo` で確認しています）。
 
@@ -696,23 +797,41 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 > **`jq` が無くても検査を飛ばしません。** コマンドを取り出せない場合（`jq` 不在・壊れた JSON・将来のペイロード変更）はペイロード全体を検査対象にします。「取れなければ通す」にすると検査が黙って無効化され、**このフックが防ごうとしている「気づかないまま実行できる」状態そのものを再現する**ためです。出力側も同じ理由で `printf` のフォールバックを持ちます。
 
+**`gh pr merge` をコマンド位置で検知したときは、squash マージの本文になるテキストに CI 抑止の綴りが無いかも見て、見つかれば理由へ添えます。** deny にはしません（上と同じく「黙ってマージしない」ことだけを保証する guardrail です）。ある事例では、この綴りは指示として書かれたのではなく「この検査がコミットメッセージしか見ていないこと」を説明する文章の中にありました。GitHub は見出しでなく本文のどこにあっても従うため、検知は行の先頭や見出しの形には絞りません。
+
+squash 本文の組み立て方（PR の説明文だけを使うか、各コミットのメッセージを連ねるか）はリポジトリの設定（`squash_merge_commit_message`）によります。配布物なので特定の設定を前提にせず、**設定を読んで検査対象を切り替えることもしません。** 判定を 2 経路に分けるほど、どちらかの経路だけが古くなる余地が増えるためです。代わりに、**設定によらず両方（PR 本文と全コミットメッセージ）を常に見ます。** 綴りの一覧は、squash 前に人手でも同じ判定を行う `land` スキルの対応する手順と同じものを使い、このフックだけの独自の一覧は持ちません（一致は配布物側のテストで検査します）。
+
+**`--body` / `--subject` に明示された文字列も見ます。** これらは最終的な squash 本文を CLI 側で直接差し替えるものであり、リモートの PR 本文が綺麗でも、渡された文面に綴りがあれば CI は飛びます。squash 前の人手の回復手順（`land` スキル）は「該当行が出たら、その指示を除いた本文をファイルに書き、`--body-file` で差し替えてマージする」と定めており、`--body` 系を見ないと**この回復手順そのものが検査をすり抜ける経路になります。** `--body` / `--subject` の値を見た上でも、リモートの PR 本文・コミットメッセージは別途見ます（`--body` 等がどこまで上書きするかを完全には前提にしないため。安全側にしか働きません）。
+
+> **`--body-file` の中身は読みません。** このフックはコマンドの実行前に走るため、同じコマンド内で（`echo ... > file && gh pr merge ... --body-file file` のように）これから書かれるファイルを正しく読める保証が無く、cwd の想定もフック側とコマンド側で揃うとは限りません。読まないと決めた以上、その対象は**「綴りが無い」とは扱わず、確認できていない（`unavailable`）扱いにします。**
+
+**1 つのコマンド文字列に `gh pr merge` が複数回現れる場合（例: `gh pr merge 1 && gh pr merge 2`）は、全対象を集約して見ます。** 片方だけを見て判定を確定させると、確認 1 回で残りの対象が未検査のまま実行されてしまうためです。複数の対象・複数の情報源（`--body` / `--subject` / リモートの本文・コミット）を見た結果は、`found`（綴りあり）＞ `unavailable`（確認できていない）＞ `clean`（綴りなし）の優先順位で 1 つに集約します。
+
+> **判定できなかったときは「綴りが無い」と扱いません。** `gh` コマンドが無い・PR 情報を取得できない・コマンド文字列を取り出せていない（`jq` 不在や壊れた JSON でペイロード全体を検査対象にしているとき）・`--body-file` の中身を読んでいない、のいずれでも、確認できていないことをそのまま理由へ書きます。読めなかったことを合格にはしない、という上の「`jq` が無くても検査を飛ばしません」と同じ方針です。
+
+> **`gh pr merge` 以外（REST の `PUT` / `gh api graphql` の `mergePullRequest`）には、この検査を広げていません。** REST 経由の URL は変数展開を含む形が普通にあり（上の「既知の限界」参照）、PR 番号やリポジトリをそこから安全に取り出せる保証が無いためです。誤って別の PR の本文を見にいくほうが、確認しないより悪いと判断しました。これらの経路でも既存の `ask` 自体は変わらず働きます。
+
 > **他の実行環境へ一般化できるか**: 現時点ではできません。`.claude/settings.json` の `PreToolUse` は Claude Code 固有の機構で、`--with-gemini` / `--with-copilot` に同等の「ツール実行前に判定を差し込む」配線がありません。フック本体（`scripts/confirm-merge-hook.sh`）は標準入力の JSON を読んで標準出力へ判定を返すだけなので、同種の機構を持つ実行環境が現れたら**配線だけを足せば再利用できます。** 判定ロジックを実行環境ごとに複製しない形にしてあります。
 
 #### リモート最終ゲート（Copilot）ワークフロー
-規範を配置し、かつ `--with-copilot-review` を選択した場合のみ、**要求側と確認側の 2 本**を配置します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。
+規範を配置し、かつ `--with-copilot-review` を選択した場合のみ、**要求側・確認側・確認側が使う判定スクリプト 2 本**を配置します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。
 
 このフラグはリモート側だけを担い、ローカルの装備（CLI・拡張・`~/.copilot` の永続化）は入れません。ローカルの装備が必要なら `--with-copilot` を併せて指定します。逆に `--with-copilot` だけを指定した構成では、これらのワークフローは配置されません。
 
 | ファイル | 役割 |
 |---|---|
 | `.github/workflows/copilot-review.yml` | **要求側。** PR 作成時（`pull_request: types: [opened]`）に一度だけ Copilot へコードレビューを要求します。`synchronize`（push 更新）では再要求しないため「1 回だけ」を機構で保証します |
-| `.github/workflows/review-gate.yml` | **確認側。** 要求されたことを別の契機から確認します。要求はしません |
+| `.github/workflows/review-gate.yml` | **確認側。** 要求されたこと、および要求・投稿されたレビューが実際に読まれたことを、別の契機から確認します。要求はしません |
+| `scripts/review-usable.sh` | 確認側が使う判定本体。「投稿されたレビューが実際に読めたか」を標準入力で受け、終了コードと合図で返します |
+| `scripts/check-review-usable.sh` | 上記の判定を表で確かめる自己検査。GitHub 上でしか動かない `review-gate.yml` に判定を埋めず、手元と CI の両方で機械的に確かめられるようにするための対です |
 
-要求側は、フォークからの PR をスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。要求に失敗した場合は、切り分け手順を `::error::` で出力して実行を落とします（握り潰してスキップにはしません。リモート最終ゲートが実行されていないのに緑を出すと、偽の緑と通過の区別が付かなくなるためです）。
+要求側は、フォークからの PR をスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。**要求は間欠的に空レスポンスで失敗することがあり**、同じジョブの中で 5→10→20 秒の指数バックオフにより計 4 回まで再試行します（再試行はこの 1 ジョブの中で閉じており、別のイベントから要求し直す形にはしません。「1 回だけ要求する」の対象は要求が別の契機から重ねて出ることです）。再試行を尽くしても失敗した場合は、切り分け手順を `::error::` で出力して実行を落とします（握り潰してスキップにはしません。リモート最終ゲートが実行されていないのに緑を出すと、偽の緑と通過の区別が付かなくなるためです）。
 
 確認側を別に置くのは、**要求側の契機が届かないことがある**ためです。届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑なので、最終ゲートだけが黙って抜けます。同じ契機を見る 2 本目では塞げないため、確認側は `opened` / `synchronize` / `reopened` / `ready_for_review` に加えて**20 分ごとの定期実行**を張ります。判定は head SHA への commit status（`review-gate`）として出します。定期実行から見た PR にはジョブの成否が紐づかず、status でなければ PR 上に何も現れないためです。`opened` の契機だけは、要求が届くまで 120 秒待ってから判定します（要求側と同時に走るため）。
 
-> **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot-review` を指定しなければ、これらのワークフローは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
+**「要求されたか」と「読まれたか」は別です。** GitHub は 1 ファイルの差分が大きすぎると、レビュー対象の差分（`patch`）を API から落とします。この状態でも Copilot は要求どおりレビューを投稿しますが、中身は「1 行も読めなかった」という定型文だけになり、要求も投稿も記録として残るため、「要求されたか」しか見ない判定は緑を出し続けます。確認側はこれを塞ぐため、変更ファイルに読める差分があるか（原因そのもの）と、投稿されたレビューが定型文だけでないか（最後の砦）の 2 段で見ます。この判定は `review-gate.yml` へ埋め込まず `scripts/review-usable.sh` へ切り出してあります。確認側は `actions/checkout@v4` で**既定ブランチ**（PR の変更ブランチではありません）からこのスクリプトを取得してから呼び出します。PR 側から取得すると、PR の投稿者がスクリプトを書き換えるだけでゲートを常に緑にできてしまうためです。
+
+> **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot-review` を指定しなければ、これらのワークフローとスクリプトは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
 
 > **注意**: `--with-copilot-review` は規範の配置を前提とします。雛形の正本は規範パッケージにあり、DCB は配置先を決めるだけだからです。規範を配置しない構成で指定すると、**ファイルを 1 つも書かずに**エラー終了します（生成物を途中まで書いてから止まると、中途半端な状態の切り分けが必要になるためです）。
 
@@ -739,7 +858,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `--with-claude` | `.claude/worktrees/` | 中身はリポジトリ全体のチェックアウトそのもので、除外しないと `git add .` で**リポジトリが自分自身を抱え込みます** |
 | `--with-aws` / `--with-gcp` | `**/.terraform/*` / `*.tfstate` / `*.tfstate.*` / `*.tfvars` / `*.tfvars.json` / `tfplan` / `*.tfplan` / `crash.log` / `crash.*.log` / `override.tf` 系 / `.terraformrc` / `terraform.rc` | **tfstate は機密を平文で保持します。** tfvars も同様に機密を含みやすく、plan の出力は**変数の値が解決済みで展開される**ため state / tfvars と同じ理由で機密が載ります（`-out=tfplan` が慣用のため、拡張子なしと `*.tfplan` の両方を書きます） |
 
-> **`.claude/` はディレクトリごと除外しません。** `.claude/skills/` には追跡する成果物（intake 起点スキル）が入るため、`.claude/worktrees/` だけを除外します。
+> **`.claude/` はディレクトリごと除外しません。** `.claude/skills/` には追跡する成果物（intake 起点スキル・land 起点スキル）が入るため、`.claude/worktrees/` だけを除外します。
 
 > **`.terraform.lock.hcl` は追跡します。** プロバイダ版の固定に必要なため、意図して除外していません（管理セクション内にもその旨のコメントを出力します）。
 
@@ -753,7 +872,11 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 
 | テンプレート | 生成時の扱い | 展開されるもの |
 |---|---|---|
+| `scripts/check-control-chars.sh` | そのまま書き出す | — |
+| `scripts/check-deps-installed.sh` | そのまま書き出す | —（`--languages` に `node` を含めたときだけ生成） |
 | `scripts/check-no-secrets.sh` | そのまま書き出す | — |
+| `scripts/check-shell-portability.sh` | そのまま書き出す | — |
+| `scripts/check-table-breaks.sh` | そのまま書き出す | — |
 | `scripts/confirm-merge-hook.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/load-project-env.sh` | そのまま書き出す | — |
 | `scripts/loop-gate.sh` | そのまま書き出す | — |
@@ -772,9 +895,11 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 
 - **配置されるかどうかは、この 2 分類とは別軸です。** `scripts/acceptance-remote.sh` は展開を持たない（そのまま書き出す）一方で、配置は `--with-aws` / `--with-gcp` の選択に従います。
 
-この開発リポジトリ自身も DCB の生成物を取り込んで使っており、`scripts/` はテンプレートの写しにあたります。上表のうち**写しを持つ 7 本**（`check-no-secrets.sh` / `load-project-env.sh` / `loop-gate.sh` / `on-attach.sh` / `setup-git-identity.sh` / `verify-commit-identity.sh` / `verify.sh`）は、正本と写しがバイト一致していることを `tests/test-template-mirror.sh` が機械照合します（片方だけ直しても両方のテストが緑になり、配布物と手元が黙って食い違うため）。「生成時に展開」側はプレースホルダを持ち一致し得ないので検査対象外です。`scripts/acceptance-remote.sh` も検査対象外ですが理由が異なり、**この開発リポジトリが写しを持たない**（cloud 装備を使わないため）ので比べる相手がありません。いずれも判断と理由を同テストのコメントに残し、写しを置いた時点で一致必須へ移す判断が要ることも機械で担保しています（「検査していない」と「検査対象外と判断した」を読み分けられるようにするため）。
+この開発リポジトリ自身も DCB の生成物を取り込んで使っており、`scripts/` はテンプレートの写しにあたります。上表のうち**写しを持つもの**は、正本と写しがバイト一致していることを `tests/test-template-mirror.sh` の `MIRRORED_RELS` が機械照合します（片方だけ直しても両方のテストが緑になり、配布物と手元が黙って食い違うため）。**対象をここへ書き並べません。** 書き並べると、写しを 1 本足すたびにこの文章だけが古い本数を言い続けます（`.ai-playbook/shared-ai-rules.md` 12 章「一覧の複製は機械照合で担保する」）。現在の対象は `tests/test-template-mirror.sh` の `MIRRORED_RELS` を参照してください。「生成時に展開」側はプレースホルダを持ち一致し得ないので検査対象外（`EXCLUDED_RELS`）です。`scripts/acceptance-remote.sh` も検査対象外ですが理由が異なり、**この開発リポジトリが写しを持たない**（cloud 装備を使わないため）ので比べる相手がありません（`EXCLUDED_NO_COPY_RELS`）。いずれも判断と理由を同テストのコメントに残し、写しを置いた時点で一致必須へ移す判断が要ることも機械で担保しています（「検査していない」と「検査対象外と判断した」を読み分けられるようにするため）。
 
-`scripts/confirm-merge-hook.sh` も同じく**写しを持たない**ため照合対象外です。この開発リポジトリは `.claude/settings.json` を追跡しておらず（`.gitignore` が `.claude/*` を除外し、再包含するのは `!.claude/skills/` と `!.claude/agents/` だけ）フックを配線できないため、写しだけを置くと誰も起動しないスクリプトが `scripts/` とカタログに並びます。**写しを置いた時点で「照合する相手が無い」という理由は成立しなくなるので、一致必須への付け替えを要求して落ちます。**
+`scripts/confirm-merge-hook.sh` を一致必須の対象へ加えた経緯は、後から写しを足す判断がどう起きるかの一例です。かつてこの開発リポジトリは `.claude/settings.json` を追跡せず、フックを配線できないため写しも置いていませんでした（写しだけを置くと、誰も起動しないスクリプトが `scripts/` とカタログに並ぶためです）。**その後、許可リストを `.claude/settings.local.json` へ分離し、`settings.json` をフックの配線だけにして追跡へ切り替えたため、配線できない理由は成立しなくなりました。** 同テストのコメントが「配線を入れる判断をしたときは写しを置いて一致必須へ移すこと」を要求しており、その手順どおりに移しています。`scripts/check-control-chars.sh` / `scripts/check-table-breaks.sh` / `scripts/check-shell-portability.sh` は、判定がプレースホルダを持たず生成条件に依らず全構成で同一であるため、最初から一致必須の対象として加えています。**移植性の検査はさらに、自分自身を走査対象に含めます**——正本と写しがずれると、同じツリーに対して片方だけが赤くなる形で矛盾するため、一致必須である必要が他の 2 本より強くあります。
+
+この開発リポジトリは `.claude/` 配下の写し（スキル定義・サブエージェント定義）も持ちます。こちらは `tests/test-claude-mirror.sh` が雛形とのバイト一致を照合します。**`scripts/` に照合があって `.claude/` に無かったあいだ、実際に 3 件がドリフトしていました。**
 
 ## Doctor 自己診断
 
@@ -794,15 +919,31 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 - `--strict`（既定: 無効。WARN があれば非 0 で終了する）
 - `-h` / `--help`
 
-検査は 3 カテゴリです。
+検査は 4 カテゴリです。
 
 | カテゴリ | 検査内容 |
 |---|---|
 | 静的構造 | `.devcontainer/devcontainer.json` / `.env.example` / `scripts/on-attach.sh` / `scripts/fix-mount-owner.sh` / `scripts/post-rebuild-check.sh` / `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh` / `scripts/check-no-secrets.sh` の実在。`devcontainer.json` が妥当な JSON であること。**`${localEnv:` の混入が無いこと**（下記）。`dockerComposeFile` が参照する compose ファイルが実在すること |
 | スクリプト検査 | 生成した各スクリプトの `bash -n` 構文検査（NG なら FAIL）と実行ビットの有無（無ければ WARN） |
+| 生成物の由来（下記） | `.devcontainer/ORIGIN`（[生成物の由来の記録](#生成物の由来の記録devcontainerorigin)）と現物を突き合わせ、生成時からの変更・記録した版が古いことを検出する |
 | 実行時コマンドの可用性 | `bash` / `jq` / `perl` / `gh`。`devcontainer.json` の features から検出した言語ランタイム（`rust` は feature 名と実行ファイル名が異なるため `cargo` で判定。`ruby` は一致するため `ruby` で判定）。`--with-aws` / `--with-gcp` で配線した cloud CLI（`aws` / `gcloud` / `terraform`）。`docker-outside-of-docker` を配線していれば `docker`。いずれも不在は WARN |
 
 **`${localEnv:` の検出がこの診断の中核です。** 「[資格情報の扱い](#資格情報の扱い)」で述べたホスト資格情報の非注入は、方針を書いただけでは守られません。`remoteEnv` へホスト環境変数の参照が復活していないことを doctor が機械的に検査し、見つけたら FAIL にします。作業ディレクトリの受け渡し（`${localWorkspaceFolder}`）は `localEnv` ではないため対象外です。
+
+**生成物の由来の検査（`.devcontainer/ORIGIN`）は次のように判定します。**
+
+| 状態 | 判定 |
+|---|---|
+| 記録が無い | `[WARN]` **診断できません。** この生成先が本機能より前に作られたか、記録が削除された可能性があります。記録の無い生成先への遡及はできません |
+| 記録が壊れている（`version=` 行が読めない等） | `[FAIL]` 診断できません |
+| 記録した生成物が現物と一致しない | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告 |
+| 記録した生成物が消えている | `[FAIL]` 該当ファイル名を添えて報告 |
+| 記録の版が `doctor.sh` 自身の版より古い | `[WARN]` 「上流が更新されています」と報告 |
+| 記録の版が一致（または新しい） | `[OK]` |
+
+いずれも**検査が成立しないことを合格（`[OK]`）にはしません。** 記録の欠落・破損は `[WARN]` または `[FAIL]` として明示し、黙って通過させません。
+
+> **既知の限界**: 上流の更新有無は、ネットワークへ問い合わせず `doctor.sh` 自身に埋め込んだ版とだけ比較します（規範がループ用の受け入れ検証から外部層を外しているのと同じ理由です）。そのため、**古い `doctor.sh` をそのまま使い続けると、その後さらに上流が更新されていても気づけません。** `doctor.sh` は公開リリースごとに取得し直してください（[doctor.sh を後から取得する](#doctorsh-を後から取得する)）。「診断が緑なら最新」とは言えません。
 
 判定は `[OK]` / `[WARN]` / `[FAIL]` の 3 種で出力し、末尾に `Summary: PASS=<n> WARN=<n> FAIL=<n>` を表示します。終了コードは 3 値です。
 

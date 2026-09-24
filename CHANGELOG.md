@@ -6,6 +6,44 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.12.0
+
+### Summary
+- **移植性の静的検査を配布物へ入れた**（ojos/ai-packages-dev#330 / ojos/ai-packages-dev#332 / ojos/ai-packages-dev#343 / ojos/ai-packages-dev#346）。`scripts/check-shell-portability.sh` が「この環境では通るが BSD 系（macOS）では落ちる」綴りを、実行せずに検出する。対象は追跡している `*.sh` と `*.md` のフェンス内で、**`tests/` も検査自身も除外しない。**
+- **衛生検査 2 本を配布物へ入れた**（ojos/ai-packages-dev#327）。`check-control-chars.sh`（読めない制御文字）と `check-table-breaks.sh`（Markdown の表崩れ）。**読んでも気づけない壊れ方を機械で落とす。**
+- **`npm ci` 忘れの検出を入れた**（ojos/ai-packages-dev#334）。`--languages node` を選んだときだけ配る。`package-lock.json` と `node_modules` の記録が食い違う状態を落とす。
+- **マージ確認フックを配り、迂回経路を 3 件塞いだ**（ojos/ai-packages-dev#312 / ojos/ai-packages-dev#315 / ojos/ai-packages-dev#318 / ojos/ai-packages-dev#320）。`gh pr merge` をコマンド位置で検知して確認を挟む。制御語の前置による迂回、同一行の別コマンドでの誤検知、squash 本文の CI 抑止の綴りによる main の CI 不起動を塞いだ。
+- **PR 確認からマージまでの手順（`land` スキル）を配るようにした**（ojos/ai-packages-dev#311）。`--with-claude` 指定時のみ。
+- **生成物の由来を記録し、`doctor.sh` が配布物との乖離を診断するようにした**（ojos/ai-packages-dev#321）。
+- **ローカル事前ゲートが commit identity を見るようにした**（ojos/ai-packages-dev#302）。検知が push 後になる経路を塞いだ。
+- **README の保証範囲を訂正した**（ojos/ai-packages-dev#339）。**v0.11.0 までの README は「`SHA256SUMS` は改ざんを検出する」と書いていたが、これは誤りである**（下記）。
+- **リリース資産へ artifact attestation を発行するようにした**（ojos/ai-packages-dev#340）。**この版から効く。**
+- **この版は ai-playbook v0.4.0 以降を要求する**（`review-usable.sh` / `check-review-usable.sh` / `claude-skill-land.md` の 3 雛形が必要）。
+- 機能追加と修正のみ。**既存フラグの挙動は変わらない。**
+
+### Highlights
+
+- **`SHA256SUMS` は改ざんを検出しない（ojos/ai-packages-dev#339）**: `SHA256SUMS` はスクリプトと同じリリースから同じ経路で取得するため、**リリースを書き換えられる立場なら両方を同時に差し替えられる。** 守れるのは取得の破損・途中切断と、公開物どうしの食い違いまでである。**v0.11.0 までの README はこれを誤って約束していた。** 記述を守れている範囲へ直した。
+- **attestation は「気づける」ようにするだけである（ojos/ai-packages-dev#340）**: `SHA256SUMS` に SLSA provenance が付き、検証すればリリース資産だけの差し替えに気づける。**ただしワークフローを実行できる立場なら正規の attestation を作れる。** 信頼の起点が「リリースの内容」から「リポジトリへの書き込みの完全性」へ移るだけで、脅威が消えるわけではない。検証手順は README にある（**任意の追加手順**。導入手順は `curl` とチェックサム実装だけで閉じたまま。実装は `command -v` で `sha256sum` / `shasum -a 256` へ分岐する）。
+- **導入手順が macOS で落ちていた（ojos/ai-packages-dev#332）**: README が案内する取得の 1 行目に `sha256sum` を使っており、**GNU coreutils 専用のため macOS 利用者はそこで止まっていた。** `command -v` で `shasum -a 256` へ分岐する形へ直した。移植性検査を足したことで見つかった。
+- **検査自身も検査の対象に含める（ojos/ai-packages-dev#330）**: 検出対象の綴りをリテラルで持つ層を除外すると、そこに残った本物を見逃す（実際に見逃した）。除外ではなく `# bsd-ok: 理由` の印で通す。**逃げ道の無い検査は、そのうち丸ごと外される。**
+- **確認フックは「うっかり」を止める guardrail である（ojos/ai-packages-dev#315 / ojos/ai-packages-dev#320）**: 意図的な迂回は防げない。`--body-file` の中身は読まず、`gh pr merge` 以外の経路（REST / GraphQL）へは検査を広げていない。**保証するのは「黙ってマージしない」ことであって「マージさせない」ことではない。**
+- **`awk` の間隔指定は下限 2 以上で食い違う（ojos/ai-packages-dev#343）**: mawk は `^x{2,3}$` に `xxx` を一致させない。**以前この規則を外した根拠は `xx` に一致するという見本で、その入力では区別が付かなかった。** 検出へ戻した。
+- **ブラケット式の中の `\n` は「改行以外」ではない（ojos/ai-packages-dev#343 / ojos/ai-packages-dev#346）**: `[^\n]` は「バックスラッシュと `n` 以外」で、`n` を含む行を黙って落とす。sed 側はパターン側だけを見る（置換側にブラケット式は存在しない）。
+
+### 移行
+
+- **既存の生成物は再生成しない限り無影響です。**
+- 再生成すると、次が増えます。
+  - `scripts/check-shell-portability.sh` / `check-control-chars.sh` / `check-table-breaks.sh`
+  - `scripts/confirm-merge-hook.sh` と `.claude/settings.json` への配線
+  - `scripts/review-usable.sh`
+  - `--languages node` 指定時のみ `scripts/check-deps-installed.sh`
+  - `--with-claude` 指定時のみ `.claude/skills/land/SKILL.md`
+- **移植性検査は既存のコードを赤にすることがあります。** 追加直後は出た指摘を棚卸ししてください。意図的に使う場合は該当行へ `# bsd-ok: 理由` を書きます（理由は必須）。
+- **`ai-playbook は v0.4.0 以降を指してください。`** それより古い版には雛形 3 本が無く、生成時に停止します。
+- **README の入手手順が変わりました。** `sha256sum` を直接使う形から `command -v` で分岐する形になっています。**macOS で以前の手順が止まっていた場合は、新しい手順を使ってください。**
+
 ## v0.11.0
 
 ### Summary
