@@ -6,6 +6,28 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.14.0
+
+### Summary
+- **`LOOP_GATE_REVIEW_CMD` で第二意見を差し替えても、レビューしていないものを通さず、記録もしないようにした**（ojos/ai-packages-dev#402）。差し替えた経路は commit 済み範囲への切り替えを通らず、空のステージ済み差分を見て「対象なし」で 0 を返したまま GATE_PASS と scope=staged の記録が出ていた（確認側も緑になる）。解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡すようにし、レビュー対象が実在するのに差し替えたコマンドが「対象なし」と出力したときは GATE_FAIL とし記録も残さない。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過する。
+- **devhost を新設し、DCB のリリースに同梱した**（ojos/ai-packages-dev#375 / ojos/ai-packages-dev#376）。SSH で届く外部の機械（自宅のラップトップ、社内のサーバーなど）の上で devcontainer を起こしたまま保ち、スマホやほかの端末から入って AI コーディングを続けるための道具一式 `devhost/`。bootstrap.sh が生成するものではなく、利用者が外部の機械へ手で置く独立した道具だが、配布は DCB のリリースの `PACKAGE_ARCHIVE.tar.gz` に `devhost/` として同梱する。個別の Release 資産（`SHA256SUMS` の対象）には加えず、完全性は `PACKAGE_ARCHIVE.tar.gz` のハッシュ（`RELEASE-MANIFEST.json`）で守る。導入手順は README の「devhost」の節と、同梱された `devhost/README.md` を参照。**devhost を同梱した最初の版。**
+- **`--with-codex` の生成物で、codex のサンドボックスが動くようにした**（ojos/ai-packages-dev#392）。`compose.yaml` の `app` に `security_opt: [apparmor=unconfined, seccomp=unconfined]` を入れる。Docker の既定の seccomp が bwrap の namespace の作成を止め（ネイティブ Linux の Docker Engine でも Docker Desktop でも）、ネイティブ Linux ではさらに AppArmor の `docker-default` が mount を止めていた。**AppArmor だけ外しても動かない。** `--with-codex` を付けない生成物には入らない。
+- **この版が要求する ai-playbook は v0.5.0 以降のまま**（新しい雛形を要求しない）。第二意見の判定で「差分を読めなかった回答」を落とす修正（ojos/ai-packages-dev#386）は ai-playbook v0.6.0 に入っているので、`--playbook-version v0.6.0` を勧める。
+- 機能追加と修正のみ。**既存フラグの挙動は変わらない**（`--with-codex` の生成物に `security_opt` が増える）。
+
+### Highlights
+- **取り込み元の対処は、たまたま足りていた（ojos/ai-packages-dev#392）**: 取り込み元（game-forge）は AppArmor だけを外して動いていたが、seccomp は Go の devcontainer feature（Go のデバッガのため）がすでに外していた。Ubuntu 26.04 のネイティブの Docker Engine と codex 0.160.0 で、既定・AppArmor だけ・両方の 3 通りを実測し、両方が要ることを確かめた。`systempaths=unconfined` は要らない（codex は `/proc` の mount の失敗を自分で避ける）。代償（コンテナの中で namespace の作成と mount ができるようになる）は README の「コンテナの中での codex のサンドボックス」に書いた。
+
+### 移行
+- **devhost は既存の生成物に影響しません。** bootstrap.sh の生成物に含まれず、既存の devcontainer 構成を変更しません。
+- **以前の版で `--with-codex` を付けて生成した構成では、codex のサンドボックスが bwrap のエラーで失敗します**（`bwrap: No permissions to create new namespace`）。再生成するか、`.devcontainer/compose.yaml` の `app` に次の 3 行を足して、コンテナを作り直してください（Rebuild Container）。
+
+  ```yaml
+      security_opt:
+        - apparmor=unconfined
+        - seccomp=unconfined
+  ```
+
 ## v0.13.0
 
 ### Summary

@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.13.0`
+- `v0.14.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.13.0
+TAG=v0.14.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -97,7 +97,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.5.0
+  --languages node,go --with-claude --playbook-version v0.6.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.13.0
+TAG=v0.14.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -134,13 +134,13 @@ bash "$d/doctor.sh" --target-dir ./myapp
 | `bootstrap.sh` | 生成コマンド本体。単体で動作します |
 | `doctor.sh` | 生成後の自己診断コマンド。単体で動作します |
 | `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS`（macOS では `shasum -a 256 -c SHA256SUMS`）で**取得の破損**を検出します（守る範囲は [公開リリースからの利用](#公開リリースからの利用) の但し書きを参照）。片方だけ取得した場合は、その行を `grep` で抜き出して `-c -` へ渡します |
-| `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md`）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合に使います |
+| `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md` / **`devhost/`**）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合、**devhost を入手する場合**に使います |
 | `RELEASE-MANIFEST.json` | パッケージ名・版・資産一覧・チェックサムを機械可読にまとめたもの。`assets` がそのリリースに添付された資産の一覧、`checksums` が `PACKAGE_ARCHIVE.tar.gz` と `SHA256SUMS` のハッシュです |
 
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.13.0
+TAG=v0.14.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -160,6 +160,23 @@ $sha256c -c SHA256SUMS
 # アーカイブから中身を取り出す場合
 tar -xzf PACKAGE_ARCHIVE.tar.gz
 ```
+
+### devhost — 外部の機械で devcontainer を保つ道具
+
+**SSH で届く外部の機械（自宅のラップトップ、社内のサーバーなど）の上で devcontainer を起動したまま保ち、
+スマホやほかの端末から入って AI コーディングを続けるための道具一式**です。`PACKAGE_ARCHIVE.tar.gz` の
+`devhost/` 配下に同梱されています（上の 1. で `RELEASE-MANIFEST.json` と照合する対象に入ります。個別の URL は配っていません）。
+
+```bash
+# 上の 1. で照合した PACKAGE_ARCHIVE.tar.gz から取り出す。archive の中の名前は ./devhost/...
+# なので、./ を付けて指定する（GNU tar は devhost/ だと一致しない）。
+tar -xzf PACKAGE_ARCHIVE.tar.gz ./devhost
+ls devhost/
+```
+
+bootstrap.sh が生成するものではなく、利用者が外部の機械へ手で置く独立した道具です。導入手順・使い方・
+SSH の経路（素の SSH / Cloudflare Access / Tailscale）は、取り出した `devhost/README.md` を参照してください
+（配布先では `devhost/` がこの README と同じ階層に並ぶため、ここでは相対リンクにしません）。
 
 ### 任意: 署名の検証（artifact attestation）
 
@@ -233,6 +250,7 @@ fi
 - **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
 - **`--with-gemini` と `--with-antigravity` は永続 volume を共有**: `agy` は資格情報を `~/.gemini/antigravity-cli/` に置くため、両者は同じ `~/.gemini` を使います。**どちらか一方でも指定すれば `gemini-storage` が 1 つだけ**作られ、両方指定しても重複しません。認証手段が違う（API キー / OAuth）ので、フラグは束ねず独立にしてあります。片方だけ使う構成をそのまま表現できます。
 - **`--with-codex` は専用の永続 volume**: Codex CLI は資格情報を `~/.codex/auth.json` に置くため、`gemini` / `antigravity` とは別の `codex-storage` を使います。認証手段（ChatGPT アカウントの OAuth または API キー）も設定ディレクトリも他の AI CLI と独立なので、既存のどの装備とも共有しません。
+- **`--with-codex` はコンテナの AppArmor と seccomp の既定の制限を外します**: codex のサンドボックスがコンテナの中で動くように、生成物の `compose.yaml` へ `security_opt: [apparmor=unconfined, seccomp=unconfined]` を入れます。`--with-codex` を選ばない構成には入りません（下記「[コンテナの中での codex のサンドボックス](#コンテナの中での-codex-のサンドボックス)」）。
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します。唯一の例外は GitHub CLI で、PAT を `.env` の `GH_TOKEN` へ置けます（下記「[資格情報の扱い](#資格情報の扱い)」）。
 
 ### オプション入力
@@ -334,6 +352,7 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 - `loop-gate.sh` は push / PR 前に **3 段を直列**で通します。**1. commit identity の検証**（`scripts/verify-commit-identity.sh`）→ **2. verify**（受け入れ検証。手前で機密混入検査を含む）→ **3. 任意の第二意見レビュー**の順です。identity を最初に置くのは、判定が最も安く（実測数 ms）、許可外の identity が混じったコミットを他の段の結果を待たずに検知するためです（許可外 identity の検知が CI＝push 後まで遅れていた穴を塞ぐ。詳細は下記「Git identity ガード」参照）。判定ロジックは `loop-gate.sh` へ書き写さず `verify-commit-identity.sh` 側に置きます（判定を二重管理しない）。
   - **移行時の注意:** `verify-commit-identity.sh` は fail-closed です。環境変数 `ALLOWED_AUTHOR_EMAILS` も `.env` の `GIT_IDENTITY_EMAIL` も設定していないプロジェクトでは、`loop-gate.sh` を再生成した時点で**ローカルゲートが緑から赤に変わります**。これは検査が成立しない状態を合格にしない、意図した挙動です。`bash scripts/setup-git-identity.sh` で `.env` の `GIT_IDENTITY_EMAIL` を適用するか、`ALLOWED_AUTHOR_EMAILS` を設定してください（下記「[利用側の設定手順（許可 author email）](#利用側の設定手順許可-author-email)」参照）。
 - `loop-gate.sh` の第二意見は、`scripts/second-opinion-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
+- 差し替えたコマンド（`LOOP_GATE_REVIEW_CMD`）へは、解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡します（ステージ済み差分があるとき・対象が無いときは空）。範囲を受けない差し替えコマンドは、commit 済みのブランチで空のステージ済み差分を見て「対象なし」で終わるため、`loop-gate.sh` は、レビュー対象が実在するのにその出力（`[second-opinion] no diff to review`）を見たときは `GATE_FAIL` にし、記録も残しません。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過します。**限界として、loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが `[second-opinion] no diff to review` を出力したときだけです。** 範囲を使わず、この文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても `GATE_PASS` と記録が出ます。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、自分で範囲を決めて自分で記録を残してください。同梱の reviewer のエンジンだけを変えるなら `LOOP_GATE_REVIEW_CMD='bash scripts/second-opinion-review.sh --engine <名前> ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}'` と書きます。`SECOND_OPINION_ENGINE` の前置は、`.env` が環境変数を上書きするため使えません。
 - 第二意見へ渡す**差分の範囲**は次の順で決まります。ステージ済み差分があるときはレビュー実行体の既定に委ね（範囲を渡しません）、空のときだけ commit 済み範囲へ切り替えます。切り替え先の既定は `@{upstream}..HEAD` で、下のいずれかに当たる場合は**既定ブランチとの分岐点（merge-base）を起点**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決し、汚染の判定と分岐点の算出は**同じ枝**を見ます（別々に決めると、汚染ありと判定した枝と分岐点を取った枝が別物になりうるため）。**上流以外を起点に採った場合は、その理由を 1 行出力します**（黙って範囲を変えると、なぜその差分が対象なのかを読み手が追えないため）。
   - **上流との差分が空**（push 済みで上流 == HEAD）。ここで空のまま第二意見を呼ぶと、一度も差分を見ないまま通過する偽の緑になります。
   - **上流が未設定**。
@@ -499,6 +518,27 @@ gcloud auth login             # --with-gcp のとき（gcloud-storage）
 - 生成物の `devcontainer.json` は `updateRemoteUserUID` を書きません（既定に任せます）。**`false` にしないでください。** 上の付け替えが止まり、ネイティブ Linux のホストで書き込めなくなります（`tests/test-update-remote-user-uid.sh` が、生成物が無効にしていないことを確かめます）。
 - **効かない構成があります。** CLI が macOS や Windows の上で動き、Docker だけが別の Linux にある場合（`DOCKER_HOST` で遠くの Docker Engine を使う場合など）は、CLI が付け替えを行いません。その Linux へ Remote - SSH で入り、そこでコンテナを開いてください。CLI がその Linux の上で動くので、付け替えが働きます。
 - 付け替えはコンテナを作るときだけ行われます。ホストの利用者を変えた場合は、コンテナを作り直してください（Rebuild Container）。
+
+## コンテナの中での codex のサンドボックス
+codex は、コマンドを読み取り専用などのサンドボックスの中で動かすために bubblewrap（bwrap）を使います。bwrap は namespace を作り、その中で mount します。Docker はコンテナに既定で次の制限を当てていて、どちらもこれを止めます。
+
+| 制限 | 当たる環境 | 止めるもの | 外さないときの失敗 |
+|---|---|---|---|
+| seccomp（Docker の既定のプロファイル） | ネイティブ Linux の Docker Engine と Docker Desktop（macOS）の両方 | `CAP_SYS_ADMIN` を持たないプロセスの namespace の作成 | `bwrap: No permissions to create new namespace` |
+| AppArmor（`docker-default`） | ネイティブ Linux の Docker Engine（AppArmor が有効なとき） | mount | `bwrap: Failed to make / slave: Permission denied` |
+
+先に止めるのは seccomp なので、**AppArmor だけを外しても動きません。** そのため `--with-codex` の生成物は、`compose.yaml` の `app` に次を入れます。
+
+```yaml
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+```
+
+- **実測した環境**: Ubuntu 26.04.1（カーネル 7.0.0-38、AppArmor 有効、`kernel.apparmor_restrict_unprivileged_userns = 1`）のネイティブの Docker Engine と、codex 0.160.0。既定と AppArmor だけ外した場合は `codex sandbox -- git status` が上の表の 1 行目で失敗し、2 つとも外すと通りました。ホストの `apparmor_restrict_unprivileged_userns` は、この失敗に関わっていませんでした。Docker Desktop（macOS）でも、既定のままでは同じ 1 行目で失敗し、2 つを外すと user namespace の作成と mount が通ることを確かめています。
+- **代償**: コンテナの中のプロセスが namespace を作り、mount できるようになります。Docker がコンテナに既定で掛けている隔離の 2 層を外すことになるので、`--with-codex` を選んだ構成に限っています。codex を使わなくなったら、`compose.yaml` からこの 3 行を消してください。
+- **`systempaths=unconfined` は入れていません。** bwrap は `/proc` を新しく mount しようとして、Docker が `/proc` の一部を隠していることで拒まれますが、codex はこの失敗を自分で避けて動きます。外す範囲を広げずに済むので入れていません。
+- **Docker Desktop（macOS）** には AppArmor がなく、`apparmor=unconfined` は効き目がないだけで害はありません。止めているのは seccomp なので、Mac でもこの設定が要ります。
 
 ## 資格情報の扱い
 

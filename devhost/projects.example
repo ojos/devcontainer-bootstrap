@@ -1,0 +1,15 @@
+# dev の設定ファイルの雛形。外部の機械の ~/.config/dev/projects へ写して書き換える。
+#
+# 1 行 1 プロジェクト。空白区切りで「名前 絶対パス [キー=値 ...]」。# から行末はコメント。
+#
+#   名前   英数字と _ . - だけ（systemd のユニット dev-up@<名前> の名前にもなる）
+#   パス   devcontainer.json を持つワークスペースの絶対パス（~ や $HOME は展開しない）
+#
+# キー（省略できる。知らないキーは設定の誤りとして止まる）:
+#
+#   tmux_session=<t>     dev attach が入る tmux のセッション名（既定 main）
+#
+# 例（値は置き換える）:
+#
+# myapp   /home/me/myapp
+# other   /home/me/other   tmux_session=work

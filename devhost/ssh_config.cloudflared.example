@@ -1,0 +1,25 @@
+# ~/.ssh/config へ足す断片の雛形（経路: Cloudflare Access。ProxyCommand で
+# cloudflared 越しに SSH を通す）。<別名> <ホスト名> <鍵> を置き換える。
+#
+#   <別名>     端末から呼ぶ短い名前（ssh <別名>）
+#   <ユーザー> 外部の機械のユーザー名。**省かない**——省くと端末側のユーザー名で入ろうとして
+#              Permission denied (publickey) になり、鍵の失効と見分けが付かない
+#   <ホスト名> Cloudflare Access の SSH アプリケーションのホスト名
+#   <鍵>       この端末専用に作った鍵（README.md の「端末専用の鍵」）
+#
+# cloudflared は各 OS のパッケージ管理から入れる（Termux なら `pkg install cloudflared`）。
+# **公開範囲は Access のポリシーが決める。** sshd 自体はインターネットへ出さず、Cloudflare の
+# エッジだけがトンネルの出口を持つ。Access の認証が切れていると、ssh の代わりに cloudflared が
+# URL を出して待つので、ブラウザで承認してから続ける（README.md「ssh の入口とショートカット」）。
+#
+# 構築手順（Tunnel の作成、Access ポリシーの設定）は公式文書に従う。この道具一式は
+# ProxyCommand の呼び出し方だけを決める。
+#
+# %h は HostName の値に展開される。
+Host <別名>
+  User <ユーザー>
+  HostName <ホスト名>
+  ProxyCommand cloudflared access ssh --hostname %h
+  IdentityFile ~/.ssh/<鍵>
+  IdentitiesOnly yes
+  ServerAliveInterval 30

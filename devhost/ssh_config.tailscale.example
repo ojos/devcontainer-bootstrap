@@ -1,0 +1,21 @@
+# ~/.ssh/config へ足す断片の雛形（経路: Tailscale。同じ tailnet に参加した端末どうしを
+# WireGuard のトンネルで直接つなぐ）。<別名> <ホスト名> <鍵> を置き換える。
+#
+#   <別名>     端末から呼ぶ短い名前（ssh <別名>）
+#   <ユーザー> 外部の機械のユーザー名。**省かない**——省くと端末側のユーザー名で入ろうとして
+#              Permission denied (publickey) になり、鍵の失効と見分けが付かない
+#   <ホスト名> 外部の機械の MagicDNS 名（<機械の名前>.<tailnet 名>.ts.net）か tailnet 内の IP
+#   <鍵>       この端末専用に作った鍵（README.md の「端末専用の鍵」）
+#
+# **公開範囲は tailnet の中だけ。** トンネルが WireGuard の上に直接張られるので
+# ProxyCommand は要らない（素の SSH と同じ書式で、インターネットへは sshd のポートを
+# 出さない）。参加できる端末は Tailscale 側の ACL とログインで決まる。
+#
+# 導入と tailnet への参加（`tailscale up`）は公式文書に従う。この道具一式は、
+# 参加済みの tailnet の上でどの ssh_config を書くかだけを決める。
+Host <別名>
+  User <ユーザー>
+  HostName <ホスト名>
+  IdentityFile ~/.ssh/<鍵>
+  IdentitiesOnly yes
+  ServerAliveInterval 30

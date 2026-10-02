@@ -48,7 +48,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.13.0"
+DCB_VERSION="v0.14.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -427,6 +427,7 @@ TMPL
       # 永続 volume は構成に応じて条件配線する（__VOLUME_MOUNTS__ /
       # __VOLUME_SECTION__ を render_content が置換）。gh は常時、cloud と AI ツールは
       # 選択時のみ。docker socket は常に明示。
+      # security_opt（__SECURITY_OPT__）は --with-codex のときだけ出す（build_security_opt_block）。
       cat <<'TMPL'
 services:
   app:
@@ -440,6 +441,7 @@ services:
       - /var/run/docker.sock:/var/run/docker-host.sock
 __VOLUME_MOUNTS__
     command: sleep infinity
+__SECURITY_OPT__
 __VOLUME_SECTION__
 TMPL
       ;;
@@ -5259,6 +5261,8 @@ TMPL
 # 第二意見レビュー:
 #   既定で scripts/second-opinion-review.sh があれば実行する。
 #   LOOP_GATE_REVIEW_CMD で任意のコマンドへ差し替え可能。空文字でスキップする。
+#   差し替えたコマンドへは、解決した範囲を環境変数 LOOP_GATE_REVIEW_RANGE で渡す
+#   （ステージ済みがあるとき・対象が無いときは空）。
 #
 #   second-opinion-review.sh の既定対象はステージ済み差分で、空なら「レビュー対象なし」
 #   として 0 を返す。commit 後（ステージが空）にこのゲートを回すと、第二意見が
@@ -5615,18 +5619,61 @@ main() {
     # ローカルのゲートを通しても**確認側が必ず赤になる**——回したのに回していないと
     # 言われる形で、機構への信頼を壊す。
     #
-    # **scope は `staged` とみなす。** 差し替えた側が何をレビューしたかは、ここからは
-    # 分からない。既定の reviewer の既定が `staged` で、規範も「差分を渡して非対話で
-    # 実行する」と定めているので、その前提に揃える。**別の範囲をレビューする reviewer
-    # を差し替えるなら、記録も自分で残すこと**（`scripts/second-opinion-record.sh save`
-    # を呼ぶ）。
-    local cmd_capture cmd_ok=0
+    # **既定の reviewer と同じ範囲を解決し、環境変数 LOOP_GATE_REVIEW_RANGE で渡す。**
+    # ステージ済みが空のときだけ commit 済み範囲（`<from>..HEAD`）が入る。ステージ済み
+    # があるとき・対象が無いときは空。差し替えた側が範囲を使いたければ、例えば
+    # `bash scripts/second-opinion-review.sh --engine X ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}`
+    # のように受ける。**受けなければ、commit 済みのブランチで空のステージ済み差分を
+    # 見て「対象なし」で終わる**ので、その出力を見たときは記録しない（下記）。
+    #
+    # **限界: loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが
+    # `[second-opinion] no diff to review` を出力したときだけである。** 範囲を使わず、この
+    # 文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても GATE_PASS と
+    # 記録が出る。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、
+    # 自分で範囲を決めて自分で記録を残すこと。
+    #
+    # **scope は、範囲が解決できたら `range:<範囲>`、そうでなければ `staged` とみなす。**
+    # 差し替えた側が何をレビューしたかは、ここからは分からない。**別の範囲を
+    # レビューする reviewer を差し替えるなら、記録も自分で残すこと**
+    # （`scripts/second-opinion-record.sh save` を呼ぶ）。
+    #
+    # **レビューしていないものは、記録せず、通過もさせない。**
+    #   - 解決の結果が「対象が本当に無い」: 既定の経路と同じく、記録なしで通過する。
+    #   - 対象が実在する（範囲あり、またはステージ済みあり）のに、差し替えた側が
+    #     「対象なし」と出力した（範囲を受けていない）: レビューされていないので
+    #     GATE_FAIL にし、記録も作らない。通すと手元のゲートが偽の緑になる。
+    resolve_review_range
+    local cmd_capture cmd_ok=0 cmd_scope="staged" cmd_unreviewed=0 cmd_skip=0
+    if [[ -n "$REVIEW_RANGE" ]]; then
+      if [[ -n "$REVIEW_RANGE_REASON" ]]; then
+        echo "[loop-gate] $REVIEW_RANGE_REASON"
+      fi
+      echo "[loop-gate] staged diff is empty; passing range $REVIEW_RANGE to the reviewer (LOOP_GATE_REVIEW_RANGE)"
+      cmd_scope="range:$REVIEW_RANGE"
+    elif [[ "$REVIEW_NO_TARGET" -eq 1 ]]; then
+      # 対象が本当に無いときは、既定の経路と同じく差し替えたコマンドを実行しない。
+      # 実行すると、対象が無いのにコマンドの終了コード次第で GATE_FAIL になる。
+      echo "[loop-gate] no reviewable diff; second opinion has nothing to review"
+      cmd_scope=""
+      cmd_skip=1
+    fi
     cmd_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
-    bash -c "$LOOP_GATE_REVIEW_CMD" 2>&1 | tee "$cmd_capture" || cmd_ok=1
-    record_second_opinion "$cmd_capture" "staged" "$cmd_ok" 0
+    if [[ "$cmd_skip" -eq 0 ]]; then
+      LOOP_GATE_REVIEW_RANGE="$REVIEW_RANGE" bash -c "$LOOP_GATE_REVIEW_CMD" 2>&1 | tee "$cmd_capture" || cmd_ok=1
+    fi
+    if [[ -n "$cmd_scope" ]] && grep -q -E '^\[second-opinion\] no diff to review' "$cmd_capture"; then
+      echo "[loop-gate] 差し替えた第二意見は「レビュー対象なし」と出力しましたが、レビュー対象は実在します。レビューされていないので失敗とし、記録も残しません。" >&2
+      echo "[loop-gate] 範囲を LOOP_GATE_REVIEW_RANGE で受け取ってください（規則「レビューの起動方法」参照）。" >&2
+      cmd_scope=""
+      cmd_ok=1
+      cmd_unreviewed=1
+    fi
+    record_second_opinion "$cmd_capture" "$cmd_scope" "$cmd_ok" 0
     rm -f "$cmd_capture"
     if [[ "$cmd_ok" -ne 0 ]]; then
-      echo "[loop-gate] second opinion reported findings" >&2
+      if [[ "$cmd_unreviewed" -eq 0 ]]; then
+        echo "[loop-gate] second opinion reported findings" >&2
+      fi
       echo "GATE_FAIL"
       exit 1
     fi
@@ -7365,6 +7412,29 @@ build_volume_section_block() {
   printf 'volumes:\n%s' "$defs"
 }
 
+# compose の app.security_opt（__SECURITY_OPT__）。--with-codex のときだけ出す。
+#
+# codex のサンドボックスは bwrap で namespace を作り mount する。Docker の既定の seccomp が
+# namespace の作成を止め（ネイティブ Linux の Docker Engine でも Docker Desktop でも）、
+# ネイティブ Linux ではさらに AppArmor の docker-default が mount を止める（#392 で実測。
+# 止める順は seccomp → AppArmor なので、AppArmor だけ外しても足りない）。Docker Desktop
+# には AppArmor が無く、apparmor=unconfined は効き目が無いだけで害は無い。
+# systempaths=unconfined は要らない（codex は /proc の mount の失敗を自分で避ける）。
+# 隔離を弱めるので、サンドボックスを使う codex を選んだ構成に限る。
+build_security_opt_block() {
+  has_with codex || { printf ''; return; }
+  cat <<'BLK'
+    # codex のサンドボックス（bwrap）のために、AppArmor と seccomp の既定の制限を外す。
+    # Docker の既定の seccomp が namespace の作成を止め（Docker Desktop でも同じ）、
+    # ネイティブ Linux ではさらに AppArmor が mount を止める（片方だけ外しても動かない）。
+    # コンテナの中から namespace の作成や mount ができるようになり、隔離が弱まる。
+    # codex を使わなくなったら消してよい。
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+BLK
+}
+
 # post-rebuild-check.sh の __VOLUME_CHECK_LINES__。永続 volume が実際にマウント
 # されているかを検査する。定義しただけでマウントされない（compose の編集ミス、
 # devcontainer.json が別サービスを指している等）と、ログイン状態は毎回消えるのに
@@ -7429,6 +7499,7 @@ render_content() {
   subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
   subst_block __VOLUME_MOUNTS__ "$(build_volume_mounts_block)"
   subst_block __VOLUME_SECTION__ "$(build_volume_section_block)"
+  subst_block __SECURITY_OPT__ "$(build_security_opt_block)"
   subst_block __VOLUME_CHECK_LINES__ "$(build_volume_check_block)"
   subst_block __WITH_CHECK_LINES__ "$(build_with_check_block)"
 
