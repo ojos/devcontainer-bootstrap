@@ -48,7 +48,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.12.0"
+DCB_VERSION="v0.13.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -79,6 +79,7 @@ options:
   --with-claude               Install Claude Code CLI + extension (persisted)
   --with-gemini               Install Gemini CLI + extension (persisted)
   --with-antigravity          Install Antigravity CLI (agy; OAuth only, persisted)
+  --with-codex                Install Codex CLI (ChatGPT OAuth or API key; persisted)
   --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
   --with-copilot-review       Place the remote review-gate workflows only
                               (requires rules placement; no local tooling)
@@ -137,6 +138,11 @@ while [[ $# -gt 0 ]]; do
     # 使いたい構成が実在する。束ねると使わない CLI が必ず入る。永続 volume だけは
     # 共有する（agy は資格情報を ~/.gemini/antigravity-cli/ へ置くため）。
     --with-antigravity) WITH_SET+=("antigravity"); shift ;;
+    # codex も npm 配布だが版の下限があり install_if_missing の同型に乗らない
+    # （antigravity と同じ理由で独立フラグにする。下記 build_codex_block）。
+    # 認証は OAuth（ChatGPT アカウント）または API キーで、永続 volume は専用に切る
+    # （~/.codex。gemini / antigravity の ~/.gemini とは別の資格情報置き場のため）。
+    --with-codex)        WITH_SET+=("codex"); shift ;;
     --with-copilot)     WITH_SET+=("copilot"); shift ;;
     # ローカル装備（--with-copilot）とは別のフラグにする。両者は性質が違い
     # （手元の開発ツール / リモートのレビュー機構）、片方だけ欲しい構成が実在する。
@@ -246,9 +252,23 @@ image_supports_platform() {
   return 0
 }
 
+# ベースイメージの候補は版の名前（コードネーム）で固定する。`base:ubuntu` /
+# `base:debian` のような浮動タグは、上流が指す版を無告知で進める。上流が
+# フロートの指す先を 26.04 へ進めたことで、26.04 に無い apt-key を使う feature
+# （gcloud CLI など）の導入が exit 127 で落ちた実績があり、版の名前へ固定することで
+# 生成物が上流の都合で追随しないようにする。
+#
+# Ubuntu は noble（24.04 LTS）。Debian は着手時点で `base:debian` が指す先
+# （trixie=13）を実際に --with-gcp 付きで devcontainer build し、同じ apt-key
+# 欠落で exit 127 になることを確認した。1 つ前の安定版 bookworm（12）は apt-key を
+# 持ち、同じ構成でビルドが通ることも確認済みのため、こちらを候補にした。版を
+# 上げるときは、features がすべて新しい版で入ることを確かめてから候補を
+# 差し替えること（浮動タグが指す先が壊れていても、固定した候補まで無条件には
+# 追随しない）。
+BASE_IMAGE_CANDIDATES="mcr.microsoft.com/devcontainers/base:noble mcr.microsoft.com/devcontainers/base:bookworm"
+
 select_base_image() {
   local platform os arch
-  local candidates
   local image
 
   if [[ -n "$BASE_IMAGE_OVERRIDE" ]]; then
@@ -261,10 +281,8 @@ select_base_image() {
   os="${platform%/*}"
   arch="${platform#*/}"
 
-  candidates="mcr.microsoft.com/devcontainers/base:ubuntu mcr.microsoft.com/devcontainers/base:debian"
-
   if command -v docker >/dev/null 2>&1; then
-    for image in $candidates; do
+    for image in $BASE_IMAGE_CANDIDATES; do
       if image_supports_platform "$image" "$os" "$arch"; then
         BASE_IMAGE="$image"
         echo "[bootstrap] base-image=auto:$BASE_IMAGE ($os/$arch)"
@@ -273,7 +291,7 @@ select_base_image() {
     done
   fi
 
-  BASE_IMAGE="mcr.microsoft.com/devcontainers/base:ubuntu"
+  BASE_IMAGE="${BASE_IMAGE_CANDIDATES%% *}"
   echo "[bootstrap] WARN: no compatible manifest check result; fallback base-image=$BASE_IMAGE ($os/$arch)" >&2
 }
 
@@ -291,6 +309,7 @@ template_rel_paths() {
     '.github/workflows/verify.yml' \
     'scripts/acceptance.sh' \
     'scripts/check-control-chars.sh' \
+    'scripts/check-doc-links.sh' \
     'scripts/check-no-secrets.sh' \
     'scripts/check-shell-portability.sh' \
     'scripts/check-table-breaks.sh' \
@@ -302,6 +321,7 @@ template_rel_paths() {
     'scripts/post-rebuild-check.sh' \
     'scripts/setup-git-identity.sh' \
     'scripts/verify-commit-identity.sh' \
+    'scripts/verify-commit-identity-selftest.sh' \
     'scripts/verify.sh'
 }
 
@@ -410,6 +430,9 @@ TMPL
       cat <<'TMPL'
 services:
   app:
+    # 版の名前（コードネーム）で固定している。浮動タグ（ubuntu / debian / latest /
+    # タグ無し）へ戻さないこと。版を上げるときは、features がすべて新しい版で
+    # 入ることを確かめてから変えること。
     image: __BASE_IMAGE__
     volumes:
       - ..:/workspaces/__PROJECT_NAME__:cached
@@ -522,6 +545,11 @@ jobs:
         with:
           # 範囲指定で履歴を辿るため全履歴が要る。
           fetch-depth: 0
+
+      # 判定そのものが壊れていないかを、仕込みのリポジトリで先に確かめる。
+      # 本物の履歴だけでは、落ちるべき形も「何でも通る」状態も見えないため。
+      - name: Identity selftest
+        run: bash scripts/verify-commit-identity-selftest.sh
 
       - name: Verify commit identity
         env:
@@ -689,6 +717,7 @@ install_if_missing() {
 }
 
 __AGY_FUNCTION_LINES__
+__CODEX_FUNCTION_LINES__
 __AI_INSTALL_LINES__
 echo "[install-ai-tools] done"
 TMPL
@@ -1494,6 +1523,10 @@ TMPL
 #   committer には常に noreply@github.com を、Co-Authored-By には加えて
 #   noreply@anthropic.com を許可する（GitHub 上の squash merge / web UI コミットの
 #   committer、および AI コーディング規約の trailer に対応）。
+#   committer が noreply@github.com のコミットに限り、author と Co-Authored-By の
+#   <login>@users.noreply.github.com も許可する（is_github_authored。マージした人と
+#   PR の作者が違う squash merge で GitHub が Co-authored-by を足す形に対応。判定の
+#   自己試験は scripts/verify-commit-identity-selftest.sh）。
 #
 # 使い方:
 #   bash scripts/verify-commit-identity.sh                # origin/main..HEAD
@@ -1707,7 +1740,14 @@ main() {
       fi
       coauthor_email="${coauthor##*<}"
       coauthor_email="${coauthor_email%>*}"
-      if ! is_allowed "$coauthor_email" "${ALLOWED_COAUTHOR_EMAILS_ARR[@]}"; then
+      # GitHub は squash merge で、マージした人と PR の作者が違うと作者を
+      # Co-authored-by に足す（マージの瞬間に付くため、PR の検査では見えず、
+      # push(main) の全履歴検査だけが拾う）。author と同じ is_github_authored で
+      # 許可し、ローカルで作ったコミットには広げない（is_github_authored は
+      # committer を縛っているため、ここで広がるのは GitHub がサーバ側で作った
+      # コミットに限られる）。
+      if ! is_allowed "$coauthor_email" "${ALLOWED_COAUTHOR_EMAILS_ARR[@]}" \
+        && ! is_github_authored "$coauthor_email" "$committer_email"; then
         echo "[identity] NG ${sha:0:8} co-author=<${coauthor_email}> — ${subject}" >&2
         violations=$((violations + 1))
       fi
@@ -1729,6 +1769,114 @@ main() {
 }
 
 main "$@"
+TMPL
+      ;;
+    'scripts/verify-commit-identity-selftest.sh')
+      # verify-commit-identity.sh の判定そのものが壊れていないかを、仕込みの
+      # リポジトリで確かめる自己試験。identity-guard.yml は判定ロジックへ
+      # scripts/verify-commit-identity.sh を呼ぶだけだが、本物の履歴だけでは
+      # 「落ちるべき形」がほとんど現れない。GitHub が squash merge で足す
+      # Co-authored-by は push(main) の全履歴検査で初めて赤になり、PR の検査
+      # （マージ前）では見えない。逆に許可を広げすぎて「何でも通る」になっても、
+      # 本物の履歴だけでは気づけない。1 コミットだけの仕込みのリポジトリを
+      # 場合ごとに作り、通る/落ちるの両方を機械で固定する。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# verify-commit-identity-selftest.sh — commit identity の検証ゲートが、通すべき形を
+# 通し、落とすべき形を落とすことを、仕込みのリポジトリで確かめる。
+#
+# ## なぜ要るのか
+#
+# **本物の main を検査しても、落ちるべき形はほとんど現れない。** GitHub は squash
+# merge で、マージした人と PR の作者が違うと（例: 別の人が書いた PR を自分が
+# マージする）、マージの瞬間に作者の Co-authored-by を足す。これは PR の検査
+# （マージ前）では見えず、push(main) の全履歴検査で初めて赤になる。逆に、許可を
+# 広げた結果「何でも通る」になっても、本物の履歴だけでは気づけない。
+#
+# そこで 1 コミットだけの仕込みのリポジトリを場合ごとに作り、判定スクリプトを
+# そこへ写して `--full` で回す（判定スクリプトは自分の置き場所のリポジトリへ
+# cd するため）。
+#
+# ## 何を見るか
+#
+# - 通る: 許可 email の author / GitHub の squash merge（committer=noreply@github.com）で
+#   noreply 形の author・co-author を持つコミット / AI の trailer
+# - 落ちる: ローカルで作ったコミット（committer が許可 email）の co-author が
+#   noreply 形式 / @ を 2 つ持つ noreply 形式 / 許可外の個人 email の
+#   co-author・author
+#
+# 使い方:
+#   bash scripts/verify-commit-identity-selftest.sh
+#
+# 終了コード: 0 = IDENTITY_SELFTEST_PASS / 1 = どれかの場合が期待と違う
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/verify-commit-identity-selftest.XXXXXX")"
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT
+
+readonly ME='me@example.com'
+readonly GH='noreply@github.com'
+readonly BOT='12345+someone@users.noreply.github.com'
+
+failures=0
+n=0
+
+# check <名前> <期待の終了コード> <author email> <committer email> [co-author email...]
+check() {
+  local name="$1" want="$2" author="$3" committer="$4"
+  shift 4
+  n=$((n + 1))
+  local repo="$tmp/repo-$n"
+  mkdir -p "$repo/scripts"
+  cp "$HERE/verify-commit-identity.sh" "$repo/scripts/"
+  git -C "$repo" init -q
+  local msg="case: ${name}" email
+  if [[ "$#" -gt 0 ]]; then
+    msg+=$'\n'
+    for email in "$@"; do
+      msg+=$'\n'"Co-authored-by: someone <${email}>"
+    done
+  fi
+  GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL="$author" \
+    GIT_COMMITTER_NAME=c GIT_COMMITTER_EMAIL="$committer" \
+    git -C "$repo" commit -q --allow-empty -m "$msg"
+
+  local got=0 out
+  out="$(ALLOWED_AUTHOR_EMAILS="$ME" bash "$repo/scripts/verify-commit-identity.sh" --full 2>&1)" || got=$?
+  if [[ "$got" -ne "$want" ]]; then
+    echo "[identity-selftest] FAIL: ${name}: 終了コード ${got}（期待 ${want}）"
+    printf '%s\n' "$out" | sed 's/^/    /'
+    failures=$((failures + 1))
+    return 0
+  fi
+  echo "[identity-selftest] ok: ${name}"
+}
+
+# 通る
+check "許可 email の author と committer" 0 "$ME" "$ME"
+check "AI の trailer" 0 "$ME" "$ME" "noreply@anthropic.com"
+check "squash merge の committer" 0 "$ME" "$GH"
+check "GitHub 由来の author を squash merge（co-author も同じ形）" 0 "$BOT" "$GH" "$BOT"
+check "人の PR を別の人が squash merge" 0 "$ME" "$GH" "67890+other@users.noreply.github.com"
+
+# 落ちる
+check "ローカルのコミットに noreply 形式の co-author" 1 "$ME" "$ME" "$BOT"
+check "@ を 2 つ持つ noreply 形式の co-author" 1 "$ME" "$GH" "x@evil.com@users.noreply.github.com"
+check "ローカル部が空の noreply 形式の co-author" 1 "$ME" "$GH" "@users.noreply.github.com"
+check "許可外の個人 email の co-author" 1 "$ME" "$GH" "other@example.org"
+check "許可外の個人 email の author" 1 "other@example.org" "$GH"
+check "ローカルのコミットに noreply 形式の author" 1 "$BOT" "$ME"
+
+if [[ "$failures" -gt 0 ]]; then
+  echo "[identity-selftest] ${failures} / ${n} 件が期待と違います。"
+  echo "IDENTITY_SELFTEST_FAIL"
+  exit 1
+fi
+echo "[identity-selftest] ${n} 件すべて期待どおり。"
+echo "IDENTITY_SELFTEST_PASS"
 TMPL
       ;;
     'scripts/post-rebuild-check.sh')
@@ -2813,6 +2961,444 @@ fi
 
 echo "[deps] package-lock.json と node_modules の記録が一致しています。"
 echo "DEPS_PASS"
+exit 0
+TMPL
+      ;;
+    'scripts/check-doc-links.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-doc-links.sh — 追跡している Markdown の相対リンクが、追跡対象として実在
+# することを機械で検査する
+#
+# 位置づけ:
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   scripts/check-control-chars.sh / scripts/check-table-breaks.sh と同じ形にそろえる。
+#
+# なぜ機構で押さえるか:
+#   リンク切れは**読んでも気づけない**。文書は正しく見え、リンクを押した人だけが
+#   404 に当たる。該当行を出して目視しても気づけないことが多く、判定は完全に
+#   決定的なので、`.ai-playbook/shared-ai-rules.md` 12 章「呼びかけで担保しない」に
+#   照らして機構へ移せる。
+#
+# 何を見るか:
+#   追跡された `*.md` の中の **相対リンク** が、**追跡対象として実在する**こと。
+#   対象の形は `](...)` で、画像（`![alt](path)`）も同じ綴りなので一緒に見る。
+#
+#   「追跡対象として実在する」の判定に、作業ツリーの有無（test -e）を使わない。
+#   **配布されるのは追跡ファイルだけ**なので、ローカルにだけある生成物や無視
+#   されたファイルへのリンクは、手元では開けても配布された文書では 404 になる。
+#   判定は `git ls-files` から作った集合への所属で行う（ディレクトリは、追跡
+#   ファイルの祖先として集合へ入れる。`[src/](src/)` のような形も実在しうる）。
+#
+#   パスは正規化してから突き合わせる（`.` と `..` を畳む）。畳んだ結果が
+#   **リポジトリの外へ出るリンクは不合格**とする。手元の絶対パスの都合で通って
+#   しまい、配布側では必ず壊れる。
+#
+# 何を見ないか（この検査が見ていると誤解しないために明記する）:
+#   - **スキーム付きリンクの到達性と妥当性**。**種類を列挙せず、スキームの綴りで
+#     一律に外す**（英字で始まり、英数と + . - が続き、コロンで終わる形。
+#     CommonMark の定義）。http / https / mailto だけを挙げると、tel: / ftp: /
+#     data: のようなスキームが相対パスとして扱われ、書いてもいないパスについて
+#     「存在しない」と誤って報告する。到達性を見たいならネットワークが要るので、
+#     外部層の検査として別に足す。
+#   - **プロトコル相対**（`//host/path`）も外す。
+#   - **アンカーの実在**（`#見出し` / `#L160`）。`#` 以降は落としてからパスを見る。
+#     見出しの照合には Markdown の見出し→アンカー変換の再実装が要り、日本語
+#     見出しでは規則が処理系に依存する。行番号アンカー（`#L160`）は対象ファイルの
+#     行数に依存し、追随しない写しを増やす。
+#   - **インラインコード（`` ` `` で囲まれた範囲）の除外**。**意図的に剥がさない。**
+#     剥がす実装は「2 つのコードスパンの間にある実在のリンク」を取り落とす。
+#     **偽の緑（実在するリンクを検査対象から外す）より、偽の赤（コード例の中の
+#     リンク表記を拾う）のほうが害が小さい。**
+#   - **参照形式リンク**（`[text][ref]` と `[ref]: path`）。
+#   - **角括弧で囲む形**（`](<path with space>)`）と **URL エンコード**（`%20`）。
+#
+#   **ルート絶対のリンク（`](/docs/x.md)`）は、見ないのではなく不合格にする。**
+#   解決規則が処理系で揺れる（レンダラと手元のエディタで一致しないことがある）ため、
+#   使わないことにして綴りを直す側へ倒す。**素通しにはできない**——文書のディレクトリと
+#   連結してから畳むと `docs//docs/x.md` → `docs/docs/x.md` のように、書いてもいない
+#   パスについて「存在しない」と誤って報告する。
+#
+# コードフェンスの扱い:
+#   フェンスの内側は見ない。コード例に書かれたリンク表記を拾うと、直しようのない
+#   赤が出る。
+#
+#   **2 種類の印を両方見る**（``` と `~~~`）。片方だけだと、見ていない側の印の中の
+#   リンクを実在のリンクとして拾ってしまう。
+#
+#   **切り替えは行の先頭の空白を許して見る**——字下げされたフェンスがありうる
+#   （箇条の中のコード）ので、行頭固定だと切り替えを取りこぼす。
+#
+#   **開いたときの印と同じ種類でだけ閉じる。数の偶奇では見ない。** 一方の印の中に
+#   もう一方の印を書く形（フェンスそのものの説明）があると、偶奇では状態が反転する。
+#
+#   **終端でまだ開いているファイルは不合格にする。** 開いたまま閉じていないと、
+#   そこからファイル末尾までが「コードの中」として検査から外れる。**それは
+#   偽の緑である。** Markdown としても壊れているので、直すべき側も明確である。
+#
+# 除外の渡し方:
+#   利用側がリンクを検査したくない文書（取り込んだ外部文書など）を持つ場合、
+#   環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスを
+#   コロン区切りで渡す（既定は空＝何も除外しない）。一致した追跡 md はスキャン
+#   そのものを行わない（その md が持つリンクは検査対象にならない）。
+#
+#     DOC_LINKS_EXCLUDE="vendor/docs:third_party/readme.md" bash scripts/check-doc-links.sh
+#
+#   除外は「スキャンする側（リンク元の文書）」にだけ効く。**リンクの行き先が
+#   除外パスの中にあっても、行き先としての実在判定（追跡ファイルの集合）には
+#   影響しない。** 除外していない文書からそこへのリンクは、従来どおり実在を要求する。
+#
+#   個人所有・組織所有、macOS・Linux のいずれでも、環境変数という setting-free な
+#   経路だけで上書きできるため、追加の設定ファイルや OS 判定を要らない。
+#
+# 検査が成立していないことを合格にしない:
+#   git 管理外での実行、git コマンドの失敗、追跡ファイル 0 件、awk の失敗は
+#   いずれも「リンクが壊れていない」ことを意味しない。すべて失敗として扱う。
+#
+#   一方、**追跡している Markdown が 1 件も無い場合（除外設定で全件を除いた
+#   場合を含む）は、失敗させない。** 配布直後のプロジェクト（`--with-playbook`
+#   を選ばない既定構成は Markdown を 1 本も生成しない）はこの状態に日常的に
+#   なる。「検査対象が無い」ことと「リンクが壊れていない」ことは両立するので、
+#   ここでダミーの文書を足す以外に直しようが無い検査にはしない。
+#
+#   判定の要であるフェンス追跡・抽出器が壊れるリグレッションは、プロジェクトの
+#   実体に Markdown が実在するかどうかとは別に、**起動時の自己診断**（壊れた
+#   リンクを必ず当てること、正しいリンクを誤検出しないこと、フェンスの内側を
+#   拾わないこと、閉じていないフェンスを検出すること、スキーム付きリンクを
+#   相対パスとして扱わないこと）が独立に検出する。書き損じで「何も当たらない
+#   検査」になっていた場合、それは常に緑を返すため、赤にならない限り誰も
+#   気づけない。
+#
+# 使い方:
+#   bash scripts/check-doc-links.sh
+#   DOC_LINKS_EXCLUDE="vendor/docs" bash scripts/check-doc-links.sh
+#
+# 終了コード:
+#   0 = DOC_LINKS_PASS
+#   1 = DOC_LINKS_FAIL（リンク切れ、または検査が成立しなかった）
+#
+# **GNU 拡張を使わない**（macOS / bash 3.2 でも動かす。scripts/check-shell-portability.sh
+# の対象）。awk は POSIX の範囲に収める（gensub 等を使わない）。
+set -euo pipefail
+
+# 角括弧の範囲指定と sort/comm の照合順をバイト順に固定する
+# （scripts/check-control-chars.sh が sort/comm で固定しているのと同じ理由）。
+export LC_ALL=C
+
+# 検査はプロジェクトルート基準で行う。scripts/ の 1 階層上がルート。
+# 任意の作業ディレクトリから起動しても結果が不変になるよう、起動時 CWD に依存しない。
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$HERE")"
+
+fail() {
+  printf '[doc-links] %s\n' "$1" >&2
+  echo "DOC_LINKS_FAIL"
+  exit 1
+}
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/doc-links.XXXXXX")" \
+  || { echo "[doc-links] 一時ディレクトリを作成できません。" >&2; echo "DOC_LINKS_FAIL"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT
+
+EXTRACT="$WORK/extract.awk"
+ALLOWED="$WORK/allowed"
+TRACKED="$WORK/tracked.z"
+MD_LIST="$WORK/md.z"
+TARGETS="$WORK/targets"
+WANTED="$WORK/wanted"
+MISSING="$WORK/missing"
+
+# ── 抽出器 ───────────────────────────────────────────────────────────────────
+#
+# 1 ファイルを読み、検査対象の相対リンクを「種別<TAB>...」の形で出す。
+# フェンスの内側は読み飛ばし、フェンス行の不均衡（閉じ忘れ）も報告する。
+#
+#   L<TAB>正規化パス<TAB>ファイル:行<TAB>元の綴り   … 検査すべきリンク
+#   E<TAB>ファイル:行<TAB>元の綴り                  … リポジトリの外へ出るリンク
+#   A<TAB>ファイル:行<TAB>元の綴り                  … ルート絶対のリンク
+#   U<TAB>ファイル<TAB>フェンス行数                 … フェンスが不均衡
+cat > "$EXTRACT" <<'AWK'
+function normalize(p,   parts, n, out, m, i, s) {
+  n = split(p, parts, "/")
+  m = 0
+  for (i = 1; i <= n; i++) {
+    if (parts[i] == "" || parts[i] == ".") continue
+    if (parts[i] == "..") {
+      if (m > 0) { m-- } else { return "\001ESCAPE" }
+      continue
+    }
+    m++
+    out[m] = parts[i]
+  }
+  s = ""
+  for (i = 1; i <= m; i++) s = (s == "") ? out[i] : s "/" out[i]
+  return s
+}
+BEGIN { infence = 0; fmark = ""; fline = 0 }
+# フェンスはマーカーの種類（``` / ~~~）まで見て、開いたときと同じ種類でだけ閉じる
+# （数の偶奇では見ない。一方の中にもう一方を書く形があると偶奇では状態が反転する）。
+/^[[:space:]]*(```|~~~)/ {
+  fl = $0
+  sub(/^[[:space:]]*/, "", fl)
+  mk = substr(fl, 1, 1)
+  if (!infence) { infence = 1; fmark = mk; fline = FNR; next }
+  if (mk == fmark) { infence = 0; fmark = ""; next }
+  next
+}
+infence { next }
+{
+  line = $0
+  while (match(line, /\]\([^)]*\)/)) {
+    raw = substr(line, RSTART + 2, RLENGTH - 3)
+    line = substr(line, RSTART + RLENGTH)
+    t = raw
+    # リンク先とタイトルを分ける（`[a](path "title")` / `[a](path 'title')`）。
+    # CommonMark では、リンク先は空白を含まないか `<...>` で囲む。囲みがあれば
+    # その中身を、無ければ最初の空白の手前までをリンク先とする。
+    sub(/^[ \t]+/, "", t)
+    if (substr(t, 1, 1) == "<") {
+      if (match(t, />/)) { t = substr(t, 2, RSTART - 2) }
+    } else if (match(t, /[ \t]/)) {
+      t = substr(t, 1, RSTART - 1)
+    }
+    # スキーム付きは種類を列挙せずに弾く（CommonMark のスキームの綴り: 英字で
+    # 始まり、英数と + . - が続き、コロンで終わる）。ファイルへの相対リンクでは
+    # ないため、相対パスとして誤って扱わない。
+    if (t ~ /^[A-Za-z][A-Za-z0-9+.-]*:/) continue
+    if (t ~ /^\/\//) continue
+    # ルート絶対（`/docs/x.md`）は、畳む前に弾く。DIR と連結してから畳むと
+    # `docs//docs/x.md` → `docs/docs/x.md` になり、書いてもいないパスについて
+    # 「存在しない」と報告してしまう。素通しにはできない。
+    if (t ~ /^\//) {
+      printf "A\t%s:%d\t%s\n", FILE, FNR, raw
+      continue
+    }
+    if (t ~ /^#/) continue
+    sub(/#.*$/, "", t)
+    if (t == "") continue
+    joined = (DIR == ".") ? t : DIR "/" t
+    norm = normalize(joined)
+    if (norm == "\001ESCAPE") {
+      printf "E\t%s:%d\t%s\n", FILE, FNR, raw
+      continue
+    }
+    # 畳んだ結果が空になるのは「リポジトリのルートそのもの」を指す場合だけ
+    # （ルート直下の md に `](.)` と書いた形）。ルートは常に在るので、外へ
+    # 出たのとは区別して素通しする。
+    if (norm == "") continue
+    printf "L\t%s\t%s:%d\t%s\n", norm, FILE, FNR, raw
+  }
+}
+END {
+  # 偶奇ではなく「終端でまだ開いているか」で見る。開いた行番号を出して、
+  # 直す場所を名指しする。
+  if (infence) printf "U\t%s\t%d\t%s\n", FILE, fline, fmark
+}
+AWK
+
+# ── 自己診断 ─────────────────────────────────────────────────────────────────
+#
+# 3 方向を見る。当たること（偽陰性＝常に緑になる壊れ方）、当たらないこと
+# （偽陽性）、フェンスの内側を拾わないこと（直しようのない赤）。
+selftest="$WORK/selftest.md"
+printf '%s\n' \
+  '[ok](present.md)' \
+  '```' \
+  '[fenced-bt](nope-in-bt-fence.md)' \
+  '```' \
+  '~~~' \
+  'これは ``` を含む説明' \
+  '[fenced-tilde](nope-in-tilde-fence.md)' \
+  '~~~' \
+  '[scheme](tel:+810000000000)' \
+  '[gone](absent.md)' \
+  > "$selftest"
+diag="$(awk -v DIR="." -v FILE="selftest.md" -f "$EXTRACT" "$selftest")" \
+  || fail "自己診断で抽出器が異常終了しました。検査が成立していないため失敗させます。"
+
+printf '%s\n' "$diag" | grep -q "^L	absent.md	" \
+  || fail "自己診断に失敗しました: 壊れたリンクを抽出できません。検査が成立していないため失敗させます。"
+printf '%s\n' "$diag" | grep -q "^L	present.md	" \
+  || fail "自己診断に失敗しました: 正常なリンクを抽出できません。検査が成立していないため失敗させます。"
+if printf '%s\n' "$diag" | grep -q "nope-in-bt-fence.md"; then
+  fail "自己診断に失敗しました: 3 連バッククォートのフェンスの内側を拾っています。検査が成立していないため失敗させます。"
+fi
+if printf '%s\n' "$diag" | grep -q "nope-in-tilde-fence.md"; then
+  fail "自己診断に失敗しました: ~~~ のフェンスの内側を拾っています。検査が成立していないため失敗させます。"
+fi
+if printf '%s\n' "$diag" | grep -q "tel:"; then
+  fail "自己診断に失敗しました: スキーム付きのリンクを相対パスとして扱っています。検査が成立していないため失敗させます。"
+fi
+if printf '%s\n' "$diag" | grep -q "^U	"; then
+  fail "自己診断に失敗しました: 閉じているフェンスを未閉と判定しています。検査が成立していないため失敗させます。"
+fi
+
+unclosed_test="$WORK/selftest-unclosed.md"
+printf '%s\n' '```' '[in-open-fence](nope.md)' > "$unclosed_test"
+diag_unclosed="$(awk -v DIR="." -v FILE="selftest-unclosed.md" -f "$EXTRACT" "$unclosed_test")" \
+  || fail "自己診断で抽出器が異常終了しました。検査が成立していないため失敗させます。"
+printf '%s\n' "$diag_unclosed" | grep -q "^U	" \
+  || fail "自己診断に失敗しました: 閉じていないフェンスを検出できません。検査が成立していないため失敗させます。"
+
+# ── 追跡対象の集合を作る ─────────────────────────────────────────────────────
+#
+# 追跡ファイルそのものと、その祖先ディレクトリ全部を入れる。ディレクトリは git の
+# 追跡単位ではないので、祖先として足さないと `[src/](src/)` の形が落ちる。
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "git の作業ツリーではありません。追跡ファイルを列挙できないため失敗させます。"
+
+git ls-files -z > "$TRACKED" \
+  || fail "git ls-files に失敗しました。追跡ファイルを列挙できません。"
+
+# 件数はループの外で数える。NUL は 1 レコード 1 個なので、その個数がそのまま
+# 件数になる（改行を含むパス名でも崩れない）。
+tracked_count="$(tr -cd '\000' < "$TRACKED" | wc -c | tr -d ' ')"
+tracked_count="${tracked_count:-0}"
+
+[ "$tracked_count" -gt 0 ] \
+  || fail "追跡ファイルが 1 件もありません。検査していないことと、リンクが壊れていないことは別なので失敗させます。"
+
+# 祖先はシェルの文字列操作だけで削る（dirname を 1 件ごとに呼ぶとプロセスが
+# 追跡件数 × 階層ぶん起きるため）。
+while IFS= read -r -d '' path; do
+  printf '%s\n' "$path"
+  dir="$path"
+  while [ "$dir" != "${dir%/*}" ]; do
+    dir="${dir%/*}"
+    [ -n "$dir" ] && printf '%s\n' "$dir"
+  done
+done < "$TRACKED" | sort -u > "$ALLOWED"
+
+# ── 除外設定 ─────────────────────────────────────────────────────────────────
+#
+# DOC_LINKS_EXCLUDE はコロン区切りのパスプレフィックス（既定は空）。一致した
+# 追跡 md はスキャン対象から外す（`$HERE` から読む .env 等の設定ファイルは
+# 経由しない。環境変数という 1 経路に絞ることで、個人/組織・OS の違いに関わらず
+# 同じ渡し方で上書きできる）。
+is_excluded() {
+  local md="$1" prefix
+  [ -n "${DOC_LINKS_EXCLUDE:-}" ] || return 1
+  local IFS=:
+  for prefix in $DOC_LINKS_EXCLUDE; do
+    # 末尾のスラッシュは畳む（`vendor/docs/` と書いても `vendor/docs` と同じに扱う）。
+    # 畳まないと `vendor/docs//*` になり、どの追跡パスにも一致しない。
+    prefix="${prefix%/}"
+    [ -n "$prefix" ] || continue
+    case "$md" in
+      "$prefix"|"$prefix"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# ── 追跡 md から抽出する ─────────────────────────────────────────────────────
+#
+# 一時ファイルへ列挙してから読む。`done < <(git ls-files ...)` のようにプロセス
+# 置換へ直接つなぐと、bash はプロセス置換内のコマンドの終了コードを呼び出し元へ
+# 伝播しない（set -e でも捕まらない）。git ls-files が異常終了しても md_count が
+# 0 のまま次段へ進み、「対象が無いので合格」という正当な経路と区別が付かなくなる。
+git ls-files -z '*.md' > "$MD_LIST" \
+  || fail "git ls-files に失敗しました。対象文書を列挙できません。"
+
+md_count=0
+excluded_count=0
+: > "$TARGETS"
+while IFS= read -r -d '' md; do
+  if is_excluded "$md"; then
+    excluded_count=$((excluded_count + 1))
+    continue
+  fi
+  md_count=$((md_count + 1))
+  case "$md" in
+    */*) mdir="${md%/*}" ;;
+    *)   mdir="." ;;
+  esac
+  awk -v DIR="$mdir" -v FILE="$md" -f "$EXTRACT" "$md" >> "$TARGETS" \
+    || fail "抽出が異常終了しました: $md。検査が成立していないため失敗させます。"
+done < "$MD_LIST"
+
+# 追跡された Markdown が 1 件も無い（または設定ですべて除外した）場合は、
+# 失敗させない。配布直後のプロジェクト（`--with-playbook` を選ばない既定構成は
+# Markdown を 1 本も生成しない）に、文書が無いことを理由に赤を強いると、
+# ダミーの文書を足す以外に直しようが無い検査になる。「対象が無い」ことと
+# 「リンクが壊れていない」ことは両立する。
+#
+# 判定の要であるフェンス追跡や抽出器が壊れて全件を見落とす形のリグレッションは、
+# プロジェクトの実体に Markdown が実在するかどうかとは別に、起動時の自己診断
+# （合成した入力で壊れたリンクを必ず検出できることを毎回確かめる）が独立に検出する。
+if [ "$md_count" -eq 0 ]; then
+  printf '[doc-links] 検査対象の Markdown がありません（除外 %s 件）。検証対象が無いため合格として扱います。\n' \
+    "$excluded_count"
+  echo "DOC_LINKS_PASS"
+  exit 0
+fi
+
+# ── フェンスの不均衡 ─────────────────────────────────────────────────────────
+if grep -q '^U	' "$TARGETS"; then
+  printf '[doc-links] 閉じていないコードフェンスがあります。\n' >&2
+  grep '^U	' "$TARGETS" | while IFS="$(printf '\t')" read -r _ f ln mk; do
+    printf '[doc-links]   %s:%s で開いたフェンス（%s）が閉じていません\n' "$f" "$ln" "$mk" >&2
+  done
+  printf '[doc-links] 閉じていないフェンスから先は「コードの中」として検査から外れます。\n' >&2
+  printf '[doc-links] 偽の緑になるため失敗させます。対処: 上の行のフェンスを同じ種類の印で閉じる。\n' >&2
+  echo "DOC_LINKS_FAIL"
+  exit 1
+fi
+
+# ── ルート絶対のリンク ───────────────────────────────────────────────────────
+if grep -q '^A	' "$TARGETS"; then
+  printf '[doc-links] ルート絶対の相対リンクがあります（先頭が / のもの）。\n' >&2
+  grep '^A	' "$TARGETS" | while IFS="$(printf '\t')" read -r _ loc raw; do
+    printf '[doc-links]   %s → %s\n' "$loc" "$raw" >&2
+  done
+  printf '[doc-links] 解決規則が処理系で揺れるため使いません。\n' >&2
+  printf '[doc-links] 対処: その文書からの相対パスで書き直す。\n' >&2
+  echo "DOC_LINKS_FAIL"
+  exit 1
+fi
+
+# ── リポジトリの外へ出るリンク ───────────────────────────────────────────────
+if grep -q '^E	' "$TARGETS"; then
+  printf '[doc-links] リポジトリの外を指す相対リンクがあります。\n' >&2
+  grep '^E	' "$TARGETS" | while IFS="$(printf '\t')" read -r _ loc raw; do
+    printf '[doc-links]   %s → %s\n' "$loc" "$raw" >&2
+  done
+  printf '[doc-links] 手元では開けても、配布された文書では必ず壊れます。\n' >&2
+  echo "DOC_LINKS_FAIL"
+  exit 1
+fi
+
+# ── 突き合わせ ───────────────────────────────────────────────────────────────
+link_count="$(grep -c '^L	' "$TARGETS" || true)"
+link_count="${link_count:-0}"
+
+awk -F'\t' '$1 == "L" { print $2 }' "$TARGETS" | sort -u > "$WANTED"
+comm -23 "$WANTED" "$ALLOWED" > "$MISSING"
+
+unique_count="$(wc -l < "$WANTED" | tr -d ' ')"
+missing_count="$(wc -l < "$MISSING" | tr -d ' ')"
+
+printf '[doc-links] 検査したパス: 追跡 md %s 件（除外 %s 件）/ 相対リンク %s 本（ユニークな行き先 %s 件）\n' \
+  "$md_count" "$excluded_count" "$link_count" "$unique_count"
+
+if [ "${missing_count:-0}" -gt 0 ]; then
+  printf '[doc-links] 追跡対象として実在しない行き先を %s 件検出しました。\n' "$missing_count" >&2
+  while IFS= read -r miss; do
+    if [ -e "$miss" ]; then
+      printf '[doc-links]   %s（作業ツリーにはあるが追跡されていない）\n' "$miss" >&2
+    else
+      printf '[doc-links]   %s（存在しない）\n' "$miss" >&2
+    fi
+    awk -F'\t' -v M="$miss" '$1 == "L" && $2 == M { printf "[doc-links]     ← %s に %s\n", $3, $4 }' \
+      "$TARGETS" >&2
+  done < "$MISSING"
+  printf '[doc-links] 対処: 綴りを直すか、行き先を追跡対象に入れる。\n' >&2
+  printf '[doc-links]       追跡されていない行き先は、手元では開けても配布側では 404 になります。\n' >&2
+  echo "DOC_LINKS_FAIL"
+  exit 1
+fi
+
+echo "DOC_LINKS_PASS"
 exit 0
 TMPL
       ;;
@@ -4692,6 +5278,14 @@ TMPL
 #   ブランチの成果であって、このブランチが加えた変更ではない。範囲が既定ブランチ
 #   へ到達可能なコミットを含むときは分岐点まで戻し、なぜ範囲を変えたかを出力する。
 #
+# 第二意見の記録:
+#   第二意見は手元でしか走らず、受け入れ検証のように CI が再実行して確かめられない。
+#   回したことを記録に残し、確認側（second-opinion-gate.yml）が push 後の別の契機で
+#   「回し忘れ」を検出する（規範: review-workflow.md「要求されたことを別の契機で
+#   確認する」）。scripts/second-opinion-record.sh が存在するときだけ記録し、
+#   無ければ記録せず静かに進む（第二意見そのものと同じ「外部パッケージの導入を
+#   前提にしない」方針）。
+#
 # 終了コード:
 #   0 = GATE_PASS（全段通過。push 可）
 #   1 = GATE_FAIL（いずれかの段が未通過、または実行不能）
@@ -4797,7 +5391,25 @@ resolve_review_range() {
     elif range_includes_base_commits "$upstream" "$base"; then
       fallback_reason="upstream range $upstream..HEAD also contains commits already reachable from $base (default branch integrated into this branch)"
     else
-      REVIEW_RANGE="$upstream..HEAD"
+      # **起点は上流の先端ではなく、上流と HEAD の分岐点にする。** 第二意見は
+      # `git diff <範囲>` で差分を取り、これは両端のツリーの差である。上流が
+      # 分岐点より先へ進んでいると（ゲートの最中に既定ブランチへ別の PR が入った等）、
+      # 進んだ分が逆向きに差分へ入り、このブランチが触っていないファイルへの指摘で
+      # ゲートが落ちる。上の 2 の判定は `git log` の意味（上流に無いコミット）で見るため、
+      # この混入を検出できない。three-dot（A...B）は diff では分岐点基準になるが、
+      # 第二意見が `git log` にも同じ範囲を渡すと対称差になるので使わない。
+      #
+      # 上流が進んでいなければ分岐点は上流の先端と同じなので、従来どおり上流の名前で
+      # 範囲を書く（出力と記録の範囲の表記を変えない）。
+      local upstream_mb upstream_tip
+      upstream_mb="$(git merge-base "$upstream" HEAD 2>/dev/null || true)"
+      upstream_tip="$(git rev-parse --verify --quiet "$upstream" 2>/dev/null || true)"
+      if [[ -n "$upstream_mb" && -n "$upstream_tip" && "$upstream_mb" != "$upstream_tip" ]]; then
+        REVIEW_RANGE="$upstream_mb..HEAD"
+        REVIEW_RANGE_REASON="$upstream has advanced beyond the merge-base; reviewing from the merge-base ${upstream_mb:0:12} so that changes only on $upstream are not reverted into the diff"
+      else
+        REVIEW_RANGE="$upstream..HEAD"
+      fi
       return 0
     fi
   else
@@ -4856,6 +5468,75 @@ resolve_review_range() {
   REVIEW_NO_TARGET=1
 }
 
+# 第二意見の出力を記録へ残す。
+#
+# **実行失敗を「指摘あり」として記録しない。** second-opinion-review.sh は CLI の不在・
+# 分割できない差分・API の失敗でも非 0 で終わるため、終了コードだけを見ると**レビューが
+# 1 行も走っていないのに「指摘あり」の記録が残る。** その記録は確認側を緑にするので、
+# **レビューしていない head が「レビュー済み」として通る。**
+#
+# **判定が出たことは、出力の中の完了の行で見る。** second-opinion-review.sh は
+# 終わりに必ず最終集計の行を 1 つ出す。形は次の 3 つで、チャンク分割の有無で変わる。
+#   `[second-opinion] LGTM (...)`
+#   `[second-opinion] findings reported by N/M runs ...`（分割なし）
+#   `[second-opinion] N/M chunks reported findings ...`（分割あり）
+# どれも無ければ、途中で落ちたということなので記録しない。
+#
+# **行頭に固定し、チャンクごとの集計行に一致させない。** 分割時は各チャンクの後に
+# `[second-opinion] chunk i/N: findings reported by ...` が出る。これを完了とみなすと、
+# 後続のチャンクで CLI が落ちた未完了のレビューでも記録が残り、確認側が緑になる。
+#
+# **完了の行を要求するのは既定の reviewer のときだけである。** 差し替えた reviewer
+# （LOOP_GATE_REVIEW_CMD）は当然この綴りを出さないので、要求すると**正常に終わった
+# レビューまで「判定に到達しなかった」として記録しなくなる**——確認側が必ず赤になり、
+# 差し替えを使う人には「回したのに回していないと言われる」形になる。
+#
+# **差し替え経路では、実行失敗と指摘を区別できない。** 規範は「重大な指摘がなければ通過を
+# 示す一意な判定トークンを出力の最後の行に返すこと」としか定めておらず、その綴りは
+# プロジェクト層が決める。loop-gate からは読めないので、終了コードだけで判定する。
+# **記録の `engine` が `custom` になるので、後から見たときに区別できる。**
+#
+# 引数: 1=出力を捕まえたファイル / 2=scope / 3=終了コード（0 なら pass）
+#       4=完了の行を要求するか（1=する / 0=しない）
+# 戻り値: 常に 0（記録の失敗でゲートの判定を変えない）
+record_second_opinion() {
+  local capture="$1" scope="$2" rc="$3" require_marker="${4:-1}"
+  [[ -n "$scope" ]] || return 0
+  [[ -s "$capture" ]] || return 0
+  [[ -f "$HERE/second-opinion-record.sh" ]] || return 0
+
+  if [[ "$require_marker" -eq 1 ]] \
+    && ! grep -q -E \
+      -e '^\[second-opinion\] LGTM \(' \
+      -e '^\[second-opinion\] findings reported by ' \
+      -e '^\[second-opinion\] [0-9]+/[0-9]+ chunks reported findings' \
+      "$capture"; then
+    echo "[loop-gate] 第二意見は判定に到達しませんでした（実行失敗）。記録は残しません。" >&2
+    echo "[loop-gate] 記録が無いので、push すると確認側が赤を出します。原因を直してから回し直してください。" >&2
+    return 0
+  fi
+
+  local engine runs verdict
+  # engine と回数は**出力から読む**（環境変数から読むと、上書きされた実際の値と
+  # 食い違う）。
+  engine="$(sed -n 's/.*(engine=\([^,)]*\).*/\1/p' "$capture" | head -1)"
+  # 差し替え経路で出力から engine が読めないときは `custom` と記録する。**`unknown` に
+  # しない**——「読めなかった」と「差し替えた reviewer だった」は別の事実である。
+  [[ -n "$engine" || "$require_marker" -eq 1 ]] || engine=custom
+  runs="$(sed -n 's/.*runs=\([0-9]*\).*/\1/p' "$capture" | head -1)"
+  verdict=pass
+  [[ "$rc" -eq 0 ]] || verdict=findings
+
+  bash "$HERE/second-opinion-record.sh" save \
+    --engine "${engine:-unknown}" \
+    --verdict "$verdict" \
+    --scope "$scope" \
+    --runs "${runs:-1}" \
+    < "$capture" \
+    || echo "[loop-gate] WARN: 第二意見の記録を残せませんでした（ゲートの判定は変えません）" >&2
+  return 0
+}
+
 main() {
   # verify・第二意見（git diff 等）はプロジェクトルート基準で実行する。
   # scripts/ の 1 階層上がルート。任意の作業ディレクトリから起動しても不変にする。
@@ -4884,6 +5565,14 @@ main() {
     if [[ -f "$HERE/second-opinion-review.sh" ]]; then
       resolve_review_range
       local review_ok=0
+      # 出力を捕まえる。**回し直しでは代われない**——第二意見は非決定的で、同じ差分
+      # でも実行のたびに結果が変わる（review-workflow.md「第二意見の非決定性」）。
+      # 記録に残すべきは**push を通したその実行**なので、ここで捕まえるしかない。
+      #
+      # `tee` で通すので、利用者に見える出力は変わらない。`pipefail` が効いているため、
+      # レビュー側の終了コードは `tee` に隠れない。
+      local so_capture so_scope=""
+      so_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
       if [[ -n "$REVIEW_RANGE" ]]; then
         # 上流以外を起点に採ったなら、その理由を先に出す。黙って範囲を変えると、
         # なぜその差分がレビュー対象なのかを読み手が追えない。
@@ -4891,15 +5580,28 @@ main() {
           echo "[loop-gate] $REVIEW_RANGE_REASON"
         fi
         echo "[loop-gate] staged diff is empty; reviewing $REVIEW_RANGE"
-        bash "$HERE/second-opinion-review.sh" --range "$REVIEW_RANGE" || review_ok=1
+        bash "$HERE/second-opinion-review.sh" --range "$REVIEW_RANGE" 2>&1 \
+          | tee "$so_capture" || review_ok=1
+        so_scope="range:$REVIEW_RANGE"
       elif [[ "$REVIEW_NO_TARGET" -eq 1 ]]; then
         # レビューできる差分が 1 行も無い。第二意見を呼んでも対象が無いため、
         # その事実を明示したうえで通過させる（空を FAIL にすると、差分の無い
         # 状態でのゲート実行が落ちる）。黙って通すと偽の緑と区別が付かない。
+        #
+        # **記録も残さない。** レビューしていないものを「レビュー済み」として記録すると、
+        # 確認側（second-opinion-gate.yml）が偽の緑を出す。記録が無ければ赤が出るので、
+        # 気づける側へ倒す。
         echo "[loop-gate] no reviewable diff; second opinion has nothing to review"
       else
-        bash "$HERE/second-opinion-review.sh" || review_ok=1
+        bash "$HERE/second-opinion-review.sh" 2>&1 | tee "$so_capture" || review_ok=1
+        so_scope="staged"
       fi
+
+      # 記録は**判定の前に**残す。指摘が出た実行も記録に値する（何が出たのかが
+      # 残らないと、直したのか黙って落としたのかを後から確かめられない）。
+      record_second_opinion "$so_capture" "$so_scope" "$review_ok"
+      rm -f "$so_capture"
+
       if [[ "$review_ok" -ne 0 ]]; then
         echo "[loop-gate] second opinion reported findings" >&2
         echo "GATE_FAIL"
@@ -4909,13 +5611,30 @@ main() {
       echo "[loop-gate] SKIP (no reviewer present)"
     fi
   elif [[ -n "$LOOP_GATE_REVIEW_CMD" ]]; then
-    if ! bash -c "$LOOP_GATE_REVIEW_CMD"; then
+    # **差し替えた reviewer でも記録を残す。** 残さないと、差し替えを使っている人は
+    # ローカルのゲートを通しても**確認側が必ず赤になる**——回したのに回していないと
+    # 言われる形で、機構への信頼を壊す。
+    #
+    # **scope は `staged` とみなす。** 差し替えた側が何をレビューしたかは、ここからは
+    # 分からない。既定の reviewer の既定が `staged` で、規範も「差分を渡して非対話で
+    # 実行する」と定めているので、その前提に揃える。**別の範囲をレビューする reviewer
+    # を差し替えるなら、記録も自分で残すこと**（`scripts/second-opinion-record.sh save`
+    # を呼ぶ）。
+    local cmd_capture cmd_ok=0
+    cmd_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
+    bash -c "$LOOP_GATE_REVIEW_CMD" 2>&1 | tee "$cmd_capture" || cmd_ok=1
+    record_second_opinion "$cmd_capture" "staged" "$cmd_ok" 0
+    rm -f "$cmd_capture"
+    if [[ "$cmd_ok" -ne 0 ]]; then
       echo "[loop-gate] second opinion reported findings" >&2
       echo "GATE_FAIL"
       exit 1
     fi
   else
+    # **記録を残さない。** レビューを明示的に止めた状態なので、記録が無いのが正しい。
+    # push すれば確認側が赤を出す——**それは不具合ではなく、止めたことが見えている形である。**
     echo "[loop-gate] SKIP (disabled by LOOP_GATE_REVIEW_CMD='')"
+    echo "[loop-gate] 第二意見を止めたので記録も残しません。push すると確認側が赤を出します。"
   fi
 
   echo "GATE_PASS"
@@ -5964,6 +6683,10 @@ ai_config_dir() {
     # gemini と同じディレクトリを共有する。専用の volume を切ると
     # ~/.gemini と ~/.gemini/antigravity-cli の入れ子マウントになる。
     antigravity) printf '/home/vscode/.gemini' ;;
+    # codex は資格情報（~/.codex/auth.json）を専用のディレクトリへ置く。
+    # gemini / antigravity とは別の認証手段（ChatGPT アカウントの OAuth または
+    # API キー）なので、既存のどの装備とも設定ディレクトリを共有しない。
+    codex)   printf '/home/vscode/.codex' ;;
     *)       printf '' ;;
   esac
 }
@@ -5982,10 +6705,11 @@ ai_storage_name() {
 }
 
 # with-set のうち AI ツールだけを選択順に列挙する。
-# antigravity は末尾に置く。既存構成の生成結果（install 行の並び）を変えないため。
+# antigravity / codex は末尾に置く。既存構成の生成結果（install 行の並び）を変えない
+# ため（codex は antigravity よりも後に足した装備なので、さらに末尾へ置く）。
 selected_ai_tools() {
   local t
-  for t in claude gemini copilot antigravity; do
+  for t in claude gemini copilot antigravity codex; do
     has_with "$t" && printf '%s\n' "$t"
   done
 }
@@ -6344,11 +7068,46 @@ build_with_extensions_block() {
 # .env.example の __SECOND_OPINION_ENGINE_LINES__。第二意見のエンジン選択。
 #
 # 既定は gemini で、指定しなければ挙動は変わらない。したがってこの記入欄が要るのは
-# antigravity を選べる構成だけで、--with-antigravity のときだけ出す。
-# 常時出すと、agy を導入していない生成物に「選べないエンジン」の記入欄が残る。
+# antigravity / codex を選べる構成だけで、どちらかを --with-* で選んだときだけ出す。
+# 常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
 build_second_opinion_engine_block() {
-  has_with antigravity || { printf ''; return; }
-  cat <<'ENGTMPL'
+  has_with antigravity || has_with codex || { printf ''; return; }
+
+  if has_with antigravity && has_with codex; then
+    cat <<'ENGTMPL'
+
+# 第二意見レビューのエンジン（gemini | antigravity | codex）。既定は gemini。
+#
+# antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
+# 対応しない。初回は対話で `agy` を起動してログインすること。
+#
+# codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
+# 対話で `codex login` を通すこと。
+#
+# いずれも GEMINI_API_KEY は使わないため、gemini 以外へ寄せる場合は空のままでよい。
+SECOND_OPINION_ENGINE=
+
+# 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
+# （scripts/second-opinion-review.sh が持つ）。gemini / antigravity は空のままで
+# 各 CLI の既定。
+SECOND_OPINION_MODEL=
+ENGTMPL
+  elif has_with codex; then
+    cat <<'ENGTMPL'
+
+# 第二意見レビューのエンジン（gemini | codex）。既定は gemini。
+#
+# codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
+# 対話で `codex login` を通すこと。GEMINI_API_KEY は使わないため、codex へ寄せる
+# 場合は空のままでよい。
+SECOND_OPINION_ENGINE=
+
+# 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
+# （scripts/second-opinion-review.sh が持つ）。gemini は空のままで CLI の既定。
+SECOND_OPINION_MODEL=
+ENGTMPL
+  else
+    cat <<'ENGTMPL'
 
 # 第二意見レビューのエンジン（gemini | antigravity）。既定は gemini。
 #
@@ -6357,10 +7116,16 @@ build_second_opinion_engine_block() {
 # 使わないため、こちらへ寄せる場合は空のままでよい。
 SECOND_OPINION_ENGINE=
 ENGTMPL
+  fi
 }
 
 # agy は npm 配布ではないため install_if_missing の同型に乗らない。専用の関数
 # （__AGY_FUNCTION_LINES__ が展開する）を呼ぶ。呼び出しは導入とオプトアウトの 2 つ。
+#
+# codex は npm 配布だが、第二意見の既定モデルを引ける版の下限があり、同じく
+# install_if_missing の同型に乗らない（専用の関数は __CODEX_FUNCTION_LINES__ が
+# 展開する build_codex_block）。呼び出しは導入の 1 つだけ（agy のテレメトリ無効化に
+# 相当するものは codex には無い）。
 build_ai_install_block() {
   local tool spec cmd pkg out=""
   while IFS= read -r tool; do
@@ -6368,6 +7133,10 @@ build_ai_install_block() {
     if [[ "$tool" == "antigravity" ]]; then
       out+="install_agy_if_missing"$'\n'
       out+="disable_agy_telemetry"$'\n'
+      continue
+    fi
+    if [[ "$tool" == "codex" ]]; then
+      out+="install_codex_if_missing"$'\n'
       continue
     fi
     spec="$(ai_cli_spec "$tool")"
@@ -6489,6 +7258,75 @@ disable_agy_telemetry() {
 AGYTMPL
 }
 
+# install-ai-tools.sh の __CODEX_FUNCTION_LINES__。codex の導入（版の下限つき）の
+# 関数定義。--with-codex が無ければ空を返し、生成物に codex 関連は 1 行も入らない。
+#
+# 内容は開発リポジトリの scripts/install-ai-tools.sh と同じ性質を持たせる
+# （tests/test-codex-install-mirror.sh が関数本体のバイト一致を照合する）。
+build_codex_block() {
+  has_with codex || { printf ''; return; }
+  cat <<'CODEXTMPL'
+# codex（Codex CLI）は npm 配布だが、install_if_missing の同型には乗らない。
+#
+# 版が要件になる。第二意見レビューの既定モデル gpt-6-sol は、ある版から CLI の
+# 一覧に出るようになった綴りで、それより古い CLI は引けない。install_if_missing は
+# 「PATH に codex が在れば飛ばす」ので、古い版が先に入っている環境は更新されず、
+# レビューのたびに失敗する。だから在るときも版を見る。
+#
+# 認証は ChatGPT アカウントの OAuth（または API キー）で、導入だけでは使えない。
+# 初回に対話で `codex login` を通す必要がある。資格情報は ~/.codex/auth.json に
+# 置かれ、この devcontainer では ~/.codex が named volume（codex-storage）なので
+# rebuild しても消えない。
+CODEX_MIN_VERSION="0.156.0"
+
+# 版の比較。`sort -V` は BSD 系に無い版があるので使わない。3 つの数へ分けて
+# 桁ごとに比べる。
+#
+# 読めない綴りは「古い」として扱う（fail-closed）。入れ替えは冪等で副作用が
+# 小さい一方、読めないまま通すと、要件を満たさない CLI で回り続けることになる。
+codex_version_is_old() {
+  local have="$1" want="$2"
+  awk -v have="$have" -v want="$want" '
+    function num(s, part) { split(s, a, "."); return a[part] + 0 }
+    BEGIN {
+      if (have !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { exit 0 }   # 読めない → 古い扱い
+      for (i = 1; i <= 3; i++) {
+        h = num(have, i); w = num(want, i)
+        if (h > w) { exit 1 }
+        if (h < w) { exit 0 }
+      }
+      exit 1
+    }'
+}
+
+install_codex_if_missing() {
+  local have=""
+  if command -v codex >/dev/null 2>&1; then
+    # `codex --version` は "codex-cli <版>" の形。数だけを取る。
+    have="$(codex --version 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+    if ! codex_version_is_old "$have" "$CODEX_MIN_VERSION"; then
+      echo "[install-ai-tools] codex ${have} already installed (>= $CODEX_MIN_VERSION), skipping"
+      return 0
+    fi
+    echo "[install-ai-tools] codex ${have:-（版を読めません）} は $CODEX_MIN_VERSION 未満です。入れ替えます ..."
+  else
+    echo "[install-ai-tools] installing @openai/codex ..."
+  fi
+
+  npm install -g "@openai/codex@latest"
+
+  have="$(codex --version 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  if codex_version_is_old "$have" "$CODEX_MIN_VERSION"; then
+    echo "[install-ai-tools] error: 導入後も codex の版が $CODEX_MIN_VERSION 未満です（実際: ${have:-不明}）" >&2
+    echo "                   第二意見の既定のモデル gpt-6-sol を引けません。" >&2
+    return 1
+  fi
+  echo "[install-ai-tools] codex installed: $(command -v codex) (${have})"
+  echo "[install-ai-tools] codex は認証が別です。初回は対話で 'codex login' を通してください。"
+}
+CODEXTMPL
+}
+
 # 永続 volume のマウント先の所有権修復行を生成する
 # （fix-mount-owner.sh の __MOUNT_OWNER_LINES__）。空の named volume を root:root で
 # 初回マウントした際の書き込み不能を復旧する。対象は AI ツールに限らない。
@@ -6552,6 +7390,7 @@ build_with_check_block() {
   has_with gemini  && checks+="gemini "
   has_with copilot && checks+="copilot "
   has_with antigravity && checks+="agy "
+  has_with codex && checks+="codex "
   for cmd in $checks; do
     out+="command -v $cmd >/dev/null 2>&1 && echo \"[check] $cmd OK\" || echo \"[check] $cmd missing\""$'\n'
   done
@@ -6586,6 +7425,7 @@ render_content() {
   subst_block __MOUNT_OWNER_LINES__ "$(build_mount_owner_block)"
   subst_block __SECOND_OPINION_ENGINE_LINES__ "$(build_second_opinion_engine_block)"
   subst_block __AGY_FUNCTION_LINES__ "$(build_agy_block)"
+  subst_block __CODEX_FUNCTION_LINES__ "$(build_codex_block)"
   subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
   subst_block __VOLUME_MOUNTS__ "$(build_volume_mounts_block)"
   subst_block __VOLUME_SECTION__ "$(build_volume_section_block)"
@@ -6915,7 +7755,11 @@ playbook_installed_rel_paths() {
       '.github/project-ai-rules.md' \
       'CLAUDE.md' \
       '.github/copilot-instructions.md' \
-      'scripts/second-opinion-review.sh'
+      'scripts/second-opinion-review.sh' \
+      'scripts/second-opinion-schema.json' \
+      'scripts/second-opinion-record.sh' \
+      'scripts/second-opinion-gate-exempt.sh' \
+      '.github/workflows/second-opinion-gate.yml'
     if has_with copilot-review; then
       printf '%s\n' \
         '.github/workflows/copilot-review.yml' \
@@ -6975,6 +7819,32 @@ install_playbook_rules() {
   if [[ -f "$OUTPUT_DIR/scripts/second-opinion-review.sh" ]]; then
     chmod +x "$OUTPUT_DIR/scripts/second-opinion-review.sh"
   fi
+
+  # JSON スキーマ方式で判定するエンジン（antigravity / codex）が読む回答の形。
+  # second-opinion-review.sh と対で配置する——片方だけ置くと、スキーマを探して
+  # 落ちる経路だけが残る。実行属性は不要（JSON であり実行対象ではない）。
+  tpl="$(require_playbook_template second-opinion-schema.json)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-schema.json"
+
+  # 第二意見を配置するときは、回したことの記録と、回し忘れを確認する側もあわせて
+  # 配置する。片方だけ置くと「第二意見はあるが、回したか誰も確かめていない」状態が
+  # 復活する（規範: review-workflow.md「要求されたことを別の契機で確認する」）。
+  # --with-copilot-review のような選択制のフラグには掛けない。second-opinion-review.sh
+  # 自体が常に配置される実行体であるのと同じ扱いにする。
+  tpl="$(require_playbook_template second-opinion-record.sh)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-record.sh"
+  if [[ -f "$OUTPUT_DIR/scripts/second-opinion-record.sh" ]]; then
+    chmod +x "$OUTPUT_DIR/scripts/second-opinion-record.sh"
+  fi
+
+  tpl="$(require_playbook_template second-opinion-gate-exempt.sh)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh"
+  if [[ -f "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh" ]]; then
+    chmod +x "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh"
+  fi
+
+  tpl="$(require_playbook_template second-opinion-gate.yml)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/workflows/second-opinion-gate.yml"
 
   # リモート最終ゲートの雛形は、その機構を明示選択した場合のみ配置する。
   # 規範（review-workflow.md）はベンダー中立で「1 回に限定される機構なら自動でよい」

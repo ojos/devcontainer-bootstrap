@@ -6,6 +6,39 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.13.0
+
+### Summary
+- **devcontainer のベースイメージを版の名前で固定した**（ojos/ai-packages-dev#368）。候補を浮動のタグ（`base:ubuntu` / `base:debian`）から **`base:noble`（Ubuntu 24.04）/ `base:bookworm`（Debian 12）** へ変えた。`base:ubuntu` は 2026-09-10 に 26.04 を指すようになり、26.04 には `apt-key` が無いため、**`--with-gcp` が入れる google-cloud-cli の feature が exit 127 で落ちる。** 古いイメージのキャッシュを持たない環境で新しくビルドしたときだけ表に出る。os/arch の自動判定と `--base-image` の上書きはそのまま。
+- **第二意見の記録と確認側を配置するようにした**（ojos/ai-packages-dev#361 / ojos/ai-packages-dev#363）。規範を配置する構成（`--with-playbook` / `--playbook-version` / `--playbook-from`）では、第二意見と一緒に `scripts/second-opinion-record.sh` / `scripts/second-opinion-gate-exempt.sh` / `.github/workflows/second-opinion-gate.yml` / `scripts/second-opinion-schema.json` を置く。`loop-gate.sh` は第二意見の出力を記録し、push の後に `bash scripts/second-opinion-record.sh post` で PR へ投稿する運用になる。
+- **`--with-codex` を足した**（ojos/ai-packages-dev#362）。Codex CLI の導入（0.156.0 未満なら入れ替える）、`~/.codex` の永続化、`.env.example` の第二意見のエンジンの記入欄。付けない生成物には codex 関連の行を出さない。
+- **identity-guard が squash merge で GitHub の付ける co-author を許可するようにした**（ojos/ai-packages-dev#369）。マージした人と PR の作者が違うと（Dependabot の PR など）、GitHub はマージの瞬間に作者の `Co-authored-by: <login>@users.noreply.github.com` を足す。co-author を許可リストとしか照合していなかったため、**`push(main)` の全履歴検査が以後ずっと赤になっていた。** 判定を確かめる自己試験 `scripts/verify-commit-identity-selftest.sh` を配り、`identity-guard.yml` が検証の前に回す。
+- **文書の相対リンクの検査 `scripts/check-doc-links.sh` を配るようにした**（ojos/ai-packages-dev#371）。追跡している Markdown の相対リンクが、追跡ファイルとして実在することを見る。除外は `DOC_LINKS_EXCLUDE`（コロン区切り。既定は空）。既存の衛生検査と同じく、呼び出しはプロジェクト側で配線する。
+- **`loop-gate.sh` のレビュー範囲から、他の PR を取り消す差分を除いた**（ojos/ai-packages-dev#382）。上流が分岐点より先へ進んでいるときは、起点を分岐点の SHA にする。ゲートの最中に既定ブランチが進むと、`git diff` が両端の差を取るため、既定ブランチに新しく入った変更を打ち消す差分が範囲に混ざり、触っていないファイルへの指摘で落ちていた。
+- **ネイティブ Linux の Docker での UID の食い違いの扱いを README に書いた**（ojos/ai-packages-dev#372）。生成物は変えない（下記）。
+- **この版は ai-playbook v0.5.0 以降を要求する**（`second-opinion-record.sh` / `second-opinion-gate.yml` / `second-opinion-gate-exempt.sh` / `second-opinion-schema.json` の 4 雛形が必要）。
+- 機能追加と修正のみ。**既存フラグの挙動は変わらない**（ベースイメージの既定値は変わる）。
+
+### Highlights
+- **浮動のタグは上流の都合で動く（ojos/ai-packages-dev#368）**: 浮動のタグかどうかは、イメージ名に結びつけずタグの形（タグ無し・`latest`・`ubuntu`・`debian`）で判定し、テストで固定が崩れないことを見る。Debian も実ビルドで選んだ（`base:debian` が指す trixie は同じ `apt-key` の欠落で落ち、bookworm は通る）。**版を上げるときは、features がすべて新しい版で入ることを確かめてから。**
+- **`updateRemoteUserUID` は compose 方式でも効く（ojos/ai-packages-dev#372）**: 取り込み元は「`updateRemoteUserUID` は dockerComposeFile 方式には効かない」を前提に、ビルド引数で UID を付け替える仕組みを持っていた。**devcontainer CLI 0.89.0 の実装と、UID 1001 の利用者での実測で、この前提が成り立たないことを確かめた**（コンテナの `vscode` が `uid=1001 gid=1001` になる）。生成物は変えず、`false` にしないこと、効かない構成（CLI が macOS / Windows で動き、Docker だけが遠くの Linux にある場合）を README に書き、無効化をテストで止める。
+- **判定の自己試験は、落ちるべき形を見せる（ojos/ai-packages-dev#369）**: 本物の履歴だけでは、落ちるべき形も「何でも通る」状態もほとんど現れない。1 コミットだけの仕込みのリポジトリで、通る 5 形と落ちる 6 形を確かめる。許可は committer が `noreply@github.com` のコミットに縛ったままで、ローカルで作ったコミットには広げない。
+- **リンクは追跡ファイルの集合で判定する（ojos/ai-packages-dev#371）**: GitHub が配るのは追跡ファイルだけなので、作業ツリーにだけあるファイルへのリンクは手元では開けても公開された文書では 404 になる。パスは正規化し、リポジトリの外へ出るリンクは不合格にする。タイトル付きのリンク（リンク先の後ろに引用符でタイトルを書く形）はリンク先だけを見る。
+
+### 未確認の事項
+- 本物の codex CLI での実行（`--with-codex` の導入と永続化は、生成物のテストで確かめている）
+- Dependabot の PR で `second-opinion-gate.yml` が status を書けること（GitHub の文書に基づく判断で、実地では確かめていない）
+
+### 移行
+- **既存の生成物は再生成しない限り無影響です。** ただし、**既存の生成物のベースが `base:ubuntu` のままだと、新しくビルドしたときに `--with-gcp` の feature が落ちます。** `.devcontainer/compose.yaml` の `image:` を `mcr.microsoft.com/devcontainers/base:noble` へ書き換えるか、再生成してください。
+- 再生成すると、次が増えます。
+  - 規範を配置する構成のとき: `scripts/second-opinion-record.sh` / `scripts/second-opinion-gate-exempt.sh` / `scripts/second-opinion-schema.json` / `.github/workflows/second-opinion-gate.yml`
+  - `scripts/verify-commit-identity-selftest.sh`（`identity-guard.yml` が呼ぶ）
+  - `scripts/check-doc-links.sh`
+  - `--with-codex` 指定時のみ、Codex CLI の導入と `~/.codex` の永続 volume
+- **第二意見の記録と確認側を使う場合は、push のたびに `bash scripts/second-opinion-record.sh post` を実行します。** 記録は head SHA に紐づくため、直して push するたびに打ち直します。確認側は required check ではありません。
+- **ai-playbook は v0.5.0 以降を指してください。** それより古い版には雛形 4 本が無く、生成時に停止します。
+
 ## v0.12.0
 
 ### Summary

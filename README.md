@@ -41,7 +41,7 @@
 
 `doctor.sh` は `jq` を使います（`devcontainer.json` の JSON 妥当性検査と `dockerComposeFile` の読み取り）。
 
-`docker` は**任意**です。あればベースイメージの `os/arch` 適合を実際のマニフェストで判定し、無ければ既定の `mcr.microsoft.com/devcontainers/base:ubuntu` へフォールバックします（警告のみで停止しません）。
+`docker` は**任意**です。あればベースイメージの `os/arch` 適合を実際のマニフェストで判定し、無ければ既定の `mcr.microsoft.com/devcontainers/base:noble` へフォールバックします（警告のみで停止しません）。候補は版の名前（コードネーム）で固定しており、`ubuntu` / `debian` のような浮動タグは使いません（上流が指す版を無告知で進め、features の導入が壊れることがあるため）。
 
 ## 公開リリースからの利用
 
@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.12.0`
+- `v0.13.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.12.0
+TAG=v0.13.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -97,7 +97,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.4.0
+  --languages node,go --with-claude --playbook-version v0.5.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.12.0
+TAG=v0.13.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -140,7 +140,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.12.0
+TAG=v0.13.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -223,6 +223,7 @@ fi
 | `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 + マージ確認フック（下記） |
 | `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
 | `--with-antigravity` | Antigravity CLI（`agy`）+ `~/.gemini` 永続化 + テレメトリ無効化。**VS Code 拡張は入りません**。**OAuth のみ**で初回に対話ログインが要ります（下記） |
+| `--with-codex` | Codex CLI（`@openai/codex`）+ `~/.codex` 永続化。**VS Code 拡張は入りません**。**ChatGPT アカウントの OAuth または API キー**で初回に対話ログインが要ります（下記）。版の下限があり、下回っていれば入れ替えます |
 | `--with-copilot` | GitHub Copilot CLI（`@github/copilot`）+ `github.copilot` / `github.copilot-chat` 拡張 + `~/.copilot` 永続化 |
 | `--with-copilot-review` | リモート最終ゲートのワークフロー 2 本（`.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml`）と、確認側が判定に使うスクリプト 2 本（`scripts/review-usable.sh` / `scripts/check-review-usable.sh`）。**ローカルの装備は一切入りません。** 規範の配置が前提（下記） |
 
@@ -231,6 +232,7 @@ fi
 - **Terraform は cloud 随伴**: `--with-aws` または `--with-gcp` のいずれかを指定すると、Terraform feature + `hashicorp.terraform` 拡張が **1 回だけ** 同梱されます（両指定でも 1 回、cloud 無指定なら入りません）。
 - **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
 - **`--with-gemini` と `--with-antigravity` は永続 volume を共有**: `agy` は資格情報を `~/.gemini/antigravity-cli/` に置くため、両者は同じ `~/.gemini` を使います。**どちらか一方でも指定すれば `gemini-storage` が 1 つだけ**作られ、両方指定しても重複しません。認証手段が違う（API キー / OAuth）ので、フラグは束ねず独立にしてあります。片方だけ使う構成をそのまま表現できます。
+- **`--with-codex` は専用の永続 volume**: Codex CLI は資格情報を `~/.codex/auth.json` に置くため、`gemini` / `antigravity` とは別の `codex-storage` を使います。認証手段（ChatGPT アカウントの OAuth または API キー）も設定ディレクトリも他の AI CLI と独立なので、既存のどの装備とも共有しません。
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します。唯一の例外は GitHub CLI で、PAT を `.env` の `GH_TOKEN` へ置けます（下記「[資格情報の扱い](#資格情報の扱い)」）。
 
 ### オプション入力
@@ -305,9 +307,11 @@ fi
 bash scripts/fix-mount-owner.sh && bash scripts/install-ai-tools.sh
 ```
 
-導入するのは `--with-claude` / `--with-gemini` / `--with-antigravity` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
+導入するのは `--with-claude` / `--with-gemini` / `--with-antigravity` / `--with-codex` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
 
 `--with-antigravity` だけは npm 配布ではないため、配布元のインストーラを取得して `~/.local/bin/agy` へ置きます。あわせて**テレメトリを無効化**します（下記）。
+
+`--with-codex` は npm 配布（`@openai/codex`）ですが、**版の下限を検査します**。第二意見レビューの既定モデルを引ける版より古い CLI が既に入っている場合は、「在るから飛ばす」ではなく入れ替えます。認証は ChatGPT アカウントの OAuth または API キーで、導入だけでは使えません。初回は対話で `codex login` を通してください。
 
 ## ループコーディング支援
 
@@ -337,7 +341,12 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
   - 既定ブランチの追跡枝を解決できない環境では汚染を判定できないため、**従来どおり上流を使います**（判定不能を汚染扱いにすると、分岐点も取れないまま範囲を失うため）。
 - `loop-gate.sh` は source ガードを持ち、`source`（`.`）で読み込んだだけではゲート本体を実行せず、範囲解決の関数だけを提供します。範囲の決め方を単体で検証できるようにするためで、ルートへの `cd` もゲート本体側に置いてあり、読み込んだ側の作業ディレクトリを動かしません。
 - これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。規範を配置した場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、第二意見の `second-opinion-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
-- 上の 3 本は**手元から起動する入口**で、実行するかどうかは人に委ねられています。**回し忘れれば何も起きません。** それを塞ぐため、`verify.sh` を CI でも回す `.github/workflows/verify.yml` を**常に**配置します（下記「受け入れ検証の CI ワークフロー」参照）。
+- 上の 3 本は**手元から起動する入口**で、実行するかどうかは人に委ねられています。**回し忘れれば何も起きません。** `verify.sh` は `verify.yml` が CI で再実行して回し忘れを塞ぎますが（下記「受け入れ検証の CI ワークフロー」参照）、**第二意見は手元でしか走らないため、CI が再実行して確かめることができません。** そのため回したことの記録と、記録が無いことを別の契機（PR 更新・定期実行）から検出する確認側を、規範を配置したときにあわせて配置します。
+  - `loop-gate.sh` は第二意見の出力を捕まえ、`scripts/second-opinion-record.sh save` へ渡します。レビュー対象が無い（`REVIEW_NO_TARGET`）、または明示的にスキップした（`LOOP_GATE_REVIEW_CMD=''`）場合は記録しません——回していないものを「回した」と記録すると、確認側が偽の緑を出すためです。
+  - 記録は `git rev-parse --git-path second-opinion` が返す worktree ごとのパスへ置き、レビューした対象（ステージ済み差分のツリー、またはコミット範囲の終端）を HEAD と突き合わせてから PR へ投稿します（`scripts/second-opinion-record.sh post`）。中身が変わっていれば投稿しません。
+  - `.github/workflows/second-opinion-gate.yml` が、投稿された記録の head SHA がいまの head と一致するかを確認します。要求はしません（第二意見を回すかどうかは利用者側の判断のままです）。Dependabot のように回す著者が最初からいない PR は、`scripts/second-opinion-gate-exempt.sh` の判定で対象外にします。
+  - これらも第二意見そのものと同じ「外部パッケージの導入を前提にしない」機構です。偽造（記録を作らずレビューを回したことにする）までは防げず、検出できるのは失念だけです。
+- `verify.sh` の回し忘れは、CI でも回す `.github/workflows/verify.yml` を**常に**配置して塞ぎます（下記「受け入れ検証の CI ワークフロー」参照）。
 
 ```bash
 # 反復のたびに接地信号を確認する（ローカル層）
@@ -482,6 +491,15 @@ gcloud auth login             # --with-gcp のとき（gcloud-storage）
 - `--with-aws`: `amazonwebservices.aws-toolkit-vscode`。`--with-gcp`: `GoogleCloudTools.cloudcode`。いずれかの cloud 指定で `hashicorp.terraform`。
 - `--with-claude`: `anthropic.claude-code`。`--with-gemini`: `Google.gemini-cli-vscode-ide-companion`。`--with-copilot`: `github.copilot` / `github.copilot-chat`。`--with-antigravity` は拡張を追加しません（CLI のみ）。
 
+## ネイティブ Linux の Docker でのワークスペースの所有者
+コンテナの利用者は、ベースイメージの `vscode`（UID/GID 1000）です。ネイティブ Linux の Docker Engine は、bind mount の所有者を数値の UID のままコンテナへ通します。そのため、ホストの利用者の UID/GID が 1000 でないと、ワークスペースへ書き込めないように見えます（Docker Desktop for Mac はファイル共有層が所有者を写すので、この問題は起きません）。
+
+**生成物は何もしなくても、この食い違いを吸収します。** Dev Containers（devcontainer CLI。VS Code の Dev Containers 拡張も同じ CLI を使います）は、CLI が Linux の上で動くとき、コンテナを作る時点で `remoteUser` の UID/GID をホストの利用者に合わせたイメージ（名前の末尾が `-uid`）を作ります。これが `devcontainer.json` の `updateRemoteUserUID` で、既定で有効です。**生成物の `dockerComposeFile` 方式でも同じように働きます**（devcontainer CLI 0.89.0 で、UID 1001 の利用者が `devcontainer up` すると、コンテナの `vscode` が `uid=1001 gid=1001` になり、`/home/vscode` の所有者も揃うことを実測）。
+
+- 生成物の `devcontainer.json` は `updateRemoteUserUID` を書きません（既定に任せます）。**`false` にしないでください。** 上の付け替えが止まり、ネイティブ Linux のホストで書き込めなくなります（`tests/test-update-remote-user-uid.sh` が、生成物が無効にしていないことを確かめます）。
+- **効かない構成があります。** CLI が macOS や Windows の上で動き、Docker だけが別の Linux にある場合（`DOCKER_HOST` で遠くの Docker Engine を使う場合など）は、CLI が付け替えを行いません。その Linux へ Remote - SSH で入り、そこでコンテナを開いてください。CLI がその Linux の上で動くので、付け替えが働きます。
+- 付け替えはコンテナを作るときだけ行われます。ホストの利用者を変えた場合は、コンテナを作り直してください（Rebuild Container）。
+
 ## 資格情報の扱い
 
 **ホスト OS の資格情報をコンテナへ注入しません。** 生成される `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。
@@ -591,9 +609,12 @@ VS Code は接続のたびにコンテナの `~/.docker/config.json` へ `credsS
   - committer には `noreply@github.com`（GitHub の squash merge / web UI）、Co-Authored-By には加えて `noreply@anthropic.com`（AI コーディング規約の trailer）を許可します。
   - 許可エントリには `@example.com` / `*@example.com` の形でドメイン一括指定を書けます。**この 2 形だけ**をドメイン指定として解釈し、それ以外は完全一致です（任意の glob を許すと、設定ミスの `*` 1 文字で全 email が通り検知層が無効化されるため）。`*` 単体は何も許可しません。ローカル部が 1 文字以上あり、かつ `@` を含まないことを要求します（`@example.com` という email そのものや、`attacker@untrusted.com@example.com` の形を通さないため）。
   - committer が `noreply@github.com` のコミットに限り、author が `<login>@users.noreply.github.com` の形であれば許可します。GitHub 側で「メールアドレスを非公開にする」を有効にしている利用者の PR マージ・web UI 編集に対応するためで、許可を committer に縛ることでローカルで作ったコミットには適用されません（ローカルの identity 適用漏れは従来どおり検知します）。
+  - 同じ条件（`is_github_authored`）を `Co-Authored-By` にも適用します。マージした人と PR の作者が違う squash merge では、GitHub がマージの瞬間に作者を `Co-authored-by` として足します。PR の検査（マージ前）では見えず、`push(main)` の全履歴検査で初めて現れる形です。
   - 使い方: 既定は `origin/main..HEAD`、範囲指定可、`--full` で HEAD の全履歴（`git rev-list --all` にはしない）。
+- `scripts/verify-commit-identity-selftest.sh`（判定の自己試験。CI と手元で共用）
+  - `verify-commit-identity.sh` の判定そのものが壊れていないかを、1 コミットだけの仕込みのリポジトリで確かめます。**本物の履歴だけでは、落ちるべき形（squash merge で足される `Co-authored-by` 等）がほとんど現れず、許可を広げすぎて「何でも通る」になっても気づけません。** `.github/workflows/identity-guard.yml` は `verify-commit-identity.sh` の検証より前にこれを呼びます。
 - `.github/workflows/identity-guard.yml`（CI）
-  - `pull_request`（PR の全コミット）と `push`（`main` の全履歴）の 2 系統で `verify-commit-identity.sh` を呼びます。直接 push こそが混入の原因なので `push(main)` を省略しません。判定はスクリプト側にあり、ワークフローは呼ぶだけです。
+  - `pull_request`（PR の全コミット）と `push`（`main` の全履歴）の 2 系統で、自己試験 → `verify-commit-identity.sh` の順に呼びます。直接 push こそが混入の原因なので `push(main)` を省略しません。判定はスクリプト側にあり、ワークフローは呼ぶだけです。
 
 ### 利用側の設定手順（許可 author email）
 
@@ -667,7 +688,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 1. `languages` には少なくとも 1 つの対応言語（node|go|python|php|rust|ruby）を含めること
 2. 指定した各言語に対応する feature を devcontainer.json に追加すること
 3. `remoteEnv` は `LOCAL_WORKSPACE_FOLDER` のみを持つこと（ホスト資格情報の注入経路を作らない）
-4. ベースイメージは Docker サーバーの `os/arch` から自動判定（既定: `mcr.microsoft.com/devcontainers/base:ubuntu`、必要に応じて `--base-image` で上書き可能）
+4. ベースイメージは Docker サーバーの `os/arch` から自動判定（候補は版の名前で固定、既定: `mcr.microsoft.com/devcontainers/base:noble`、必要に応じて `--base-image` で上書き可能）
 
 ## 期待される出力
 
@@ -681,12 +702,13 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/load-project-env.sh`（プロジェクト `.env` の優先読み込み。下記参照）
 - `scripts/on-attach.sh`
 - `scripts/post-rebuild-check.sh`（永続 volume の実マウント検査を含む）
-- `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh`（git identity ガード。下記参照）
+- `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh` / `scripts/verify-commit-identity-selftest.sh`（git identity ガード。下記参照）
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
 - `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。単体で `bash scripts/check-control-chars.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する）
 - `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
+- `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合で行う。単体で `bash scripts/check-doc-links.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
 - `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
 - `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に使います。下記「生成物の由来の記録」参照）
@@ -709,6 +731,8 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.github/project-ai-rules.md`
 - `CLAUDE.md` / `.github/copilot-instructions.md`
 - `scripts/second-opinion-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
+- `scripts/second-opinion-schema.json`（JSON スキーマ方式で判定するエンジン（antigravity / codex）が読む回答の形。`second-opinion-review.sh` と対で配置します）
+- `scripts/second-opinion-record.sh` / `scripts/second-opinion-gate-exempt.sh` / `.github/workflows/second-opinion-gate.yml`（第二意見が回されたことの記録と確認側。`--with-copilot-review` の有無に関わらず配置します。上記「ループコーディング支援」参照）
 - `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` / `scripts/review-usable.sh` / `scripts/check-review-usable.sh`（`--with-copilot-review` を併せて選択した場合のみ。4 本で 1 組。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
 - `.claude/skills/land/SKILL.md`（`--with-claude` を併せて指定した場合のみ。PR 確認・マージ起点スキル）
@@ -874,6 +898,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 |---|---|---|
 | `scripts/check-control-chars.sh` | そのまま書き出す | — |
 | `scripts/check-deps-installed.sh` | そのまま書き出す | —（`--languages` に `node` を含めたときだけ生成） |
+| `scripts/check-doc-links.sh` | そのまま書き出す | — |
 | `scripts/check-no-secrets.sh` | そのまま書き出す | — |
 | `scripts/check-shell-portability.sh` | そのまま書き出す | — |
 | `scripts/check-table-breaks.sh` | そのまま書き出す | — |
@@ -883,6 +908,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `scripts/on-attach.sh` | そのまま書き出す | — |
 | `scripts/setup-git-identity.sh` | そのまま書き出す | — |
 | `scripts/verify-commit-identity.sh` | そのまま書き出す | — |
+| `scripts/verify-commit-identity-selftest.sh` | そのまま書き出す | — |
 | `scripts/verify.sh` | そのまま書き出す | — |
 | `scripts/acceptance-remote.sh` | そのまま書き出す（`--with-aws` / `--with-gcp` 選択時のみ配置） | — |
 | `scripts/acceptance.sh` | 生成時に展開 | 選択言語のマニフェストに応じた検証行。**生成後はプロジェクトが所有・編集します** |
