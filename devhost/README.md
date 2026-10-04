@@ -56,7 +56,7 @@ devhost は独立したリリースを持たず、**devcontainer-bootstrap（DCB
 手順の詳細と検証の意味は DCB の README の「devhost」の節を参照してください。
 
 ```bash
-TAG=v0.14.0   # DCB の最新安定リリース（devhost を同梱したのは v0.14.0 以降）
+TAG=v0.15.0   # DCB の最新安定リリース（devhost を同梱したのは v0.14.0 以降）
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json

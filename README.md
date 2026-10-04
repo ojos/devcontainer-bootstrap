@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.14.0`
+- `v0.15.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.14.0
+TAG=v0.15.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -97,7 +97,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.6.0
+  --languages node,go --with-claude --playbook-version v0.7.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.14.0
+TAG=v0.15.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -140,7 +140,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.14.0
+TAG=v0.15.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -258,6 +258,7 @@ fi
 - `--base-image <image>`（既定: Docker サーバーの `os/arch` から自動判定。この値で上書きして明示指定）
 - `--dry-run`（既定: 無効。生成予定のパスを `plan:` 行として並べるだけで、**ファイルを 1 つも書きません**）
 - `--force`（既定: 無効。既存ファイルの上書きを許可します。下記「再実行したときの挙動」参照）
+- `--upgrade`（既定: 無効。記録した入力で生成し直し、手を入れていないファイルだけを新しい版へ更新します。振り分け・終了コード・`--dry-run`・注意は下記「再実行したときの挙動」参照。`--force` とは同時に指定できません）
 - `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
@@ -278,13 +279,58 @@ fi
 
 ### 再実行したときの挙動
 
-同じ出力先へ再実行しても、**既定では既存ファイルを上書きしません**。
+同じ出力先へ再実行したときの挙動は、指定したフラグで 3 通りに分かれます。
 
-- `--force` 未指定（既定）: 既に存在するファイルは `skip (exists): <path>` と表示して**そのまま温存**します。テンプレートを更新した DCB で再実行しても、生成済みファイルは古いままになります。
-- `--force` 指定: 既存ファイルを新しいテンプレートで**上書き**します。
-- `--playbook-conflict-policy` が効くのは**規範ファイル**（`.ai-playbook/**` / 入口ファイル / `scripts/second-opinion-review.sh` など）だけで、`.devcontainer/` や `scripts/` のテンプレート生成物には効きません。テンプレート生成物の上書きは `--force` が唯一の手段です。
-- `.gitignore` の managed セクションだけは `--force` に依らず毎回差し替えます（セクション外の行は保持）。
+| | 従来の再実行（既定） | `--force` | `--upgrade` |
+|---|---|---|---|
+| 既存ファイル | そのまま温存（`skip (exists): <path>`） | 新しいテンプレートで上書き | ファイルごとに振り分ける（下記） |
+| 手を入れたファイル | 温存 | **手元の改造ごと上書き** | 温存し、新しい版を `<path>.dcb-new` として隣へ置く |
+| 手を入れていないファイル | 温存（古いまま） | 上書き | 新しい版へ更新 |
+| 生成の入力 | 毎回、引数で渡す | 毎回、引数で渡す | `.devcontainer/ORIGIN` の記録から再現し、引数で渡したものだけ上書きする |
+| 終了コード | 0 | 0 | 0 / 2 / 1（下記） |
+
+- `--playbook-conflict-policy` が効くのは**規範ファイル**（`.ai-playbook/**` / 入口ファイル / `scripts/second-opinion-review.sh` など）の従来の再実行だけです。`.devcontainer/` や `scripts/` のテンプレート生成物には効きません。`--upgrade` では効かず、規範ファイルもテンプレートと同じ振り分けになります。
+- `.gitignore` の managed セクションは、どの場合も毎回差し替えます（セクション外の行は保持）。`--upgrade` もこの挙動を変えません。
+- **生成先がシンボリックリンクのとき**（`--upgrade` を付けない再実行・`--force`・規範の配置）は、切れたリンクも含めて「既存のファイルがある」として扱い、リンク先（出力先の外）へは書きません。既定（skip）は温存して `skip (exists)` と報告します。`--force`（DCB のテンプレート）/ `--playbook-conflict-policy overwrite`（規範経由のファイル）ではリンク自体を通常ファイルで置き換え、リンク先には触れません。`.gitignore` がリンクのときも同じで、`--force` のときだけ置き換えます。生成先の親ディレクトリの実体が出力先の外にあれば、何も書かずにエラー（終了コード 1）で止めます。`--output-dir` そのものがリンクの場合は、利用者が明示した場所なのでたどります。出力先を同時に書き換える相手がいる場合の競合（検査と書き込みのあいだに、生成先や親ディレクトリを外へのリンクへ差し替えられる）は防げません（生成先を自分で管理していれば起きません）。
 - 何が書かれるかを先に確かめたい場合は `--dry-run` を使います。
+
+#### `--upgrade` の振り分け
+
+`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 5 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
+
+| 状態 | 動作 | 出力 |
+|---|---|---|
+| 手を入れていない（現物 = 記録したハッシュ） | 新しい版で更新する | `write: <path> (upgraded)` |
+| 手を入れた（現物 ≠ 記録）、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える | `keep (modified)` / `keep (no record)` |
+| 新しい版で増えた（現物が無い） | 生成する | `write: <path> (new)` |
+| 手を入れたが新しい版と同じ内容 | 更新済みとして扱い、古い `.dcb-new` があれば消す | `up-to-date` |
+| 新しい版で生成されなくなった | **報告するだけで削除しない**。記録からは外す | `no longer generated (not deleted)` |
+
+- 現物がシンボリックリンクなら、たどらず手を入れた扱いにして `.dcb-new` を置きます。親ディレクトリが出力先の外を指すリンクなら、何も書かずに止めます（終了コード 1）。
+- 手を入れたファイルにも、ORIGIN には**新しい版のハッシュ**を記録します。次回の `--upgrade` で、その `.dcb-new` を取り込まないまま現物が新しい版と同じになれば、更新済みとして扱います。
+- 手を入れたファイルは**自動では混ぜません**（3 方向マージはしません）。`.dcb-new` と現物を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消してください。`.dcb-new` の残りは `doctor.sh` が WARN で報告します（[Doctor 自己診断](#doctor-自己診断)）。
+
+終了コード:
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | 全件を適用できた（`.dcb-new` が残っていない） |
+| `2` | `.dcb-new` が残った（今回置いたもの、または以前から残っているもの）。残りの一覧を標準エラーへ出す |
+| `1` | 失敗（入力の記録が無く引数の明示が要る、規範の取得元を再現できない、親ディレクトリが出力先の外を指す、`--force` との同時指定 など） |
+
+失敗の検出のタイミング: 引数・記録の不足、規範の取得元を再現できない場合、`--force` との同時指定、生成先の親ディレクトリが出力先の外を指すシンボリックリンクであることは、**書き込みの前に**（今回書く予定のすべての生成先を検査して）検出して止まります。1 つでも外を指していれば、何も書かず終了コード 1 です（`--dry-run` も同じ）。止まったら、リンクを直してから `--upgrade` を再実行してください。
+
+`--upgrade --dry-run` は振り分けの計画（`plan: ...`）だけを出し、**生成先には何も書きません**（出力先がまだ無ければ作りません）。規範を URL から取得する場合だけ、取得のために一時ディレクトリを使います。
+
+`--upgrade` は `--force` と同時に指定できません（エラーで止まり、何も書きません）。出力先の既定は現在のディレクトリです（生成先の中で実行する想定）。
+
+`--upgrade` の注意:
+
+- **`--with-*` は足せるが外せません。** 引数で渡した `--with-*` は記録した集合へ足されます。外したいときは、生成し直してください。
+- **生成されなくなったファイルは報告するだけで、削除しません。** 不要なら手で消してください。
+- **規範の取得元が `local` の場合は、`--playbook-from` の明示が要ります。** ローカルのパスは記録しないため再現できません（`@` `?` `#` を含む URL も同じです。取得元の種類が `tag` / `adjacent` なら引数なしで再現します）。
+- **記録に入力が無い古い ORIGIN、または ORIGIN が無い出力先では、引数を明示しないと止まります。** `--project-name` / `--languages`（必須）と、使っていた `--with-*` や規範の取得元を明示した初回の `--upgrade` で、記録が書き直されます。
+- 追従先は、実行した `bootstrap.sh` の版です。ネットワークへ最新版を問い合わせません。
 
 ### AI 共通ルールの配置
 
@@ -300,9 +346,9 @@ fi
 | 配置先 | 内容 |
 |---|---|
 | `.ai-playbook/**` | 共通規範、ロール契約、タスクプレイブック、レビュー運用、intake 規律 |
-| `.ai-playbook/VERSION` | 取り込んだ規範の出所（`version=` / `source=`）を on-disk に残す証跡。どの版の規範が入っているかを生成後の環境から照合できる |
+| `.ai-playbook/VERSION` | 規範の**取得元**（`version=` / `source=`）を on-disk に残す記録。どの取得元から取り込んだかを生成後の環境から照合できる。生成の入力と現物のハッシュは `.devcontainer/ORIGIN` が記録する（下記「生成物の由来の記録」） |
 | `.github/project-ai-rules.md` | プロジェクト共通ルールの雛形 |
-| `CLAUDE.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線） |
+| `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線） |
 | `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外） |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
 | `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
@@ -573,6 +619,19 @@ gh の OAuth App には「ユーザー × アプリ × scope あたり 10 トー
 
 - **名前は gh 自身が読む `GH_TOKEN` をそのまま使います。** `GIT_IDENTITY_*` を別名にしているのと方針が逆に見えますが、理由が違います。git は自身が読む名前を環境へ置くと `user.useConfigOnly` の保護が無効になるため別名にします。gh には、環境変数を置くことで無効化される保護がありません。別名にすると受け渡しの仕掛けを足すだけになります。
 - **PAT を設定しているあいだ `gh auth login` は使えません。これは制約ではなく安全装置です。** うっかり再認証して他環境のトークンを殺す事故が構造的に起きなくなります。gh 2.96.0 で実測したところ、値が設定されているあいだ gh はログインを拒否します（`--with-token` / `--web` のいずれでも `The value of the GH_TOKEN environment variable is being used for authentication.` で終了し、通信もしません）。危ないのはその先で、拒否メッセージ（`first clear the value from the environment`）に従って値を空にしてログインすると、上限枠を 1 つ消費します。
+- **fine-grained PAT で必要になる権限の例と、選べない権限があること:** `/land` の雛形（`.claude/skills/land/SKILL.md`）が行う操作は、次の権限で足ります。必要な権限は行う操作で変わるため、最小の組はプロジェクトごとに決めてください。
+
+  | 行う操作 | repository permission |
+  |---|---|
+  | clone / push | Contents: Read and write |
+  | PR の作成・コメント・マージ | Pull requests: Read and write |
+  | issue の起票・コメント | Issues: Read and write |
+  | `.github/workflows/` を含む push | Workflows: Read and write |
+  | CI の実行の確認（`gh run list` / `actions/runs`） | Actions: Read |
+  | commit status（`second-opinion-gate` など）の確認 | Commit statuses: Read |
+  | （必須・自動付与） | Metadata: Read |
+
+  **Checks は fine-grained PAT では選べません。** そのため、**非公開リポジトリでは** `commits/<sha>/check-runs` と `gh pr checks` が 403 になります（公開リポジトリでは読めます）。`/land` の雛形はこの 2 つを使わず、Actions と Commit statuses の権限だけで CI を待ちます。プロジェクト側でスクリプトを足すときも、この 2 つに頼らないでください。
 - **`GH_TOKEN` が空の環境は従来どおり**保存済み認証で動きます（`GITHUB_TOKEN` も未設定である場合。下記）。PAT を持たない利用者を壊しません。
 - 発行手順と必要権限は、対象リポジトリと行う操作で変わるため、このパッケージは決め打ちしません。プロジェクト層（`.ai-playbook/templates/project-ai-rules.md` の「機密の具体化」）に記述してください。
 
@@ -745,13 +804,14 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh` / `scripts/verify-commit-identity-selftest.sh`（git identity ガード。下記参照）
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
+- `scripts/session-ledger.sh`（同じホストで並行して動く AI セッションの共有台帳。`claim` / `release` / `list` / `check` / `refresh` を持つ。置き場所は `git rev-parse --git-common-dir` の配下で、セッションごとに別ファイルへ追記する。規範は `.ai-playbook/shared-ai-rules.md`「セッション間の協調」。実行環境に依存しないので、装備フラグに関わらず常に生成する）
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
 - `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。単体で `bash scripts/check-control-chars.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する）
 - `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
 - `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合で行う。単体で `bash scripts/check-doc-links.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
 - `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
-- `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に使います。下記「生成物の由来の記録」参照）
+- `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・生成の入力・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に、`--upgrade` が入力の再現と手を入れたかの判定に使います。下記「生成物の由来の記録」参照）
 - `.gitignore` の managed セクション（言語構成に応じて自動更新。`--no-gitignore` で無効化）
 
 `--languages` に `node` を含めた場合は、次を出力します。
@@ -761,15 +821,16 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 `--with-claude` を選んだ場合は、規範の配置とは独立に次を出力します（下記「[マージ確認フック](#マージ確認フックclaude-code)」参照）。
 
 - `scripts/confirm-merge-hook.sh`（マージ実行の前に確認を挟む PreToolUse フックの本体）
-- `.claude/settings.json`（上記フックの配線。既存ファイルは既定ポリシー `skip` で温存します）
+- `scripts/session-coord-hook.sh`（並行セッションの共有台帳を操作の直前に確かめるフックの本体。下記「[セッション協調フック](#セッション協調フックclaude-code)」参照）
+- `.claude/settings.json`（上記 2 つのフックの配線。既存ファイルは既定ポリシー `skip` で温存します）
 - `.claude/.gitignore`（`settings.local.json` を追跡しない）
 
 規範を配置する場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、加えて次を出力します。
 
 - `.ai-playbook/**`（AI 共通ルール一式。内容の正本は ai-playbook 側にあり、DCB は木ごと配置するだけです）
-- `.ai-playbook/VERSION`（DCB が記録する取得元の証跡。`version=`（`--playbook-version` のタグ。未指定なら `(unspecified)`）と `source=`（解決したディレクトリまたは URL）の 2 行を持つ機械可読な key=value 形式。規範ファイルと同じ `--playbook-conflict-policy` に従うため、規範を skip した実行では VERSION も更新されません）
+- `.ai-playbook/VERSION`（DCB が記録する規範の**取得元**の記録。`version=`（`--playbook-version` のタグ。未指定なら `(unspecified)`）と `source=`（解決したディレクトリまたは URL）の 2 行を持つ機械可読な key=value 形式。生成の入力と現物のハッシュは持たず、それは `.devcontainer/ORIGIN` の役割です。規範ファイルと同じ振り分けに従います（従来の再実行では `--playbook-conflict-policy`、`--upgrade` では手を入れていなければ更新）。「[再実行したときの挙動](#再実行したときの挙動)」参照）
 - `.github/project-ai-rules.md`
-- `CLAUDE.md` / `.github/copilot-instructions.md`
+- `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md`
 - `scripts/second-opinion-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
 - `scripts/second-opinion-schema.json`（JSON スキーマ方式で判定するエンジン（antigravity / codex）が読む回答の形。`second-opinion-review.sh` と対で配置します）
 - `scripts/second-opinion-record.sh` / `scripts/second-opinion-gate-exempt.sh` / `.github/workflows/second-opinion-gate.yml`（第二意見が回されたことの記録と確認側。`--with-copilot-review` の有無に関わらず配置します。上記「ループコーディング支援」参照）
@@ -786,13 +847,26 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 #### 生成物の由来の記録（`.devcontainer/ORIGIN`）
 
-装備の選択によらず常に、`.devcontainer/ORIGIN` へ生成物の由来を記録します。目的は、生成先で**意図的に改造した**箇所と、**単に古い写し**（上流が直したのに追随できていない箇所）を区別できるようにすることです。`.ai-playbook/VERSION` と同じ「取り込み側が生成する機械可読な記録」の流儀に揃えています。
+装備の選択によらず常に、`.devcontainer/ORIGIN` へ生成物の由来を記録します。目的は 2 つです。
+
+- 生成先で**意図的に改造した**箇所と、**単に古い写し**（上流が直したのに追随できていない箇所）を区別する（`doctor.sh` が使います）。
+- 生成の入力と現物のハッシュを残し、`--upgrade` が同じ入力で生成し直して、手を入れていないファイルだけを更新できるようにする（[再実行したときの挙動](#再実行したときの挙動)）。
 
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.11.0
+version=v0.15.0
 flags=aws,claude
+inputs-format=1
+input:project-name=myapp
+input:languages=node,python
+input:base-image-mode=auto
+input:base-image=<生成時に選ばれたイメージ>
+input:manage-gitignore=true
+input:gitignore-targets=
+input:playbook=installed
+input:playbook-source=tag
+input:playbook-ref=v0.7.0
 hash:.devcontainer/compose.yaml=<sha256>
 hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
@@ -801,13 +875,29 @@ hash:.env.example=<sha256>
 
 | キー | 意味 |
 |---|---|
-| `version` | 生成に使った DCB 自身の版 |
-| `flags` | 指定した `--with-*` フラグの昇順カンマ区切り一覧（指定順によらず同じ集合なら同じ値）。フラグを含めるのは、「`--with-aws` を付け忘れた」と「意図的に外した」を区別するためです |
+| `version` | 生成に使った DCB 自身の版。新しい形式（`inputs-format=1`）では必須 |
+| `flags` | 指定した `--with-*` フラグの昇順カンマ区切り一覧（指定順によらず同じ集合なら同じ値。空でも行は書く）。新しい形式では必須。フラグを含めるのは、「`--with-aws` を付け忘れた」と「意図的に外した」を区別するためです |
+| `inputs-format` | 入力の記録の書式の版（現在は `1`）。この行があるときだけ `input:` の行を読みます |
+| `input:<名前>` | 生成結果を左右する入力（下記）。同じ名前は 1 回だけ。値の `%` `改行` は `%25` `%0A` `%0D` で符号化します |
 | `hash:<相対パス>` | その生成物の sha256（`sha256sum` が無い環境では `shasum -a 256`、それも無ければ `openssl dgst -sha256` を使います） |
 
-- ハッシュの対象は、この実行で生成した DCB 自身のテンプレート一覧（常時生成ぶん・`--with-*` 条件付きぶん）に限ります。`.ai-playbook/**` は対象外です（あちらは `--playbook-conflict-policy` と `.ai-playbook/VERSION` が別に担っており、二重に記録すると片方だけ更新されたときにどちらが正本か読めなくなります）。
-- 衝突ポリシーは他の生成物（`.devcontainer/` / `scripts/` のテンプレート）と同じです。**`--force` を付けない再実行では、既存の記録をそのまま温存します。** `--force` を付けた再実行でのみ書き直します（[再実行したときの挙動](#再実行したときの挙動)）。生成物を意図的に直して `--force` で作り直したときは記録も更新され、それ自体が「直した」証跡になります。
-- **既知の限界**: `.devcontainer/ORIGIN` 自体もこの衝突ポリシーに従うため、既に記録がある生成先へ `--force` を付けずに `--with-*` を追加で指定して再実行すると、新しく増えた生成物のハッシュは記録に追加されません（記録済みファイルの一覧だけが対象になるため）。記録に無いファイルを doctor.sh が誤って「変化した」と報告することはありませんが、その代わりに**診断の対象にも入りません**。取りこぼしなく記録したい場合は、既存の生成物を直した場合と同様に `--force` で作り直してください。
+記録する入力と、記録しない入力:
+
+| 入力 | 扱い | 理由 |
+|---|---|---|
+| `--project-name` / `--languages` | 記録する（`input:project-name` / `input:languages`） | 生成結果を決める必須の入力 |
+| `--with-*` | `flags=` に記録する | 同上。`--upgrade` は記録した集合へ、引数で渡した分を足す |
+| `--base-image` | 指定の有無（`input:base-image-mode=override` / `auto`）と、そのとき使った値（`input:base-image`）を記録する | `auto` のときの値は、生成時の環境（docker の有無・アーキテクチャ・レジストリの応答）で決まった観測記録で、再現すべき入力ではない。`override` のときだけ `--upgrade` が再現する |
+| `--no-gitignore` / `--gitignore-targets` | 記録する（`input:manage-gitignore` / `input:gitignore-targets`） | 生成結果（`.gitignore`）を決める |
+| 規範の取得元（`--playbook-version` / `--playbook-from` / `--with-playbook`） | 種類（`input:playbook-source` = `tag` / `url` / `local` / `adjacent`）と、記録できる場合の値（`input:playbook-ref`）を記録する。配置しないときは `input:playbook=none` | `tag` と、`@` `?` `#` を含まない URL だけ値を記録する。ローカルのパスは、絶対パスがコミットされると困り、相対パスは実行した場所で意味が変わるため記録しない。`@` `?` `#` を含む URL は資格情報や署名を含みうるため記録しない（これらは `--upgrade` で `--playbook-from` の明示が要る） |
+| `--playbook-conflict-policy` | 記録しない | 既存ファイルへの対処であって、生成結果を決める入力ではない（`--upgrade` は自分の振り分けで決める） |
+| `--force` / `--dry-run` / `--upgrade` / `--output-dir` | 記録しない | 実行の仕方であって生成結果を決める入力ではない。出力先の絶対パスも残さない |
+
+- ハッシュの対象は、この実行で生成した DCB 自身のテンプレート一覧（常時生成ぶん・`--with-*` 条件付きぶん）と、規範経由で置くファイル（`.ai-playbook/**` の規範本体と `.ai-playbook/VERSION`、入口ファイル、第二意見のスクリプトなど）です。
+- **`.ai-playbook/VERSION` と ORIGIN の役割の分担**: `VERSION` は**規範の取得元**（どのタグ・どのディレクトリから取り込んだか）の記録です。ORIGIN は**生成の入力と現物のハッシュ**の記録です。`VERSION` 自身も、ほかの生成物と同じく ORIGIN にハッシュを記録します（`--upgrade` が手を入れていないかを判定するため）。
+- 従来の再実行（`--upgrade` なし）の衝突ポリシーは他の生成物と同じです。**`--force` を付けない再実行では、既存の記録をそのまま温存します。** `--force` を付けた再実行でのみ書き直します。生成物を意図的に直して `--force` で作り直したときは記録も更新され、それ自体が「直した」証跡になります。
+- `--upgrade` は ORIGIN を、新しい版の生成結果を基準として書き直します。手を入れたファイルにも新しい版のハッシュを記録し、既存の ORIGIN のモードは変えません。入力の記録が無い古い ORIGIN は、引数を明示した初回の `--upgrade` で新しい形式になります。
+- **既知の限界**: 従来の再実行（`--force` なし）では、既に記録がある生成先へ `--with-*` を追加で指定しても、新しく増えた生成物のハッシュは記録に追加されません（ORIGIN 自体が衝突ポリシーに従い温存されるため）。記録に無いファイルを doctor.sh が誤って「変化した」と報告することはありませんが、**診断の対象にも入りません**。構成を足して追従したいときは、`--upgrade --with-*` を使ってください（`--upgrade` は記録した集合へ足して記録し直します）。
 
 由来をどう診断するかは「[Doctor 自己診断](#doctor-自己診断)」を参照してください。
 
@@ -876,6 +966,67 @@ squash 本文の組み立て方（PR の説明文だけを使うか、各コミ�
 > **`gh pr merge` 以外（REST の `PUT` / `gh api graphql` の `mergePullRequest`）には、この検査を広げていません。** REST 経由の URL は変数展開を含む形が普通にあり（上の「既知の限界」参照）、PR 番号やリポジトリをそこから安全に取り出せる保証が無いためです。誤って別の PR の本文を見にいくほうが、確認しないより悪いと判断しました。これらの経路でも既存の `ask` 自体は変わらず働きます。
 
 > **他の実行環境へ一般化できるか**: 現時点ではできません。`.claude/settings.json` の `PreToolUse` は Claude Code 固有の機構で、`--with-gemini` / `--with-copilot` に同等の「ツール実行前に判定を差し込む」配線がありません。フック本体（`scripts/confirm-merge-hook.sh`）は標準入力の JSON を読んで標準出力へ判定を返すだけなので、同種の機構を持つ実行環境が現れたら**配線だけを足せば再利用できます。** 判定ロジックを実行環境ごとに複製しない形にしてあります。
+
+#### セッション協調フック（Claude Code）
+
+`--with-claude` を選ぶと、**並行して動く別のセッションとの衝突を、操作の直前に確かめる**フックを配置します（規範は `.ai-playbook/shared-ai-rules.md`「セッション間の協調」。規範を配置しない構成でも配線されます）。台帳の読み書きと衝突の判定は、装備フラグに関わらず生成する `scripts/session-ledger.sh` が担い、このフックは「いつ確かめるか」と「Claude Code へどう返すか」だけを持ちます。
+
+| ファイル | 役割 |
+|---|---|
+| `scripts/session-coord-hook.sh` | フック本体。標準入力の JSON を読み、台帳へ登録・確認して、標準出力の JSON で拒否（`deny`）や警告（`additionalContext` と `systemMessage`）を返します |
+| `.claude/settings.json` | 配線。下表のイベントから上記を呼びます |
+
+| イベント | 対象 | 判定 |
+|---|---|---|
+| `SessionStart` | — | 他のセッションの登録を要約して表示する（他に登録が無ければ何も出さない） |
+| `PreToolUse` | `Bash` | `gh pr merge` / `gh release create`・`edit`・`delete`・`upload` / REST の merge への `PUT` / `mergePullRequest`、同じ作業ツリーでの `git checkout`・`switch`・`rebase`・`reset`・`fetch`・`pull`・`merge` など、`verify.sh` / `loop-gate.sh` の起動を、他のセッションの登録と衝突するなら**拒否**する。ブランチ作成（`git checkout -b feat/395-…` など）で、他のセッションが着手している issue なら**警告**する |
+| `PreToolUse` | `Edit\|Write` | 他のセッションが登録している文書なら**警告**する（通す） |
+| `PostToolUse` / `PostToolUseFailure` | `Bash` | `PreToolUse` で登録した「実行のあいだだけの登録」（マージ・作業ツリー・ゲート）を解放する。終了コードが 0 以外の呼び出しや中断は `PostToolUse` ではなく `PostToolUseFailure` が来るため、両方へ配線する |
+| `SessionEnd` | — | 自分の登録をすべて解放する |
+
+- **拒否と警告の出力に、相手のセッションの識別子・登録の種類・作業ツリー・調整の手順が含まれます。** 調整は、Claude Code では `ListAgents` で相手を確かめて `SendMessage` で連絡します（他の実行環境では利用者を経由します）。
+- **フックが自分で登録する時点:** マージ・作業ツリーの git 操作・重いゲートは、実行の直前に登録し、終わったら解放します（登録と解放には、その呼び出しの `tool_use_id` を呼び出しの識別子として渡し、解放はその識別子の登録だけを外します。同じセッションで同じ種類の Bash 呼び出しが並行しても、先に終わった方が他方の登録を外さず、複合コマンドが拒否されたときも、同じセッションの先行する登録は残ります。`tool_use_id` が入力に無いときは、識別子なしで種類と対象の単位で扱います）。issue はブランチ作成の時点で登録し、`SessionEnd` まで持ちます。文書は、フックは確かめるだけで登録しません（長く触る文書は、セッション自身が `session-ledger.sh claim doc <パス>` で登録します）。拒否したときは、その呼び出しで登録したものを解放してから拒否します（issue は、拒否しないと決まってから登録します）。**限界:** 確認（`ask`）を利用者が断った場合は `PostToolUse` も `PostToolUseFailure` も来ないため、次に同じ種類の操作を通すか、セッションが終わるか、持ち主のプロセスが消えるまで登録が残ります。バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放されます。
+- **セッションの識別子は台帳の既定に任せます。** フックも `Bash` ツールのコマンドも Claude Code 本体のプロセスの子として動くため、「祖先で最初のシェル以外のプロセス」が同じ本体になり、識別子が揃います（実機で確認済み）。`SESSION_LEDGER_ID` / `SESSION_LEDGER_PID` を渡せば、それが優先されます。
+- **長いセッションの失効を避けるため、`PreToolUse` のたびに `session-ledger.sh refresh` を呼びます**（前回の更新から 5 分以上たっていなければ何もしません）。
+- **台帳そのものの読み書きに失敗したときは、警告（`systemMessage`）を出して通します（fail-open）。** 台帳が見つからない・置き場所を作れない・git リポジトリの外・出力を読めない場合です。台帳の不具合ですべての操作が止まるのを避けるためで、空のペイロードを `ask` にする確認フックとは逆です（あちらは承認の記録が目的で、こちらは合図だからです）。
+- コマンドの見分け方は確認フックと同じ考え方（クォートを認識して節に分け、節の先頭のコマンドで判定する）の縮小版です。`bash -c "..."` の中身や変数展開の結果などは取りこぼします。**うっかりの衝突へ合図を出す機構であって、意図的な迂回を防ぐ境界ではありません。**
+- 台帳は排他制御ではなく合図です。2 つのセッションがほぼ同時に登録すると、両方が通ることがあります。
+
+**既存の `.claude/settings.json` がある場合**は、衝突ポリシー（既定 `skip`）で温存されるため配線は足されません。次の `hooks` を手で足してください（`confirm-merge-hook.sh` の配線がある場合は、`PreToolUse` の `Bash` の `hooks` へ 2 つ目のコマンドとして足します）。追跡している設定を書き換えることになるため、足してよいかは先に確かめてください（この開発リポジトリは、確認のうえで配線済みです）。
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/confirm-merge-hook.sh\"" },
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }]
+      }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\"" }] }
+    ]
+  }
+}
+```
+
+同梱の `/intake` と `/land` のスキル雛形は、着手のとき（`session-ledger.sh claim issue <番号>`）、マージの前（`check merge`）、作業の終わり（`release`）に台帳を使う手順を持ちます。
 
 #### リモート最終ゲート（Copilot）ワークフロー
 規範を配置し、かつ `--with-copilot-review` を選択した場合のみ、**要求側・確認側・確認側が使う判定スクリプト 2 本**を配置します（規範 `.ai-playbook/review-workflow.md`「リモート最終ゲート」に対応）。
@@ -946,6 +1097,8 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `scripts/load-project-env.sh` | そのまま書き出す | — |
 | `scripts/loop-gate.sh` | そのまま書き出す | — |
 | `scripts/on-attach.sh` | そのまま書き出す | — |
+| `scripts/session-coord-hook.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
+| `scripts/session-ledger.sh` | そのまま書き出す | — |
 | `scripts/setup-git-identity.sh` | そのまま書き出す | — |
 | `scripts/verify-commit-identity.sh` | そのまま書き出す | — |
 | `scripts/verify-commit-identity-selftest.sh` | そのまま書き出す | — |
@@ -1006,6 +1159,11 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | 記録した生成物が消えている | `[FAIL]` 該当ファイル名を添えて報告 |
 | 記録の版が `doctor.sh` 自身の版より古い | `[WARN]` 「上流が更新されています」と報告 |
 | 記録の版が一致（または新しい） | `[OK]` |
+| `*.dcb-new` が残っている | `[WARN]` 一覧と取り込み方を出す（下記） |
+
+**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` 以外の行、`%` の不正な並び、不正な `hash:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
+
+**残っている `*.dcb-new` の報告**: `bootstrap.sh --upgrade` が、手を入れたファイルの隣へ置いた新しい版（`<path>.dcb-new`）が出力先に残っていれば、`[WARN]` でパスを一覧します（`.git` と `node_modules` は除き、シンボリックリンクはたどりません）。取り込み方は、**元のファイルと `.dcb-new` の中身を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消す**ことです。自動では混ぜません。`--strict` では、これも失格になります。
 
 いずれも**検査が成立しないことを合格（`[OK]`）にはしません。** 記録の欠落・破損は `[WARN]` または `[FAIL]` として明示し、黙って通過させません。
 

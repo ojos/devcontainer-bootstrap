@@ -21,6 +21,15 @@ FORCE="false"
 DRY_RUN="false"
 MANAGE_GITIGNORE="true"
 GITIGNORE_TARGETS=""
+# --upgrade: 記録した入力で生成し直し、手を入れていないファイルだけ新しい版へ更新する。
+# 引数で明示されたものだけを記録の入力より優先するため、明示の有無を別に持つ。
+UPGRADE="false"
+MANAGE_GITIGNORE_EXPLICIT="false"
+GITIGNORE_TARGETS_EXPLICIT="false"
+# upgrade の結果の集計。UPGRADE_HASHES は「相対パス<TAB>新しい版のハッシュ」の行
+# （温存したファイルにも新しい版のハッシュを記録するため、現物ではなくこちらを ORIGIN へ書く）。
+UPGRADE_HASHES=""
+UPGRADE_LEFTOVER=""
 
 BASE_IMAGE_OVERRIDE=""
 BASE_IMAGE=""
@@ -48,7 +57,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.14.0"
+DCB_VERSION="v0.15.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -87,6 +96,13 @@ options:
   --base-image <image>        Override auto-selected devcontainer base image
   --dry-run                   Show planned outputs without writing files
   --force                     Overwrite existing files
+  --upgrade                   Regenerate from the inputs recorded in .devcontainer/ORIGIN
+                              (output dir defaults to $PWD). Files you have not touched
+                              are updated; edited files are kept and the new version is
+                              written beside them as <path>.dcb-new. Arguments you pass
+                              override the recorded inputs. Not combinable with --force;
+                              --dry-run prints the plan only. Exit: 0 all applied,
+                              2 some <path>.dcb-new left, 1 failure.
   --no-gitignore              管理対象の .gitignore セクションを更新しない
   --gitignore-targets <csv>   Additional template names to use (e.g. VisualStudioCode,JetBrains)
   --with-playbook             Install shared AI rules (ai-playbook) and entry files
@@ -126,6 +142,77 @@ notes:
 EOF
 }
 
+# >>> dcb-origin-io（試験が sed で切り出して読み込む。外側の変数に依存させないこと）
+#
+# ORIGIN の値の符号化。1 行 1 値の key=value 形式を保つため、値の中の改行・復帰・
+# % だけを %0A / %0D / %25 へ置き換える。カンマ・空白・= はそのまま書く（読み出しは
+# 「最初の = までがキー」なので値に = があっても壊れない。空白は行頭行末も含めて保つ）。
+dcb_origin_encode() {
+  local v="$1" pct='%' nl=$'\n' cr=$'\r'
+  v="${v//"$pct"/%25}"
+  v="${v//"$nl"/%0A}"
+  v="${v//"$cr"/%0D}"
+  printf '%s' "$v"
+}
+
+dcb_origin_decode() {
+  local v="$1" pct='%' nl=$'\n' cr=$'\r'
+  v="${v//%0A/$nl}"
+  v="${v//%0D/$cr}"
+  v="${v//%25/$pct}"
+  printf '%s' "$v"
+}
+
+# key=<符号化した値> を 1 行出力する。
+dcb_origin_line() {
+  printf '%s=%s\n' "$1" "$(dcb_origin_encode "$2")"
+}
+
+# ORIGIN から key（接頭辞を含む完全名。例: input:project-name）の値を復号して出す。
+# 無ければ 1 を返す（値が空の行は 0 で空を出す。「無い」と「空」を区別する）。
+dcb_origin_get() {
+  local file="$1" key="$2" raw
+  raw="$(awk -v k="$key=" 'index($0, k) == 1 { print substr($0, length(k) + 1); found = 1; exit } END { exit !found }' "$file")" || return 1
+  dcb_origin_decode "$raw"
+}
+
+# ORIGIN から、生成結果を左右する入力を取り出して ORIGIN_IN_* へ入れる（--upgrade が
+# 同じ入力で生成し直すために使う）。入力の記録が無い古い ORIGIN、または必須の行が
+# 欠けている ORIGIN では 1 を返す（その場合 ORIGIN_IN_* は信用しないこと）。
+#
+# ORIGIN_IN_BASE_IMAGE は mode が override のときだけ値を持つ（auto の値は生成時の
+# 環境の選択結果で、再現すべき入力ではない）。ORIGIN_IN_PLAYBOOK_REF は source が
+# tag / url で、かつ記録した（秘密や相対パスになりうる値は記録しない）ときだけ値を持つ。
+# ORIGIN_IN_* は呼び出し側（--upgrade と試験）が読むので、ここでは未使用に見える。
+# shellcheck disable=SC2034
+dcb_origin_load_inputs() {
+  local file="$1" mode
+  ORIGIN_IN_PROJECT_NAME="" ORIGIN_IN_LANGUAGES="" ORIGIN_IN_FLAGS=""
+  ORIGIN_IN_BASE_IMAGE_MODE="" ORIGIN_IN_BASE_IMAGE=""
+  ORIGIN_IN_MANAGE_GITIGNORE="" ORIGIN_IN_GITIGNORE_TARGETS=""
+  ORIGIN_IN_PLAYBOOK="" ORIGIN_IN_PLAYBOOK_SOURCE="" ORIGIN_IN_PLAYBOOK_REF=""
+  [[ -f "$file" ]] || return 1
+  # 値が 1 でなければ、この版が読めない書式として 1 を返す（doctor.sh と揃える）。
+  [[ "$(dcb_origin_get "$file" inputs-format)" == "1" ]] || return 1
+  ORIGIN_IN_PROJECT_NAME="$(dcb_origin_get "$file" input:project-name)" || return 1
+  ORIGIN_IN_LANGUAGES="$(dcb_origin_get "$file" input:languages)" || return 1
+  ORIGIN_IN_FLAGS="$(dcb_origin_get "$file" flags)" || return 1
+  mode="$(dcb_origin_get "$file" input:base-image-mode)" || return 1
+  ORIGIN_IN_BASE_IMAGE_MODE="$mode"
+  if [[ "$mode" == "override" ]]; then
+    ORIGIN_IN_BASE_IMAGE="$(dcb_origin_get "$file" input:base-image)" || return 1
+  fi
+  ORIGIN_IN_MANAGE_GITIGNORE="$(dcb_origin_get "$file" input:manage-gitignore)" || return 1
+  ORIGIN_IN_GITIGNORE_TARGETS="$(dcb_origin_get "$file" input:gitignore-targets)" || return 1
+  ORIGIN_IN_PLAYBOOK="$(dcb_origin_get "$file" input:playbook)" || return 1
+  if [[ "$ORIGIN_IN_PLAYBOOK" == "installed" ]]; then
+    ORIGIN_IN_PLAYBOOK_SOURCE="$(dcb_origin_get "$file" input:playbook-source)" || return 1
+    ORIGIN_IN_PLAYBOOK_REF="$(dcb_origin_get "$file" input:playbook-ref)" || ORIGIN_IN_PLAYBOOK_REF=""
+  fi
+  return 0
+}
+# <<< dcb-origin-io
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-name)     PROJECT_NAME="$2"; shift 2 ;;
@@ -161,8 +248,9 @@ while [[ $# -gt 0 ]]; do
     --base-image)       BASE_IMAGE_OVERRIDE="$2"; shift 2 ;;
     --dry-run)          DRY_RUN="true"; shift ;;
     --force)            FORCE="true"; shift ;;
-    --no-gitignore)     MANAGE_GITIGNORE="false"; shift ;;
-    --gitignore-targets)   GITIGNORE_TARGETS="$2"; shift 2 ;;
+    --upgrade)          UPGRADE="true"; shift ;;
+    --no-gitignore)     MANAGE_GITIGNORE="false"; MANAGE_GITIGNORE_EXPLICIT="true"; shift ;;
+    --gitignore-targets)   GITIGNORE_TARGETS="$2"; GITIGNORE_TARGETS_EXPLICIT="true"; shift 2 ;;
     --with-playbook)    WITH_PLAYBOOK="true"; shift ;;
     --without-playbook) WITH_PLAYBOOK="false"; shift ;;
     --playbook-from)    PLAYBOOK_FROM="$2"; shift 2 ;;
@@ -172,6 +260,15 @@ while [[ $# -gt 0 ]]; do
     *) echo "error: unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+# --upgrade は「手を入れたものを上書きしない」が前提。--force は「手を入れたものも
+# 上書きする」なので、同時に指定すると意味が両立しない。片方優先にせず指定の時点で止める。
+if [[ "$UPGRADE" == "true" && "$FORCE" == "true" ]]; then
+  echo "error: --upgrade と --force は同時に指定できません。" >&2
+  echo "       --upgrade は手を入れたファイルを上書きせず <path>.dcb-new を隣へ置きます。" >&2
+  echo "       --force は手を入れたファイルも上書きするため、意味が両立しません。" >&2
+  exit 1
+fi
 
 # ── 検証 ───────────────────────────────────────────────────────────────
 
@@ -183,6 +280,89 @@ require_cmd perl
 require_cmd awk
 require_cmd sed
 require_cmd curl
+
+# --upgrade の入力の決定。ORIGIN に記録した入力を読み、引数で明示されたものだけを上書きする。
+# 規則:
+#   project-name / languages / base-image / gitignore-targets  明示があればそれ、無ければ記録
+#   --with-*   記録した集合へ明示分を足す（外す手段は無い。外したいときは再生成する）
+#   --no-gitignore  明示があれば false、無ければ記録
+#   規範  --playbook-from / --playbook-version の明示は取得元ごと置き換える。
+#         --without-playbook は none。それ以外は記録の取得元を再現する
+#         （local と ref の無い url は再現できないので --playbook-from の明示を求めて止める）
+# 記録が読めない（古い ORIGIN・ORIGIN が無い）ときは記録を一切使わず、引数の明示を求める。
+upgrade_merge_inputs() {
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" flag rest
+  local src_explicit="false"
+  [[ -n "$PLAYBOOK_FROM" || -n "$PLAYBOOK_VERSION" ]] && src_explicit="true"
+
+  if ! dcb_origin_load_inputs "$origin"; then
+    # 必須の引数がそろっていれば、案内だけ出して続ける（正しい使い方なので error: は付けない）。
+    if [[ -n "$PROJECT_NAME" && ${#LANGUAGES[@]} -gt 0 ]]; then
+      echo "note: --upgrade: $origin に生成時の入力の記録が無いため、明示した引数で生成し、記録し直します。" >&2
+      return 0
+    fi
+    if [[ -f "$origin" ]]; then
+      echo "error: --upgrade: $origin に生成時の入力の記録がありません（古い版の記録、または欠落）。" >&2
+    else
+      echo "error: --upgrade: $origin がありません（このディレクトリは DCB の生成物ではない、または記録が消えています）。" >&2
+    fi
+    echo "       記録から入力を再現できないため、生成時と同じ引数を明示してください:" >&2
+    echo "         --project-name <name> --languages <csv>（必須）" >&2
+    echo "         --with-*（使っていたもの） --base-image --no-gitignore --gitignore-targets" >&2
+    echo "         --with-playbook / --playbook-version <tag> / --playbook-from <path|url>（規範を置いていたもの）" >&2
+    echo "       出力先は --output-dir で指定します（既定は現在のディレクトリ）。明示した引数で生成し、記録し直します。" >&2
+    exit 1
+  fi
+
+  [[ -n "$PROJECT_NAME" ]] || PROJECT_NAME="$ORIGIN_IN_PROJECT_NAME"
+  if [[ ${#LANGUAGES[@]} -eq 0 ]]; then
+    IFS=',' read -ra LANGUAGES <<< "$ORIGIN_IN_LANGUAGES"
+  fi
+  if [[ -n "$ORIGIN_IN_FLAGS" ]]; then
+    IFS=',' read -ra rest <<< "$ORIGIN_IN_FLAGS"
+    for flag in "${rest[@]}"; do
+      [[ -n "$flag" ]] && WITH_SET+=("$flag")
+    done
+  fi
+  if [[ -z "$BASE_IMAGE_OVERRIDE" && "$ORIGIN_IN_BASE_IMAGE_MODE" == "override" ]]; then
+    BASE_IMAGE_OVERRIDE="$ORIGIN_IN_BASE_IMAGE"
+  fi
+  if [[ "$MANAGE_GITIGNORE_EXPLICIT" != "true" ]]; then
+    MANAGE_GITIGNORE="$ORIGIN_IN_MANAGE_GITIGNORE"
+  fi
+  if [[ "$GITIGNORE_TARGETS_EXPLICIT" != "true" ]]; then
+    GITIGNORE_TARGETS="$ORIGIN_IN_GITIGNORE_TARGETS"
+  fi
+
+  if [[ "$src_explicit" == "true" || "$WITH_PLAYBOOK" == "false" ]]; then
+    : # 明示された取得元（または明示の opt-out）をそのまま使う
+  elif [[ "$ORIGIN_IN_PLAYBOOK" == "installed" ]]; then
+    case "$ORIGIN_IN_PLAYBOOK_SOURCE" in
+      tag)      PLAYBOOK_VERSION="$ORIGIN_IN_PLAYBOOK_REF" ;;
+      adjacent) WITH_PLAYBOOK="true" ;;
+      url)
+        if [[ -n "$ORIGIN_IN_PLAYBOOK_REF" ]]; then
+          PLAYBOOK_FROM="$ORIGIN_IN_PLAYBOOK_REF"
+        fi
+        ;;
+    esac
+    if [[ "$ORIGIN_IN_PLAYBOOK_SOURCE" == "local" || ( "$ORIGIN_IN_PLAYBOOK_SOURCE" == "url" && -z "$ORIGIN_IN_PLAYBOOK_REF" ) ]]; then
+      echo "error: --upgrade: 規範の取得元（$ORIGIN_IN_PLAYBOOK_SOURCE）は記録から再現できません。" >&2
+      echo "       ローカルのパスや、@ ? # を含む URL は記録していません。--playbook-from <path|url> で取得元を明示してください。" >&2
+      exit 1
+    fi
+  elif [[ "$WITH_PLAYBOOK" != "true" ]]; then
+    WITH_PLAYBOOK="false"
+  fi
+  return 0
+}
+
+if [[ "$UPGRADE" == "true" ]]; then
+  # 出力先の既定は現在のディレクトリ（生成先の中で実行する想定）。--project-name から
+  # $PWD/<name> を導くと、記録から読む名前と出力先の関係が循環する。
+  [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
+  upgrade_merge_inputs
+fi
 
 [[ -n "$PROJECT_NAME" ]] || { echo "error: --project-name is required" >&2; usage; exit 1; }
 # プロジェクト名は compose のマウントパス・workspaceFolder・sed 置換に流れるため、
@@ -319,6 +499,7 @@ template_rel_paths() {
     'scripts/loop-gate.sh' \
     'scripts/on-attach.sh' \
     'scripts/post-rebuild-check.sh' \
+    'scripts/session-ledger.sh' \
     'scripts/setup-git-identity.sh' \
     'scripts/verify-commit-identity.sh' \
     'scripts/verify-commit-identity-selftest.sh' \
@@ -352,14 +533,16 @@ conditional_template_rel_paths() {
   if has_language "node"; then
     printf '%s\n' 'scripts/check-deps-installed.sh'
   fi
-  # マージ確認フックとその配線先は Claude 実行環境の機構なので --with-claude に従う。
+  # マージ確認フック・セッション協調フックとその配線先は Claude 実行環境の機構なので
+  # --with-claude に従う。
   # .claude/.gitignore は settings.local.json の除外を .claude/ の中で閉じるために配る
   # （生成先の .gitignore 管理セクションへ .claude/ 固有の行を書かないため）。
   if has_with claude; then
     printf '%s\n' \
       '.claude/.gitignore' \
       '.claude/settings.json' \
-      'scripts/confirm-merge-hook.sh'
+      'scripts/confirm-merge-hook.sh' \
+      'scripts/session-coord-hook.sh'
   fi
 }
 
@@ -3150,9 +3333,41 @@ BEGIN { infence = 0; fmark = ""; fline = 0 }
 infence { next }
 {
   line = $0
-  while (match(line, /\]\([^)]*\)/)) {
-    raw = substr(line, RSTART + 2, RLENGTH - 3)
-    line = substr(line, RSTART + RLENGTH)
+  while (match(line, /\]\(/)) {
+    # `](` の後ろから括弧の深さを数え、対応する `)` までを 1 つのリンク先とする
+    # （`[a](docs/foo(bar).md)` を `docs/foo(bar` で切らない）。対応する `)` が
+    # 行内に無ければ、従来どおり最初の `)` で切る（括弧の数え方で、変更前より
+    # 検査を漏らさないため）。タイトル（空白の後の "..." / '...'）と `<...>` の
+    # 中の括弧、およびバックスラッシュでエスケープした文字は数えない
+    # （`[a](x.md "T (")` や `[a](x.md "T \" (")` を検査から漏らさない）。
+    # リンク先は空白を含まないので、空白の後に続いてよいのは空白・タイトル・
+    # 閉じ括弧だけとする。それ以外が来たら正しいリンクではないとみなし、従来
+    # どおりに切る（`[a](x(y) [b](gone.md) )` の後ろのリンクを漏らさない）。
+    rest = substr(line, RSTART + 2)
+    depth = 1
+    endpos = 0
+    quote = ""
+    prev = ""
+    spaced = 0
+    rlen = length(rest)
+    for (ci = 1; ci <= rlen; ci++) {
+      ch = substr(rest, ci, 1)
+      if (ch == "\\") { ci++; prev = ""; continue }
+      if (quote != "") { if (ch == quote) quote = "" }
+      else if (ch == " " || ch == "\t") { if (depth > 1) break; spaced = 1 }
+      else if (depth == 1 && (ch == "\"" || ch == "'") && spaced) quote = ch
+      else if (ch == "<" && depth == 1 && prev == "") quote = ">"
+      else if (ch == ")") { depth--; if (depth == 0) { endpos = ci; break } }
+      else if (spaced) break
+      else if (ch == "(") depth++
+      prev = ch
+    }
+    if (endpos == 0) {
+      endpos = index(rest, ")")
+      if (endpos == 0) { line = rest; continue }
+    }
+    raw = substr(rest, 1, endpos - 1)
+    line = substr(rest, endpos + 1)
     t = raw
     # リンク先とタイトルを分ける（`[a](path "title")` / `[a](path 'title')`）。
     # CommonMark では、リンク先は空白を含まないか `<...>` で囲む。囲みがあれば
@@ -6628,17 +6843,1382 @@ fi
 exit 0
 TMPL
       ;;
+    'scripts/session-ledger.sh')
+      # 並行セッションの共有台帳（常に生成する）。台帳は実行環境に依存せず、
+      # Claude Code 固有のフックや配線は --with-claude 側が持つ。規範は
+      # shared-ai-rules.md「セッション間の協調」。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# session-ledger.sh — 同じホストで並行して動く AI セッションの共有台帳。
+#
+# 規範は .ai-playbook/shared-ai-rules.md「セッション間の協調」。この文書へ判定基準を
+# 複製しない。ここは台帳の読み書きだけを担い、実行環境（フック・メッセージ）には依存しない。
+#
+# 使い方:
+#   session-ledger.sh claim   [--call <ID>] <kind> [target]   登録する（同じ登録は更新時刻を更新する）
+#   session-ledger.sh release [--call <ID>] [<kind> [target]] 自分の登録を解放する（引数なしは全部）
+#   session-ledger.sh list    [--others|--all]  登録を表示する（既定は生きている登録すべて）
+#   session-ledger.sh check   <kind> [target]   他セッションの登録と衝突するかを調べる
+#   session-ledger.sh refresh                   自分の最後の更新時刻を新しくする（失効を避ける）
+#
+# kind（登録の種類）と衝突の判定・強さ:
+#   issue  target = issue 番号（# は付けても付けなくてもよい）。同じ番号で衝突。警告。
+#   doc    target = 文書のパス（作業ツリーの絶対パスは相対へ直す。末尾 / はその配下すべて）。
+#          同じパスで衝突。警告。
+#   merge  マージ・リリース。target は任意。種類が同じなら衝突。拒否。
+#   git    作業ツリーでの git 操作（checkout / rebase / reset / fetch など）。target 省略時は
+#          現在の作業ツリー。同じ作業ツリーで衝突。拒否。
+#   gate   重いゲート（verify / loop-gate など）。種類が同じなら衝突。拒否。
+#   台帳は排他制御ではなく合図である。2 つのセッションがほぼ同時に登録すると、両方が
+#   通ることがある。止める強さは「拒否」でも、確実な排他を保証しない。
+#
+# 置き場所と書式:
+#   $(git rev-parse --git-common-dir)/session-ledger/<セッション識別子>.tsv
+#   作業ツリーをまたいで共有され、セッションごとに別ファイルへ追記する（追記のみ。
+#   既存の行を書き換えない。解放も「解放の行」を足す）。1 行 = タブ区切り 8 列:
+#     時刻(epoch 秒)  claim|release  kind  target  PID  作業ツリー  開始時刻のキー  識別子
+#   呼び出しの識別子（8 列目。任意）: claim / release の --call <ID> で渡す。
+#     claim に --call を付けると、その登録に識別子を持たせる（8 列目。無ければ -）。
+#     release に --call を付けると、その識別子の登録だけを解放する（kind / target を
+#     併せて渡せば、その中でさらに絞る。無ければ、その識別子の登録すべて）。識別子は
+#     照合のキーにも衝突の判定にも使わない。解放の単位にだけ使う。同じセッションが同じ
+#     （kind, target）を別々の識別子で登録しても、衝突の判定は従来どおり。
+#     --call の無い呼び出しは従来どおり、種類と対象の単位で登録・解放する（release は、
+#     識別子の有無にかかわらずその（kind, target）の登録をすべて外す）。
+#     いま有効な登録の判定: 同じ（kind, target）に識別子の違う claim が複数あるとき、
+#     解放されていないものが 1 つでもあれば有効（1 件として表示・判定する）。
+#     7 列（識別子なし）の古い台帳ファイルも読める（識別子は - として扱う）。
+#   release の kind が * なら全部、target が * ならその種類すべてを解放する。
+#
+# セッションの識別子と持ち主の PID:
+#   SESSION_LEDGER_ID があればそれを使う（英数字と ._- 以外は _ になる）。無ければ
+#   pid-<持ち主の PID>。持ち主の PID は SESSION_LEDGER_PID があればそれ、無ければ祖先の
+#   プロセスをたどって、最初に現れるシェル以外のプロセス（セッションを動かしている
+#   本体）。見つからなければ親プロセス。識別子は pid-<PID>-<開始時刻の cksum> で、
+#   PID が再利用されても別のセッションとして扱う。
+#   人がシェルから直接使うときは、同じ端末から起動した複数のシェルが同じ持ち主に
+#   なりうるので、SESSION_LEDGER_ID を明示する。
+#
+# 失効:
+#   次のどちらかなら、その登録は失効したものとして無視する。
+#     - 持ち主の PID のプロセスが存在しない
+#     - そのセッションの最後の更新から SESSION_LEDGER_TTL 秒（既定 28800）を超えた
+#
+# 出力と終了コード（check / claim）:
+#   標準出力の 1 行目が判定。LEDGER_OK（衝突なし）/ LEDGER_WARN（警告して通す）/
+#   LEDGER_DENY（拒否）/ LEDGER_SKIP（台帳を読み書きできなかった。警告を出して通す）。
+#   衝突があれば続けて、衝突ごとに 1 行
+#     conflict: session=… kind=… target=… pid=… worktree=… age=…s
+#   と、調整の手順を `coordinate` で始まる行で出す。
+#   終了コードは LEDGER_DENY のときだけ 3。それ以外は 0（台帳の不具合は fail-open）。
+#   使い方の誤りは 2。
+#
+# 更新（refresh）:
+#   自分に生きている登録があり、最後の更新から SESSION_LEDGER_REFRESH_MIN 秒（既定 300）
+#   以上たっていれば、その登録を 1 件だけ claim し直す（追記のみ）。失効の判定はセッション
+#   単位で最後の更新を見るため、1 件で足りる。長く続くセッションが、フックなどから呼んで
+#   失効を避けるための入口。頻繁に呼んでも台帳が膨らまない。
+#
+# 環境変数: SESSION_LEDGER_ID / SESSION_LEDGER_PID / SESSION_LEDGER_TTL /
+#           SESSION_LEDGER_REFRESH_MIN / SESSION_LEDGER_DIR（置き場所を差し替える。試験用）
+#
+# bash 3.2 互換（連想配列・mapfile を使わない）。
+set -u
+
+warn() { echo "[session-ledger] WARN: $*" >&2; }
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: session-ledger.sh claim   [--call <ID>] <issue|doc|merge|git|gate> [target]
+       session-ledger.sh release [--call <ID>] [<kind> [target]]
+       session-ledger.sh list    [--others|--all]
+       session-ledger.sh check   <issue|doc|merge|git|gate> [target]
+       session-ledger.sh refresh
+USAGE
+}
+
+TAB="$(printf '\t')"
+
+valid_kind() {
+  case "$1" in
+    issue | doc | merge | git | gate) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 止める強さ。種類ごとに固定する（規範の表と同じ）。
+level_of() {
+  case "$1" in
+    issue | doc) echo "WARN" ;;
+    *) echo "DENY" ;;
+  esac
+}
+
+# ファイル名として安全な形へ直す。置き換えが起きたときは、元の識別子の cksum を足して、
+# 別の識別子（a/b と a_b など）が同じファイルにならないようにする。置き換えが起きない
+# 識別子は変えない。
+sanitize() {
+  local s sum
+  s="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+  # 先頭の . は隠しファイルになり、台帳の読み出し（*.tsv）から漏れるので置き換える。
+  case "$s" in .*) s="_${s#.}" ;; esac
+  if [ "$s" != "$1" ]; then
+    sum="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+    s="$s-$sum"
+  fi
+  printf '%s' "$s"
+}
+
+# ── 持ち主の PID とセッション識別子 ──────────────────────────────────────────
+
+owner_pid() {
+  local p pp comm base i
+  if [ -n "${SESSION_LEDGER_PID:-}" ]; then
+    echo "$SESSION_LEDGER_PID"
+    return 0
+  fi
+  p=$$
+  i=0
+  while [ "$i" -lt 32 ]; do
+    pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    case "$pp" in '' | *[!0-9]*) break ;; esac
+    [ "$pp" -gt 1 ] || break
+    comm="$(ps -o comm= -p "$pp" 2>/dev/null)"
+    base="${comm##*/}"
+    base="${base#-}"
+    case "$base" in
+      bash | sh | zsh | dash | ksh | fish | env | timeout | sudo | xargs)
+        p="$pp"
+        i=$((i + 1))
+        continue
+        ;;
+    esac
+    echo "$pp"
+    return 0
+  done
+  # 持ち主を特定できない。PID 1 などは別のセッションと共有してしまうので使わない。
+  case "$PPID" in '' | *[!0-9]*) return 0 ;; esac
+  [ "$PPID" -gt 1 ] && echo "$PPID"
+  return 0
+}
+
+# 持ち主を特定できないときは SELF_ID を空にし、登録・確認を警告して通す（fail-open）。
+# SESSION_LEDGER_ID を明示した場合は、PID を特定できなくても親プロセスを使う。
+# プロセスの開始時刻の cksum。PID が再利用されたとき、別のプロセスと見分けるために使う。
+# 取れないときは - を返す（従来の PID だけの判定に落ちる）。
+proc_start_key() { # pid
+  local lstart sum
+  lstart="$(ps -o lstart= -p "$1" 2>/dev/null)"
+  [ -n "$lstart" ] || { printf '%s' "-"; return 0; }
+  sum="$(printf '%s' "$lstart" | cksum | cut -d' ' -f1)"
+  printf '%s' "${sum:--}"
+}
+
+SELF_PID="$(owner_pid)"
+SELF_ID=""
+SELF_KEY="-"
+if [ -n "${SESSION_LEDGER_ID:-}" ]; then
+  SELF_ID="$(sanitize "$SESSION_LEDGER_ID")"
+  [ -n "$SELF_PID" ] || SELF_PID="$PPID"
+  SELF_KEY="$(proc_start_key "$SELF_PID")"
+elif [ -n "$SELF_PID" ]; then
+  SELF_KEY="$(proc_start_key "$SELF_PID")"
+  SELF_ID="pid-$SELF_PID"
+  [ "$SELF_KEY" = "-" ] || SELF_ID="$SELF_ID-$SELF_KEY"
+fi
+
+# 持ち主を特定できないとき 0 を返す（呼び出し側が警告して通す）。
+owner_unknown() {
+  [ -n "$SELF_ID" ] && return 1
+  warn "セッションの持ち主を特定できません。SESSION_LEDGER_ID と SESSION_LEDGER_PID を指定してください。台帳を使わず通します。"
+  return 0
+}
+
+# 持ち主が生きているか。登録時の開始時刻が分かっていて、いまのプロセスの開始時刻と
+# 違えば、PID が再利用された別のプロセスなので、生きていないものとして扱う。
+pid_alive() { # pid [開始時刻の cksum]
+  local now_key
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  if ! kill -0 "$1" 2>/dev/null; then
+    # 他ユーザーのプロセスは kill -0 が EPERM で失敗する。存在だけを ps で確かめる。
+    ps -p "$1" >/dev/null 2>&1 || return 1
+  fi
+  case "${2:--}" in
+    - | '') return 0 ;;
+  esac
+  now_key="$(proc_start_key "$1")"
+  [ "$now_key" = "-" ] || [ "$now_key" = "$2" ]
+}
+
+# ── 置き場所 ──────────────────────────────────────────────────────────────────
+
+LEDGER_DIR=""
+resolve_dir() {
+  local common
+  if [ -n "${SESSION_LEDGER_DIR:-}" ]; then
+    LEDGER_DIR="$SESSION_LEDGER_DIR"
+    return 0
+  fi
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$common" ] || return 1
+  common="$(cd "$common" 2>/dev/null && pwd)" || return 1
+  LEDGER_DIR="$common/session-ledger"
+}
+
+TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$TOPLEVEL" ] || TOPLEVEL="$(pwd)"
+# シンボリックリンクをたどった実体のパスに揃える（同じ作業ツリーが別の表記で現れても一致させる）。
+TOPLEVEL="$(cd -P "$TOPLEVEL" 2>/dev/null && pwd -P || printf '%s' "$TOPLEVEL")"
+
+# 台帳の置き場所を使える状態にする。失敗したら呼び出し側が警告して通す。
+ensure_dir() {
+  resolve_dir || { warn "git リポジトリの共通ディレクトリを解決できません。台帳を使わず通します。"; return 1; }
+  mkdir -p "$LEDGER_DIR" 2>/dev/null && [ -d "$LEDGER_DIR" ] && [ -w "$LEDGER_DIR" ] || {
+    warn "台帳の置き場所を作れない、または書けません: $LEDGER_DIR。台帳を使わず通します。"
+    return 1
+  }
+}
+
+# ── 対象の正規化 ──────────────────────────────────────────────────────────────
+
+# パスを絶対パスにし、. と .. を畳む。存在しない部分は、存在する親ディレクトリの実体
+# から先を字句だけで畳む。末尾の / は保つ。
+normalize_path() {
+  local p="$1" trail="" abs out seg d rest real
+  case "$p" in */) trail="/" ;; esac
+  case "$p" in
+    /*) abs="$p" ;;
+    *) abs="$(pwd -P)/$p" ;;
+  esac
+  out=""
+  set -f
+  local IFS=/
+  for seg in $abs; do
+    case "$seg" in
+      '' | .) ;;
+      ..) out="${out%/*}" ;;
+      *) out="$out/$seg" ;;
+    esac
+  done
+  unset IFS
+  set +f
+  abs="${out:-/}"
+  d="$abs"
+  rest=""
+  while [ ! -d "$d" ] && [ "$d" != "/" ]; do
+    rest="/${d##*/}$rest"
+    d="${d%/*}"
+    [ -n "$d" ] || d="/"
+  done
+  real="$(cd -P "$d" 2>/dev/null && pwd -P)" || real="$d"
+  abs="${real%/}$rest"
+  [ -n "$abs" ] || abs="/"
+  if [ "$abs" = "/" ]; then trail=""; fi
+  printf '%s%s' "$abs" "$trail"
+}
+
+normalize_target() { # kind target
+  local kind="$1" t="$2" top
+  # タブと改行は書式を壊すので空白へ。
+  t="$(printf '%s' "$t" | tr '\t\n\r' '   ')"
+  case "$kind" in
+    issue)
+      t="${t#\#}"
+      ;;
+    doc)
+      if [ -n "$t" ]; then
+        t="$(normalize_path "$t")"
+        case "$t" in
+          "$TOPLEVEL"/*) t="${t#"$TOPLEVEL"/}" ;;
+        esac
+      fi
+      ;;
+    git)
+      if [ -n "$t" ]; then t="$(normalize_path "$t")"; else t="$TOPLEVEL"; fi
+      t="${t%/}"
+      # 作業ツリーの下の階層を渡されても、その作業ツリーのルートへ揃える（cd した先や
+      # git -C の先がサブディレクトリでも、同じ作業ツリーの登録と照合できるように）。
+      if [ -d "$t" ]; then
+        top="$(git -C "$t" rev-parse --show-toplevel 2>/dev/null)" || top=""
+        if [ -n "$top" ]; then
+          top="$(cd -P "$top" 2>/dev/null && pwd -P)" || top=""
+          [ -n "$top" ] && t="$top"
+        fi
+      fi
+      [ -n "$t" ] || t="/"
+      ;;
+  esac
+  [ -n "$t" ] || t="-"
+  printf '%s' "$t"
+}
+
+# ── 台帳の読み出し ────────────────────────────────────────────────────────────
+
+# 1 セッションぶんのファイルを再生して、いま有効な登録を TSV で出す:
+#   sid kind target pid worktree 最後の更新(epoch) 開始時刻のキー 識別子
+# 壊れた行は読み飛ばし、件数を警告する。
+replay_file() { # file sid
+  awk -v sid="$2" -v file="$1" '
+    BEGIN { FS = "\t"; bad = 0; last = 0 }
+    {
+      if (NF < 6 || $1 !~ /^[0-9]+$/ || ($2 != "claim" && $2 != "release") || $5 !~ /^[0-9]+$/) { bad++; next }
+      if ($1 + 0 > last) last = $1 + 0
+      cid = (NF >= 8 && $8 != "") ? $8 : "-"
+      key = $3 "\034" $4 "\034" cid
+      if ($2 == "claim") {
+        live[key] = 1; kind[key] = $3; tgt[key] = $4; pid[key] = $5; wt[key] = $6; cids[key] = cid
+        skey[key] = (NF >= 7 && $7 ~ /^[0-9]+$/) ? $7 : "-"
+      } else {
+        # 識別子の付いた解放は、その識別子の登録だけを（kind / target で絞って）外す。
+        # 識別子の無い解放は、従来どおり種類と対象の単位で、識別子にかかわらず外す。
+        for (x in live) {
+          if (cid != "-" && cids[x] != cid) continue
+          if ($3 != "*" && kind[x] != $3) continue
+          if ($3 != "*" && $4 != "*" && tgt[x] != $4) continue
+          delete live[x]
+        }
+      }
+    }
+    END {
+      # 同じ（kind, target）に識別子の違う登録が複数あっても、1 件として出す（1 つでも
+      # 解放されていなければ有効）。
+      for (x in live) {
+        kt = kind[x] "\034" tgt[x]
+        if (!(kt in seen) || cids[x] != "-") { seen[kt] = 1; pick[kt] = x }
+      }
+      for (kt in pick) {
+        x = pick[kt]
+        printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", sid, kind[x], tgt[x], pid[x], wt[x], last, skey[x], cids[x]
+      }
+      if (bad > 0) printf "[session-ledger] WARN: %s: 壊れた行を %d 件読み飛ばしました。\n", file, bad > "/dev/stderr"
+    }
+  ' "$1"
+}
+
+# 全セッションの有効な登録に、状態（live / expired）を付けて出す。
+#   sid kind target pid worktree 最後の更新 age state 識別子
+collect() {
+  local f sid now ttl
+  now="$(date +%s)"
+  ttl="${SESSION_LEDGER_TTL:-28800}"
+  case "$ttl" in '' | *[!0-9]*) ttl=28800 ;; esac
+  for f in "$LEDGER_DIR"/*.tsv; do
+    [ -e "$f" ] || continue
+    sid="$(basename "$f" .tsv)"
+    if [ ! -r "$f" ]; then
+      warn "読めない台帳のファイルを読み飛ばします: $f"
+      continue
+    fi
+    replay_file "$f" "$sid" | while IFS="$TAB" read -r a_sid a_kind a_tgt a_pid a_wt a_last a_key a_cid; do
+      [ -n "$a_sid" ] || continue
+      state="live"
+      if ! pid_alive "$a_pid" "$a_key"; then
+        state="expired"
+      elif [ $((now - a_last)) -gt "$ttl" ]; then
+        state="expired"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$a_sid" "$a_kind" "$a_tgt" "$a_pid" "$a_wt" "$a_last" "$((now - a_last))" "$state" "$a_cid"
+    done
+  done
+}
+
+# ── 衝突の判定 ────────────────────────────────────────────────────────────────
+
+target_matches() { # kind query claimed
+  local kind="$1" q="$2" c="$3"
+  case "$kind" in
+    merge | gate) return 0 ;;
+    doc)
+      [ "$q" = "$c" ] && return 0
+      # 末尾が / の登録は、その配下すべてを指す。どちらか一方がもう一方の配下なら
+      # 衝突とする（登録の順序に依らない）。
+      case "$c" in
+        */)
+          case "$q" in
+            "$c"*) return 0 ;;
+          esac
+          ;;
+      esac
+      case "$q" in
+        */)
+          case "$c" in
+            "$q"*) return 0 ;;
+          esac
+          ;;
+      esac
+      return 1
+      ;;
+    *) [ "$q" = "$c" ] ;;
+  esac
+}
+
+print_coordinate() { # 自分の識別子を除いた相手の一覧を引数にとる
+  echo "coordinate: 相手のセッション（$*）と調整してください。相手が release するか、登録が失効（持ち主の PID が消える、または一定時間更新が無い）するまで待ちます。どちらが譲るかは自動では決まりません。"
+  echo "coordinate[claude-code]: ListAgents で相手のセッションを確かめ、SendMessage で連絡します。"
+  echo "coordinate[other]: 上記以外の実行環境では、利用者へ相手のセッションと作業ツリーを伝え、調整を依頼します。"
+}
+
+# check の本体。標準出力へ判定を出し、DENY のとき 3 を返す。
+do_check() { # kind target
+  local kind="$1" target="$2" level out peers n rows
+  level="$(level_of "$kind")"
+  rows="$(collect)" || rows=""
+  out=""
+  peers=""
+  n=0
+  while IFS="$TAB" read -r r_sid r_kind r_tgt r_pid r_wt _ r_age r_state _; do
+    [ -n "$r_sid" ] || continue
+    [ "$r_state" = "live" ] || continue
+    [ "$r_sid" != "$SELF_ID" ] || continue
+    [ "$r_kind" = "$kind" ] || continue
+    target_matches "$kind" "$target" "$r_tgt" || continue
+    n=$((n + 1))
+    out="${out}conflict: session=$r_sid kind=$r_kind target=$r_tgt pid=$r_pid worktree=$r_wt age=${r_age}s"$'\n'
+    peers="${peers:+$peers, }$r_sid"
+  done <<EOF
+$rows
+EOF
+  if [ "$n" -eq 0 ]; then
+    echo "LEDGER_OK"
+    return 0
+  fi
+  echo "LEDGER_$level"
+  printf '%s' "$out"
+  print_coordinate "$peers"
+  [ "$level" = "DENY" ] && return 3
+  return 0
+}
+
+# 呼び出しの識別子。--call で渡されたものを、セッションの識別子と同じ規則（sanitize）で
+# 安全な形へ直す。置き換えが起きたときは元の値の cksum を足すので、a/b と a_b は別の識別子
+# になる。渡されなければ - （識別子なし）。空文字と - は「識別子なし」と区別できないため、
+# 使い方の誤りとして 1 を返す。
+CALL_ID="-"
+set_call_id() { # 値
+  case "$1" in '' | -) return 1 ;; esac
+  CALL_ID="$(sanitize "$1")"
+}
+
+append_record() { # op kind target
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$SELF_PID" "$TOPLEVEL" "$SELF_KEY" "$CALL_ID" \
+    >>"$LEDGER_DIR/$SELF_ID.tsv" 2>/dev/null
+}
+
+# ── サブコマンド ──────────────────────────────────────────────────────────────
+
+cmd_check() {
+  local kind="${1:-}" target
+  valid_kind "$kind" || { usage; return 2; }
+  target="$(normalize_target "$kind" "${2:-}")"
+  if owner_unknown; then
+    echo "LEDGER_SKIP"
+    return 0
+  fi
+  if ! ensure_dir; then
+    echo "LEDGER_SKIP"
+    return 0
+  fi
+  do_check "$kind" "$target"
+}
+
+cmd_claim() {
+  local kind target res rc
+  if [ "${1:-}" = "--call" ]; then
+    [ "$#" -ge 2 ] || { usage; return 2; }
+    set_call_id "$2" || { usage; return 2; }
+    shift 2
+  fi
+  kind="${1:-}"
+  valid_kind "$kind" || { usage; return 2; }
+  target="$(normalize_target "$kind" "${2:-}")"
+  if owner_unknown; then
+    echo "LEDGER_SKIP"
+    return 0
+  fi
+  if ! ensure_dir; then
+    echo "LEDGER_SKIP"
+    return 0
+  fi
+  res="$(do_check "$kind" "$target")"
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # 拒否の種類は、衝突しているあいだは登録しない。登録すると相手も拒否される。
+    printf '%s\n' "$res"
+    return 3
+  fi
+  if ! append_record claim "$kind" "$target"; then
+    warn "台帳へ書き込めませんでした。登録せず通します。"
+    echo "LEDGER_SKIP"
+    return 0
+  fi
+  printf '%s\n' "$res"
+  echo "claimed: session=$SELF_ID kind=$kind target=$target"
+  return 0
+}
+
+cmd_release() {
+  local kind target
+  if [ "${1:-}" = "--call" ]; then
+    [ "$#" -ge 2 ] || { usage; return 2; }
+    set_call_id "$2" || { usage; return 2; }
+    shift 2
+  fi
+  kind="${1:-*}"
+  target="${2:-*}"
+  if [ "$kind" != "*" ]; then
+    valid_kind "$kind" || { usage; return 2; }
+    [ "$target" = "*" ] || target="$(normalize_target "$kind" "$target")"
+  fi
+  owner_unknown && return 0
+  if ! ensure_dir; then
+    return 0
+  fi
+  # 自分のファイルが無ければ解放するものも無い。
+  [ -e "$LEDGER_DIR/$SELF_ID.tsv" ] || return 0
+  if ! append_record release "$kind" "$target"; then
+    # 解放の行を書けなかった。登録は残っている。fail-open の方針なので終了コードは 0 のまま
+    # にし、残っていることが出力から分かるようにする（失効するか、書けるようになった後の
+    # release で消える）。
+    warn "台帳へ書き込めませんでした。解放できていません（登録が残っています）。"
+    echo "release-failed: session=$SELF_ID kind=$kind target=$target（登録は残っています）"
+    return 0
+  fi
+  echo "released: session=$SELF_ID kind=$kind target=$target"
+  return 0
+}
+
+cmd_refresh() {
+  local rows min
+  owner_unknown && return 0
+  min="${SESSION_LEDGER_REFRESH_MIN:-300}"
+  case "$min" in '' | *[!0-9]*) min=300 ;; esac
+  ensure_dir || return 0
+  rows="$(collect)" || rows=""
+  while IFS="$TAB" read -r r_sid r_kind r_tgt _ _ _ r_age r_state r_cid; do
+    [ -n "$r_sid" ] || continue
+    [ "$r_sid" = "$SELF_ID" ] || continue
+    [ "$r_state" = "live" ] || continue
+    if [ "$r_age" -ge "$min" ]; then
+      CALL_ID="${r_cid:--}"
+      append_record claim "$r_kind" "$r_tgt" || warn "台帳へ書き込めませんでした。更新できていません。"
+      echo "refreshed: session=$SELF_ID"
+    fi
+    break
+  done <<EOF
+$rows
+EOF
+  return 0
+}
+
+cmd_list() {
+  local mode="${1:-}" rows
+  case "$mode" in '' | --others | --all) ;; *) usage; return 2 ;; esac
+  ensure_dir || return 0
+  rows="$(collect)" || rows=""
+  while IFS="$TAB" read -r r_sid r_kind r_tgt r_pid r_wt _ r_age r_state _; do
+    [ -n "$r_sid" ] || continue
+    if [ "$mode" != "--all" ] && [ "$r_state" != "live" ]; then continue; fi
+    if [ "$mode" = "--others" ] && [ "$r_sid" = "$SELF_ID" ]; then continue; fi
+    echo "session=$r_sid kind=$r_kind target=$r_tgt pid=$r_pid worktree=$r_wt age=${r_age}s state=$r_state"
+  done <<EOF
+$rows
+EOF
+  return 0
+}
+
+main() {
+  local sub="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  case "$sub" in
+    claim) cmd_claim "$@" ;;
+    release) cmd_release "$@" ;;
+    list) cmd_list "$@" ;;
+    check) cmd_check "$@" ;;
+    refresh) cmd_refresh ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+# source ガード。読み込まれただけのときは関数定義だけを提供する。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+  exit $?
+fi
+TMPL
+      ;;
+    'scripts/session-coord-hook.sh')
+      # 並行セッションの共有台帳を操作の直前に確かめる Claude Code 用フック
+      # （--with-claude 連動）。台帳（scripts/session-ledger.sh、常に生成する）の
+      # 判定をそのまま使い、このフックは「いつ確かめるか」と「Claude Code へどう
+      # 返すか」だけを持つ。規範は shared-ai-rules.md「セッション間の協調」。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# session-coord-hook.sh — 並行セッションの共有台帳を、操作の直前に確かめるフック（Claude Code 用）。
+#
+# 規範は .ai-playbook/shared-ai-rules.md「セッション間の協調」。台帳の読み書きと衝突の判定は
+# scripts/session-ledger.sh が担い、このフックは「いつ確かめるか」と「Claude Code へどう返すか」
+# だけを持つ。判定基準（止める強さ）をここへ複製しない。
+#
+# ── 配線（.claude/settings.json）─────────────────────────────────────────────
+#
+#   SessionStart                      他セッションの登録を要約して表示する。
+#   PreToolUse   (Bash)               マージ・リリース、作業ツリーでの git 操作、重いゲートの
+#                                     起動を見つけたら、台帳へ登録しながら確かめる。他のセッション
+#                                     と衝突すれば拒否（deny）する。issue への着手（ブランチ作成）
+#                                     は重複を警告する。
+#   PreToolUse   (Edit|Write)         他セッションが登録している文書なら警告する（通す）。
+#   PostToolUse / PostToolUseFailure  (Bash)
+#                                     PreToolUse で登録した「実行のあいだだけ」の登録を解放する。
+#                                     失敗した呼び出し（終了コード 0 以外・中断）は PostToolUse では
+#                                     なく PostToolUseFailure が来るため、両方へ配線する。
+#   SessionEnd                        自分の登録をすべて解放する。
+#
+# ── 判定 ──────────────────────────────────────────────────────────────────────
+#
+#   コマンド                                                  登録の種類・対象        強さ
+#   gh pr merge / gh release create|edit|delete|upload /      merge                   拒否
+#     gh api の merge エンドポイントへの PUT / mergePullRequest
+#   git checkout|switch|rebase|reset|fetch|pull|merge|        git（作業ツリー）       拒否
+#     cherry-pick|revert|stash|restore|clean|am
+#   verify.sh / loop-gate.sh                                  gate                    拒否
+#   git checkout -b / git switch -c / git worktree add -b     issue（ブランチ名の     警告
+#     / gh issue develop（ブランチ名が番号で始まる場合）       先頭の番号）
+#   Edit / Write の対象ファイル                               doc（確かめるだけ）     警告
+#
+# 拒否は permissionDecision の deny、警告は additionalContext（モデルへ）と systemMessage
+# （利用者へ）で返す。相手の識別子・登録の種類・調整の手順は、台帳の出力をそのまま添える。
+#
+# ── 自分で登録する時点 ────────────────────────────────────────────────────────
+#
+#   - merge / git / gate: 実行の直前（PreToolUse）に登録し、実行が終わったら（PostToolUse）
+#     解放する（失敗した呼び出しは PostToolUseFailure で解放する）。「実行する間は登録する」
+#     （規範）を、実行のあいだに限って機構が担う。拒否したときは、その呼び出しで登録した
+#     ものを解放してから拒否する（issue は、拒否しないと決まってから登録する）。
+#     登録と解放には、その呼び出しの tool_use_id を識別子として渡す（`session-ledger.sh
+#     claim|release --call <tool_use_id>`）。解放（拒否したときの巻き戻しを含む）はその
+#     識別子の登録だけを外すため、同じセッションで同じ種類の Bash 呼び出しが並行しても、
+#     先に終わった方が他方の登録を外さない。複合コマンドが拒否されたときも、同じセッションの
+#     先行する登録は残る。識別子は衝突の判定には使わない（種類・作業ツリーの単位のまま）。
+#     別のリポジトリ（別の台帳）へ登録したときのため、登録した台帳の一覧を tool_use_id を
+#     鍵にした印（一時ディレクトリ）へ控え、解放はその一覧のすべての台帳へ行う（印が無い
+#     ときは cwd の台帳だけ）。
+#     tool_use_id が入力に無いときは、識別子なしで（種類と対象の単位で）登録・解放する。
+#     限界: 利用者が確認（ask）を断った場合は、どちらも来ないため、次に同じ種類の操作を
+#     通すか、セッションが終わる（SessionEnd）か、持ち主が消えるまで登録が残る。
+#     バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放される。
+#   - issue: ブランチ作成の時点で登録し、SessionEnd まで持つ。ただし、その呼び出しが失敗した
+#     （PostToolUseFailure）ときは、その呼び出しで新しく登録した issue だけを解放する（ブランチ
+#     が作れていないため）。前から持っていた登録は外さない。区別は、PreToolUse で
+#     tool_use_id を鍵にした印（一時ディレクトリ）へ新しく登録した番号を控えて行う。
+#   - doc: フックは登録しない（確かめるだけ）。長く触る文書は、セッション自身が
+#     `session-ledger.sh claim doc <パス>` で登録する。編集のたびに登録すると警告が常時出る。
+#
+# 長いセッションの失効を避けるため、PreToolUse（Bash・Edit|Write）のたびに
+# `session-ledger.sh refresh` を呼ぶ（前回の更新から一定時間たっていなければ何もしない）。
+#
+# ── セッションの識別子 ────────────────────────────────────────────────────────
+#
+# 台帳の既定（祖先で最初のシェル以外のプロセス）に任せる。フックも Bash ツールのコマンドも
+# Claude Code 本体の子として動くため、同じ識別子になる。環境変数 SESSION_LEDGER_ID /
+# SESSION_LEDGER_PID を渡せば、台帳と同じくそれが優先される。
+#
+# ── fail-open ────────────────────────────────────────────────────────────────
+#
+# 台帳そのものの読み書きに失敗したとき（台帳が見つからない・置き場所を作れない・出力が読めない）
+# は、警告（systemMessage）を出して通す。台帳の不具合で、すべての操作を止めない。
+# 確認フック（confirm-merge-hook.sh）が空のペイロードを fail-closed にするのとは逆である。
+# あちらは承認の記録が目的で、こちらは合図だからである。
+#
+# ── コマンドの見分け方 ────────────────────────────────────────────────────────
+#
+# confirm-merge-hook.sh と同じ考え方で、クォートを認識して ; & | ( ) ` と改行でコマンド節に
+# 分け、節の先頭（環境変数の代入と制御語を読み飛ばした位置）のコマンドで判定する。文字列に
+# 含まれるだけ（echo / grep の引数・コミットメッセージ）では反応しない。ヒアドキュメントの本体は
+# 読み飛ばす。cd で動いた先は、同じコマンド内の続く節に反映する。
+# 部分実装であり、取りこぼしうる（bash -c "..." の中身、変数展開・コマンド置換の結果など）。
+# 意図的な迂回を防ぐ境界ではなく、うっかりの衝突に合図を出す機構である。
+#
+# 終了コード: 常に 0。判定は標準出力の JSON で伝える。
+#
+# bash 3.2 互換（連想配列・mapfile を使わない）。
+set -uo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LEDGER="$HOOK_DIR/session-ledger.sh"
+US=$'\x1f'
+
+# 台帳の警告などを集め、最後に systemMessage として 1 回で返す。
+WARNS=""
+add_warn() {
+  case "$WARNS" in *"$1"*) return 0 ;; esac
+  WARNS="${WARNS:+$WARNS$'\n'}$1"
+}
+
+# ── JSON の読み書き（jq が無くても動く）──────────────────────────────────────
+
+HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1
+
+json_get() { # key（payload の中の文字列値。入れ子は区別しない）
+  local key="$1" v
+  if [[ "$HAVE_JQ" -eq 1 ]]; then
+    case "$key" in
+      command | file_path | notebook_path) v="$(printf '%s' "$payload" | jq -r ".tool_input.$key // empty" 2>/dev/null)" ;;
+      *) v="$(printf '%s' "$payload" | jq -r ".$key // empty" 2>/dev/null)" ;;
+    esac
+    printf '%s' "$v"
+    return 0
+  fi
+  v="$(printf '%s\n' "$payload" | sed -nE "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"(([^\"\\\\]|\\\\.)*)\".*/\\1/p" | sed -n 1p)"
+  v="${v//\\\\/$'\x01'}"
+  v="${v//\\\"/\"}"
+  v="${v//\\n/$'\n'}"
+  v="${v//\\t/ }"
+  v="${v//$'\x01'/\\}"
+  printf '%s' "$v"
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "$s"
+}
+
+# emit <event> <decision> <reason> <context> <systemMessage>。出すものが無ければ何も出さない。
+# hookSpecificOutput は、決定か追加の文脈があるときだけ付ける。
+emit() {
+  local ev="$1" dec="$2" reason="$3" ctx="$4" sys="$5" hs="" out=""
+  [[ -n "$dec$ctx$sys" ]] || return 0
+  if [[ "$HAVE_JQ" -eq 1 ]]; then
+    jq -n --arg ev "$ev" --arg dec "$dec" --arg reason "$reason" --arg ctx "$ctx" --arg sys "$sys" '
+      (if $dec != "" or $ctx != "" then
+         {hookSpecificOutput: ({hookEventName: $ev}
+           + (if $dec != "" then {permissionDecision: $dec, permissionDecisionReason: $reason} else {} end)
+           + (if $ctx != "" then {additionalContext: $ctx} else {} end))}
+       else {} end)
+      + (if $sys != "" then {systemMessage: $sys} else {} end)'
+    return 0
+  fi
+  if [[ -n "$dec" || -n "$ctx" ]]; then
+    hs="\"hookEventName\":\"$ev\""
+    [[ -z "$dec" ]] || hs="$hs,\"permissionDecision\":\"$dec\",\"permissionDecisionReason\":\"$(json_escape "$reason")\""
+    [[ -z "$ctx" ]] || hs="$hs,\"additionalContext\":\"$(json_escape "$ctx")\""
+    out="\"hookSpecificOutput\":{$hs}"
+  fi
+  if [[ -n "$sys" ]]; then
+    out="${out:+$out,}\"systemMessage\":\"$(json_escape "$sys")\""
+  fi
+  printf '{%s}\n' "$out"
+}
+
+# ── 台帳の呼び出し ────────────────────────────────────────────────────────────
+
+LEDGER_OUT=""
+LEDGER_VERDICT=""
+LEDGER_DETAIL=""
+
+# run_ledger <作業ディレクトリ> <台帳の引数...>。判定は LEDGER_VERDICT（LEDGER_OK / WARN / DENY /
+# SKIP）、2 行目以降は LEDGER_DETAIL。台帳が読めない・壊れているときは SKIP にして、警告を足す。
+run_ledger() {
+  local dir="$1" errf="" err="" rc
+  shift
+  LEDGER_OUT=""
+  LEDGER_VERDICT="LEDGER_SKIP"
+  LEDGER_DETAIL=""
+  if [[ ! -f "$LEDGER" ]]; then
+    add_warn "[session-coord] 台帳のスクリプトが見つかりません（$LEDGER）。台帳を確かめずに通します。"
+    return 0
+  fi
+  errf="$(mktemp "${TMPDIR:-/tmp}/session-coord.XXXXXX" 2>/dev/null)" || errf=""
+  if [[ -n "$errf" ]]; then
+    LEDGER_OUT="$( (cd "$dir" 2>/dev/null || cd "$cwd" 2>/dev/null || true; bash "$LEDGER" "$@") 2>"$errf")"
+    rc=$?
+    err="$(cat "$errf" 2>/dev/null)"
+    rm -f "$errf"
+  else
+    LEDGER_OUT="$( (cd "$dir" 2>/dev/null || cd "$cwd" 2>/dev/null || true; bash "$LEDGER" "$@") 2>/dev/null)"
+    rc=$?
+  fi
+  [[ -z "$err" ]] || add_warn "$err"
+  # 解放の行を書けなかったとき、台帳は終了コード 0 で「release-failed: …（登録は残っています）」
+  # を出す。実行は止めないが、登録が残ったことを利用者へ知らせる（systemMessage）。
+  case "$LEDGER_OUT" in
+    *release-failed*)
+      add_warn "[session-coord] 登録を解放できませんでした。登録は残っています（持ち主が消える、または一定時間更新が無いと失効します）。"
+      ;;
+  esac
+  LEDGER_VERDICT="${LEDGER_OUT%%$'\n'*}"
+  case "$LEDGER_VERDICT" in
+    LEDGER_OK | LEDGER_WARN | LEDGER_DENY | LEDGER_SKIP) ;;
+    *)
+      # refresh / release / list は判定の行を持たない。出力があれば、そのまま詳細として返す。
+      if [[ "$rc" -ne 0 && "$rc" -ne 3 ]]; then
+        add_warn "[session-coord] 台帳の出力を読めませんでした（終了コード $rc）。台帳を確かめずに通します。"
+        LEDGER_VERDICT="LEDGER_SKIP"
+      else
+        LEDGER_VERDICT="LEDGER_OK"
+      fi
+      LEDGER_DETAIL="$LEDGER_OUT"
+      return 0
+      ;;
+  esac
+  if [[ "$LEDGER_OUT" == *$'\n'* ]]; then
+    LEDGER_DETAIL="${LEDGER_OUT#*$'\n'}"
+  fi
+  if [[ "$LEDGER_VERDICT" == "LEDGER_SKIP" ]]; then
+    add_warn "[session-coord] 台帳を読み書きできませんでした。台帳を確かめずに通します。"
+  fi
+  return 0
+}
+
+# 失効を避けるための更新。台帳が使えなくても警告は出さない（実際の登録・確認の時点で出る）。
+refresh_ledger() {
+  local saved="$WARNS"
+  run_ledger "$1" refresh
+  WARNS="$saved"
+}
+
+# ── コマンドの字句解析（confirm-merge-hook.sh と同じ考え方の縮小版）──────────
+
+CLAUSES=()
+
+# ヒアドキュメントの本体を取り除く。
+strip_heredocs() {
+  local text="$1" line delim="" t out="" re
+  re="(^|[^<])<<-?[[:space:]]*['\"]?([A-Za-z_][A-Za-z0-9_]*)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -n "$delim" ]]; then
+      t="${line#"${line%%[!$'\t']*}"}"
+      [[ "$t" == "$delim" ]] && delim=""
+      continue
+    fi
+    out="$out$line"$'\n'
+    if [[ "$line" =~ $re ]]; then
+      delim="${BASH_REMATCH[2]}"
+    fi
+  done <<<"$text"
+  printf '%s' "$out"
+}
+
+# クォートを認識して、コマンド節（語を $US でつないだ文字列）の配列 CLAUSES を作る。
+scan_clauses() {
+  local text="$1" i n c word="" have=0 sq=0 dq=0 cur="" nx
+  CLAUSES=()
+  n=${#text}
+  for ((i = 0; i < n; i++)); do
+    c="${text:i:1}"
+    if [[ $sq -eq 1 ]]; then
+      if [[ "$c" == "'" ]]; then sq=0; else word+="$c"; fi
+      continue
+    fi
+    if [[ $dq -eq 1 ]]; then
+      if [[ "$c" == '"' ]]; then
+        dq=0
+      elif [[ "$c" == $'\\' ]]; then
+        i=$((i + 1))
+        word+="${text:i:1}"
+      else
+        word+="$c"
+      fi
+      continue
+    fi
+    case "$c" in
+      "'") sq=1; have=1 ;;
+      '"') dq=1; have=1 ;;
+      $'\\')
+        nx="${text:i+1:1}"
+        if [[ "$nx" == $'\n' ]]; then
+          i=$((i + 1))
+        else
+          i=$((i + 1))
+          word+="$nx"
+          have=1
+        fi
+        ;;
+      ' ' | $'\t')
+        if [[ $have -eq 1 ]]; then cur="${cur:+$cur$US}$word"; word=""; have=0; fi
+        ;;
+      ';' | '&' | '|' | '(' | ')' | '`' | $'\n')
+        if [[ $have -eq 1 ]]; then cur="${cur:+$cur$US}$word"; word=""; have=0; fi
+        if [[ -n "$cur" ]]; then CLAUSES[${#CLAUSES[@]}]="$cur"; cur=""; fi
+        ;;
+      *) word+="$c"; have=1 ;;
+    esac
+  done
+  if [[ $have -eq 1 ]]; then cur="${cur:+$cur$US}$word"; fi
+  if [[ -n "$cur" ]]; then CLAUSES[${#CLAUSES[@]}]="$cur"; fi
+}
+
+# 分類の結果。
+HIT_MERGE=0
+HIT_GATE=0
+HIT_GIT_DIRS=""   # 改行区切り。作業ツリーのパス
+HIT_ISSUES=""     # 空白区切り。issue 番号
+
+toplevel_of() { # 基準ディレクトリ 相対ディレクトリ
+  local base="$1" rel="$2" top=""
+  top="$( (cd "$base" 2>/dev/null && { [[ -z "$rel" ]] || cd "$rel" 2>/dev/null; } && git rev-parse --show-toplevel 2>/dev/null) || true)"
+  [[ -n "$top" ]] || top="$base"
+  printf '%s' "$top"
+}
+
+add_git_dir() {
+  # 行単位の完全一致で重複を除く（/repo2 を見ているときに /repo を落とさない）。
+  case $'\n'"$HIT_GIT_DIRS"$'\n' in
+    *$'\n'"$1"$'\n'*) ;;
+    *) HIT_GIT_DIRS="${HIT_GIT_DIRS:+$HIT_GIT_DIRS$'\n'}$1" ;;
+  esac
+}
+
+add_issue() {
+  case " $HIT_ISSUES " in
+    *" $1 "*) ;;
+    *) HIT_ISSUES="${HIT_ISSUES:+$HIT_ISSUES }$1" ;;
+  esac
+}
+
+# ブランチ名の先頭の番号（feat/395-x・395-x・fix/issue-12-x）を issue 番号とみなす。
+issue_from_branch() {
+  local b="$1" re
+  re='(^|/)(issue-|gh-)?([1-9][0-9]{0,5})([-_]|$)'
+  if [[ "$b" =~ $re ]]; then
+    add_issue "${BASH_REMATCH[3]}"
+  fi
+}
+
+# W 配列の k 番目以降から、オプションを読み飛ばして最初の位置引数を返す（番号で）。
+first_positional() { # 開始位置。結果は POS_IDX
+  local j="$1" n=${#W[@]} w
+  POS_IDX=-1
+  while [[ $j -lt $n ]]; do
+    w="${W[$j]}"
+    case "$w" in
+      # 引数を取るオプションは、その引数を位置引数と取り違えない（bash -o pipefail script）。
+      -R | --repo | --hostname | -C | -c | -o | +o | -O | +O | -[a-zA-Z]*[oO] | --rcfile | --init-file) j=$((j + 2)) ;;
+      -*) j=$((j + 1)) ;;
+      *) POS_IDX=$j; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+classify_gh() { # k（gh の位置）
+  local k="$1" j n=${#W[@]} w p1="" p2="" joined put_re
+  j=$((k + 1))
+  while [[ $j -lt $n ]]; do
+    w="${W[$j]}"
+    case "$w" in
+      -R | --repo | --hostname) j=$((j + 2)); continue ;;
+      -*) j=$((j + 1)); continue ;;
+    esac
+    if [[ -z "$p1" ]]; then p1="$w"; elif [[ -z "$p2" ]]; then p2="$w"; j=$((j + 1)); break; fi
+    j=$((j + 1))
+  done
+  case "$p1:$p2" in
+    pr:merge) HIT_MERGE=1 ;;
+    release:create | release:edit | release:delete | release:upload | release:delete-asset) HIT_MERGE=1 ;;
+    issue:develop)
+      # 次の位置引数が issue 番号。
+      first_positional "$j"
+      if [[ $POS_IDX -ge 0 && "${W[$POS_IDX]}" =~ ^[1-9][0-9]*$ ]]; then add_issue "${W[$POS_IDX]}"; fi
+      ;;
+    api:*)
+      joined="${W[*]}"
+      put_re='(--method(=|[[:space:]]+)|-X[[:space:]]*)[Pp][Uu][Tt]([^A-Za-z0-9_-]|$)'
+      if [[ "$joined" =~ pulls/[^[:space:]]*/merge ]] && [[ "$joined" =~ $put_re ]]; then
+        HIT_MERGE=1
+      elif [[ "$joined" == *graphql* && "$CMD_TEXT" == *mergePullRequest* ]]; then
+        HIT_MERGE=1
+      fi
+      ;;
+  esac
+}
+
+classify_git() { # k（git の位置）
+  local k="$1" j n=${#W[@]} w dir="" sub="" next
+  j=$((k + 1))
+  while [[ $j -lt $n ]]; do
+    w="${W[$j]}"
+    case "$w" in
+      -C) dir="${W[$((j + 1))]:-}"; j=$((j + 2)) ;;
+      -c | --git-dir | --work-tree | --namespace | --exec-path) j=$((j + 2)) ;;
+      -*) j=$((j + 1)) ;;
+      *) sub="$w"; break ;;
+    esac
+  done
+  [[ -n "$sub" ]] || return 0
+  case "$sub" in
+    checkout | switch | rebase | reset | fetch | pull | merge | cherry-pick | revert | restore | clean | am)
+      add_git_dir "$(toplevel_of "$CUR_DIR" "$dir")"
+      ;;
+    stash)
+      next="${W[$((j + 1))]:-}"
+      case "$next" in list | show) ;; *) add_git_dir "$(toplevel_of "$CUR_DIR" "$dir")" ;; esac
+      ;;
+  esac
+  # ブランチの作成から、着手した issue を読む。
+  j=$((j + 1))
+  while [[ $j -lt $n ]]; do
+    w="${W[$j]}"
+    case "$sub:$w" in
+      checkout:-b | checkout:-B | switch:-c | switch:-C | switch:--create | switch:--force-create | worktree:-b | worktree:-B)
+        issue_from_branch "${W[$((j + 1))]:-}"
+        ;;
+    esac
+    j=$((j + 1))
+  done
+}
+
+CUR_DIR=""
+
+classify_clause() {
+  local clause="$1" k=0 n w base
+  IFS="$US" read -r -a W <<<"$clause"
+  n=${#W[@]}
+  while [[ $k -lt $n ]]; do
+    w="${W[$k]}"
+    if [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      k=$((k + 1))
+      continue
+    fi
+    case "$w" in
+      if | then | do | else | elif | while | until | '!' | '{' | time | env | command | exec | nohup | sudo) k=$((k + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [[ $k -lt $n ]] || return 0
+  base="${W[$k]##*/}"
+  case "$base" in
+    cd)
+      first_positional $((k + 1))
+      if [[ $POS_IDX -ge 0 ]]; then
+        case "${W[$POS_IDX]}" in
+          /*) CUR_DIR="${W[$POS_IDX]}" ;;
+          -) ;;
+          *) CUR_DIR="$CUR_DIR/${W[$POS_IDX]}" ;;
+        esac
+      fi
+      ;;
+    gh) classify_gh "$k" ;;
+    git) classify_git "$k" ;;
+    verify.sh | loop-gate.sh) HIT_GATE=1 ;;
+    bash | sh)
+      first_positional $((k + 1))
+      if [[ $POS_IDX -ge 0 ]]; then
+        case "${W[$POS_IDX]##*/}" in verify.sh | loop-gate.sh) HIT_GATE=1 ;; esac
+      fi
+      ;;
+  esac
+}
+
+CMD_TEXT=""
+classify_command() { # コマンド文字列、基準ディレクトリ
+  local text="$1" clause
+  HIT_MERGE=0
+  HIT_GATE=0
+  HIT_GIT_DIRS=""
+  HIT_ISSUES=""
+  CUR_DIR="$2"
+  # 見るべき語が無ければ、解析しない。
+  case "$text" in
+    *git* | *gh* | *verify* | *loop-gate*) ;;
+    *) return 0 ;;
+  esac
+  CMD_TEXT="$text"
+  scan_clauses "$(strip_heredocs "$text")"
+  for clause in ${CLAUSES[@]+"${CLAUSES[@]}"}; do
+    classify_clause "$clause"
+  done
+}
+
+# ── 判定の整形 ────────────────────────────────────────────────────────────────
+
+# 拒否・警告の本文。台帳の出力（conflict: 行と coordinate 行）をそのまま添える。
+deny_text() { # 操作の説明 詳細
+  printf '%s\n%s\n%s' \
+    "[session-coord] 拒否: ${1}は、他のセッションの登録と衝突します。実行しません。" \
+    "$2" \
+    "相手が release する、または登録が失効するまで待ってください。登録を消して迂回しないでください（調整の手順は上の coordinate の行）。"
+}
+
+warn_text() { # 内容 詳細
+  printf '%s\n%s\n%s' \
+    "[session-coord] 警告: ${1}" \
+    "$2" \
+    "連絡のうえで進めてください。拒否ではないため、このまま実行されます。"
+}
+
+DECISION=""
+REASON=""
+CONTEXT=""
+
+# ── イベントごとの処理 ────────────────────────────────────────────────────────
+
+on_session_start() {
+  local rows n
+  run_ledger "$cwd" list --others
+  rows="$LEDGER_DETAIL"
+  [[ "$LEDGER_VERDICT" != "LEDGER_SKIP" && -n "$rows" ]] || return 0
+  n="$(printf '%s\n' "$rows" | grep -c .)"
+  CONTEXT="$(printf '%s\n%s\n%s\n%s' \
+    "[session-coord] 同じホストで動いている他のセッションの登録が ${n} 件あります。" \
+    "$rows" \
+    "同じ issue への着手・登録済みの文書の編集は警告、マージ・同じ作業ツリーでの git 操作・重いゲートの起動は、登録が残っている間は拒否されます。" \
+    "調整は、Claude Code では ListAgents で相手を確かめて SendMessage で連絡します（他の実行環境では利用者を経由します）。着手する issue は scripts/session-ledger.sh claim issue <番号> で登録します。")"
+}
+
+on_session_end() {
+  run_ledger "$cwd" release
+}
+
+pre_bash() {
+  local d denies="" warns="" before_rows="" new_issues="" me="" claimed_merge=0 claimed_gate=0 claimed_dirs="" n call_dirs=""
+  local call_opt=()
+  [[ -z "$tuid" ]] || call_opt=(--call "$tuid")
+  [[ -n "$cmd" ]] || return 0
+  refresh_ledger "$cwd"
+  classify_command "$cmd" "$cwd"
+  # 衝突の確認に関係しないコマンドでは、これ以上台帳を呼ばない。
+  [[ $HIT_MERGE -eq 1 || $HIT_GATE -eq 1 || -n "$HIT_GIT_DIRS" || -n "$HIT_ISSUES" ]] || return 0
+
+  if [[ $HIT_MERGE -eq 1 ]]; then
+    run_ledger "$cwd" claim ${call_opt[@]+"${call_opt[@]}"} merge
+    case "$LEDGER_VERDICT" in
+      LEDGER_DENY) denies="${denies:+$denies$'\n'}$(deny_text 'マージ・リリース' "$LEDGER_DETAIL")" ;;
+      LEDGER_OK | LEDGER_WARN) claimed_merge=1; call_dirs="${call_dirs:+$call_dirs$'\n'}$cwd" ;;
+    esac
+  fi
+  if [[ $HIT_GATE -eq 1 ]]; then
+    run_ledger "$cwd" claim ${call_opt[@]+"${call_opt[@]}"} gate
+    case "$LEDGER_VERDICT" in
+      LEDGER_DENY) denies="${denies:+$denies$'\n'}$(deny_text '重いゲート（verify / loop-gate）の起動' "$LEDGER_DETAIL")" ;;
+      LEDGER_OK | LEDGER_WARN) claimed_gate=1; call_dirs="${call_dirs:+$call_dirs$'\n'}$cwd" ;;
+    esac
+  fi
+  if [[ -n "$HIT_GIT_DIRS" ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      run_ledger "$d" claim ${call_opt[@]+"${call_opt[@]}"} git "$d"
+      case "$LEDGER_VERDICT" in
+        LEDGER_DENY) denies="${denies:+$denies$'\n'}$(deny_text "作業ツリー（$d）での git 操作" "$LEDGER_DETAIL")" ;;
+        LEDGER_OK | LEDGER_WARN) claimed_dirs="${claimed_dirs:+$claimed_dirs$'\n'}$d"; call_dirs="${call_dirs:+$call_dirs$'\n'}$d" ;;
+      esac
+    done <<EOF
+$HIT_GIT_DIRS
+EOF
+  fi
+  if [[ -n "$denies" ]]; then
+    # 実行しないので、この呼び出しで登録したものを解放する（PostToolUse は来ない）。
+    # tool_use_id があれば、その識別子の登録だけを外す（同じセッションの先行する登録は残す）。
+    if [[ -n "$tuid" ]]; then
+      release_call_dirs "$call_dirs"
+    else
+      [[ $claimed_merge -eq 0 ]] || run_ledger "$cwd" release merge
+      [[ $claimed_gate -eq 0 ]] || run_ledger "$cwd" release gate
+      if [[ -n "$claimed_dirs" ]]; then
+        while IFS= read -r d; do
+          [[ -n "$d" ]] && run_ledger "$d" release git "$d"
+        done <<EOF
+$claimed_dirs
+EOF
+      fi
+    fi
+    DECISION="deny"
+    REASON="$denies"
+    return 0
+  fi
+  # 登録した台帳（リポジトリ）の一覧を、tool_use_id を鍵にした印へ控える。git -C などで別の
+  # リポジトリへ登録することがあり、解放はその一覧のすべての台帳に対して行うため。
+  [[ -z "$tuid" || -z "$call_dirs" ]] || write_dirs_mark "$call_dirs"
+  # issue は、実行を拒否しないと決まってから登録する（拒否した呼び出しで登録を残さない）。
+  # この呼び出しで新しく登録した issue は、呼び出しが失敗したとき（PostToolUseFailure）に
+  # 解放できるよう、tool_use_id を鍵にした印へ控える。前から持っていた登録は控えない。
+  if [[ -n "$HIT_ISSUES" ]]; then
+    run_ledger "$cwd" list
+    before_rows="$LEDGER_DETAIL"
+  fi
+  for n in $HIT_ISSUES; do
+    run_ledger "$cwd" claim issue "$n"
+    if [[ "$LEDGER_VERDICT" == "LEDGER_WARN" ]]; then
+      warns="${warns:+$warns$'\n'}$(warn_text "issue #$n には、他のセッションが着手しています。" "$LEDGER_DETAIL")"
+    fi
+    case "$LEDGER_VERDICT" in
+      LEDGER_OK | LEDGER_WARN)
+        if [[ "$LEDGER_OUT" == *"claimed: session="* ]]; then
+          me="${LEDGER_OUT##*claimed: session=}"
+          me="${me%% *}"
+          case "$before_rows" in
+            *"session=$me kind=issue target=$n "*) ;;
+            *) new_issues="${new_issues:+$new_issues }$n" ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+  [[ -z "$new_issues" ]] || write_issue_mark "$new_issues"
+  [[ -z "$warns" ]] || CONTEXT="$warns"
+}
+
+# 呼び出しごとの印（この呼び出しで新しく登録した issue の番号）。置き場所は一時ディレクトリで、
+# 名前は tool_use_id から作る。tool_use_id が無ければ印は作らない（失敗時の解放は諦める）。
+issue_mark_path() { # [接尾辞]
+  [[ -n "$tuid" ]] || return 1
+  printf '%s/session-coord-%s%s' "${TMPDIR:-/tmp}" "$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_')" "${1:-}"
+}
+# この呼び出しが登録した台帳（作業ディレクトリの一覧。改行区切り）の印。
+write_dirs_mark() {
+  local f
+  f="$(issue_mark_path .dirs)" || return 0
+  printf '%s\n' "$1" >"$f" 2>/dev/null || true
+}
+# 一覧のすべての台帳から、この呼び出しの識別子の登録を解放する（重複は 1 回）。
+release_call_dirs() { # 改行区切りの作業ディレクトリ
+  local d seen=""
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    case $'\n'"$seen"$'\n' in *$'\n'"$d"$'\n'*) continue ;; esac
+    seen="${seen:+$seen$'\n'}$d"
+    run_ledger "$d" release --call "$tuid"
+  done <<EOF
+$1
+EOF
+}
+write_issue_mark() {
+  local f
+  f="$(issue_mark_path)" || return 0
+  printf '%s\n' "$1" >"$f" 2>/dev/null || true
+}
+# 印を読んで消す。成功した呼び出しでは、読まずに消す（issue は SessionEnd まで持つ）。
+settle_issue_mark() { # release|keep
+  local f nums n
+  f="$(issue_mark_path)" || return 0
+  [[ -f "$f" ]] || return 0
+  if [[ "$1" == "release" ]]; then
+    nums="$(cat "$f" 2>/dev/null)"
+    for n in $nums; do
+      run_ledger "$cwd" release issue "$n"
+    done
+  fi
+  rm -f "$f"
+}
+
+post_bash() {
+  local d
+  if [[ "$event" == "PostToolUseFailure" ]]; then settle_issue_mark release; else settle_issue_mark keep; fi
+  [[ -n "$cmd" ]] || return 0
+  classify_command "$cmd" "$cwd"
+  if [[ -n "$tuid" ]]; then
+    # 登録時に渡した tool_use_id の登録だけを解放する（並行する別の呼び出しの登録は残る）。
+    # 印があれば、その呼び出しが登録した台帳すべてから解放する。無ければ cwd の台帳だけ。
+    local mark dirs=""
+    mark="$(issue_mark_path .dirs)" || mark=""
+    if [[ -n "$mark" && -f "$mark" ]]; then
+      dirs="$(cat "$mark" 2>/dev/null)"
+      rm -f "$mark"
+      release_call_dirs "$dirs"
+    elif [[ $HIT_MERGE -eq 1 || $HIT_GATE -eq 1 || -n "$HIT_GIT_DIRS" ]]; then
+      run_ledger "$cwd" release --call "$tuid"
+    fi
+    return 0
+  fi
+  [[ $HIT_MERGE -eq 1 ]] && run_ledger "$cwd" release merge
+  [[ $HIT_GATE -eq 1 ]] && run_ledger "$cwd" release gate
+  if [[ -n "$HIT_GIT_DIRS" ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && run_ledger "$d" release git "$d"
+    done <<EOF
+$HIT_GIT_DIRS
+EOF
+  fi
+  return 0
+}
+
+pre_edit() {
+  local path dir
+  path="$fpath"
+  [[ -n "$path" ]] || return 0
+  dir="$(dirname "$path")"
+  refresh_ledger "$dir"
+  run_ledger "$dir" check doc "$path"
+  if [[ "$LEDGER_VERDICT" == "LEDGER_WARN" ]]; then
+    CONTEXT="$(warn_text "他のセッションが登録している文書（$path）を編集しようとしています。" "$LEDGER_DETAIL")"
+  fi
+}
+
+# ── 本体 ──────────────────────────────────────────────────────────────────────
+
+payload="$(cat)"
+if [[ -z "$payload" ]]; then
+  add_warn "[session-coord] フックへ届いたペイロードが空でした。台帳を確かめずに通します。"
+  emit "" "" "" "" "$WARNS"
+  exit 0
+fi
+
+event="$(json_get hook_event_name)"
+tool="$(json_get tool_name)"
+cmd="$(json_get command)"
+fpath="$(json_get file_path)"
+[[ -n "$fpath" ]] || fpath="$(json_get notebook_path)"
+cwd="$(json_get cwd)"
+tuid="$(json_get tool_use_id)"
+if [[ -z "$cwd" || ! -d "$cwd" ]]; then cwd="$(pwd)"; fi
+
+case "$event" in
+  SessionStart) on_session_start ;;
+  SessionEnd) on_session_end ;;
+  PreToolUse)
+    case "$tool" in
+      Bash) pre_bash ;;
+      Edit | Write | MultiEdit | NotebookEdit) pre_edit ;;
+    esac
+    ;;
+  PostToolUse | PostToolUseFailure)
+    [[ "$tool" != "Bash" ]] || post_bash
+    ;;
+esac
+
+SYS="$WARNS"
+if [[ -n "$CONTEXT" && "$DECISION" != "deny" ]]; then
+  SYS="${SYS:+$SYS$'\n'}$CONTEXT"
+fi
+case "$event" in
+  SessionStart | PreToolUse | PostToolUse | PostToolUseFailure) emit "$event" "$DECISION" "$REASON" "$CONTEXT" "$SYS" ;;
+  *) emit "$event" "" "" "" "$WARNS" ;;
+esac
+exit 0
+TMPL
+      ;;
     '.claude/settings.json')
-      # PreToolUse フックの配線（--with-claude 連動）。JSON はコメントを持てないため、
-      # 何をなぜ配線しているかはフック本体（scripts/confirm-merge-hook.sh）の冒頭と
-      # README に置く。matcher を Bash に絞るのは、フックの検査対象がシェルコマンド
-      # だからで、他のツールへ配ると取り出せないペイロードでの照合ばかりが増える。
+      # フックの配線（--with-claude 連動）。JSON はコメントを持てないため、何をなぜ
+      # 配線しているかはフック本体（scripts/confirm-merge-hook.sh /
+      # scripts/session-coord-hook.sh）の冒頭と README に置く。マージ確認フックの
+      # matcher を Bash に絞るのは、検査対象がシェルコマンドだからで、他のツールへ配ると
+      # 取り出せないペイロードでの照合ばかりが増える。セッション協調フックは、
+      # SessionStart / SessionEnd（登録の表示と解放）、PreToolUse の Bash（マージ・
+      # git 操作・ゲートの確認と登録）と Edit|Write（文書の確認）、PostToolUse の
+      # Bash と PostToolUseFailure の Bash（実行のあいだだけの登録の解放。失敗した呼び出しは
+      # PostToolUse ではなく PostToolUseFailure が来る）へ配る。
       #
       # 既存ファイルは衝突ポリシー（既定 skip）で温存される。既に settings.json を
       # 持つプロジェクトへ後から入れる場合は、この hooks 節を手で足すことになる。
       cat <<'TMPL'
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -6646,6 +8226,51 @@ TMPL
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/confirm-merge-hook.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
           }
         ]
       }
@@ -7562,6 +9187,19 @@ upsert_gitignore() {
   block="$(build_gitignore_block)"
   tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-gitignore-block.XXXXXX")"
 
+  dcb_guard_parent "$gitignore_path"
+  # （--upgrade の経路は従来どおり: リンクは mv が置き換える）
+  # シンボリックリンクの .gitignore は「既存のファイル」として扱い、たどらない。
+  # 既定では温存する。--force のときはリンク自体を置き換える（中身は引き継がない）。
+  if [[ "$UPGRADE" != "true" && -L "$gitignore_path" ]]; then
+    if [[ "$FORCE" != "true" ]]; then
+      rm -f "$tmp"
+      echo "skip (exists): $gitignore_path"
+      return 0
+    fi
+    rm -f "$gitignore_path"
+  fi
+
   [[ -f "$gitignore_path" ]] && prev_mode="$(file_mode_octal "$gitignore_path")"
 
   if [[ -f "$gitignore_path" ]]; then
@@ -7583,7 +9221,7 @@ upsert_gitignore() {
 
   # mktemp は 0600 で作成し mv がそれを維持するため、既存 .gitignore のモードを
   # 潰してしまう。元のモードを復元し、644 は新規作成したファイルにのみ使う。
-  mv "$tmp" "$gitignore_path"
+  dcb_place_file "$tmp" "$gitignore_path"
   chmod "${prev_mode:-644}" "$gitignore_path"
   echo "write: $gitignore_path (managed section)"
 }
@@ -7722,19 +9360,31 @@ detect_playbook_dir() {
 apply_file_with_policy() {
   local src="$1" dest="$2" answer prev_mode
 
+  if [[ "$UPGRADE" == "true" ]]; then
+    upgrade_apply_file "$dest" "$src"
+    return 0
+  fi
+
+  dcb_guard_parent "$dest"
   mkdir -p "$(dirname "$dest")"
 
-  if [[ ! -f "$dest" ]]; then
-    cp "$src" "$dest"
+  if [[ ! -e "$dest" && ! -L "$dest" ]]; then
     # 取得元は mktemp 由来（0600）。新規作成するファイルは他と同様に読めるようにする。
-    chmod 644 "$dest"
+    dcb_install_file "$src" "$dest" 644
     echo "write: $dest"
     return 0
   fi
 
-  # 既存ファイルを上書きする場合は、そのモードを変えてはならない。
-  prev_mode="$(file_mode_octal "$dest")"
-  prev_mode="${prev_mode:-644}"
+  # シンボリックリンク（切れたものを含む）は「既存のファイル」として扱い、たどらない。
+  # 置き換えるときはリンク自体を消してから書く（リンク先は触らない）。モードはリンク先
+  # のものを引き継がず、新規と同じ 644 にする。
+  if [[ -L "$dest" ]]; then
+    prev_mode=644
+  else
+    # 既存ファイルを上書きする場合は、そのモードを変えてはならない。
+    prev_mode="$(file_mode_octal "$dest")"
+    prev_mode="${prev_mode:-644}"
+  fi
 
   case "$PLAYBOOK_CONFLICT_POLICY" in
     skip)
@@ -7742,15 +9392,13 @@ apply_file_with_policy() {
       SKIPPED_DESTS="${SKIPPED_DESTS}${dest}"$'\n'
       ;;
     overwrite)
-      cp "$src" "$dest"
-      chmod "$prev_mode" "$dest"
+      dcb_install_file "$src" "$dest" "$prev_mode"
       echo "write: $dest (overwrite)"
       ;;
     prompt)
       read -r -p "File exists: $dest. Overwrite? [y/N]: " answer
       if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
-        cp "$src" "$dest"
-        chmod "$prev_mode" "$dest"
+        dcb_install_file "$src" "$dest" "$prev_mode"
         echo "write: $dest (overwrite)"
       else
         echo "skip (declined): $dest"
@@ -7817,14 +9465,14 @@ resolve_playbook_source_or_die() {
 # 一覧が挙げる規範経由の出力であり、記録に無いため doctor.sh が診断できなかった
 # （実測）。
 #
-# .ai-playbook/** 配下（規範ファイル本体・VERSION）は対象外のまま。あちらは
-# --playbook-conflict-policy と .ai-playbook/VERSION が別に担っており、二重に
-# 記録すると片方だけ更新されたときにどちらが正本か読めなくなる。
+# .ai-playbook/** 配下（規範ファイル本体・VERSION）はここに含めない。そちらは
+# playbook_rules_rel_paths が挙げ、由来記録は両方を記録する。
 playbook_installed_rel_paths() {
   if should_install_playbook; then
     printf '%s\n' \
       '.github/project-ai-rules.md' \
       'CLAUDE.md' \
+      'AGENTS.md' \
       '.github/copilot-instructions.md' \
       'scripts/second-opinion-review.sh' \
       'scripts/second-opinion-schema.json' \
@@ -7883,12 +9531,13 @@ install_playbook_rules() {
   # 入口ファイルは実行環境ごとに 1 つ。内容は同一で、雛形も 1 つ。
   tpl="$(require_playbook_template entry.md)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/CLAUDE.md"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/AGENTS.md"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/copilot-instructions.md"
 
   tpl="$(require_playbook_template second-opinion-review.sh)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-review.sh"
   if [[ -f "$OUTPUT_DIR/scripts/second-opinion-review.sh" ]]; then
-    chmod +x "$OUTPUT_DIR/scripts/second-opinion-review.sh"
+    dcb_chmod_exec "$OUTPUT_DIR/scripts/second-opinion-review.sh"
   fi
 
   # JSON スキーマ方式で判定するエンジン（antigravity / codex）が読む回答の形。
@@ -7905,13 +9554,13 @@ install_playbook_rules() {
   tpl="$(require_playbook_template second-opinion-record.sh)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-record.sh"
   if [[ -f "$OUTPUT_DIR/scripts/second-opinion-record.sh" ]]; then
-    chmod +x "$OUTPUT_DIR/scripts/second-opinion-record.sh"
+    dcb_chmod_exec "$OUTPUT_DIR/scripts/second-opinion-record.sh"
   fi
 
   tpl="$(require_playbook_template second-opinion-gate-exempt.sh)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh"
   if [[ -f "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh" ]]; then
-    chmod +x "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh"
+    dcb_chmod_exec "$OUTPUT_DIR/scripts/second-opinion-gate-exempt.sh"
   fi
 
   tpl="$(require_playbook_template second-opinion-gate.yml)"
@@ -7945,13 +9594,13 @@ install_playbook_rules() {
     tpl="$(require_playbook_template review-usable.sh)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/review-usable.sh"
     if [[ -f "$OUTPUT_DIR/scripts/review-usable.sh" ]]; then
-      chmod +x "$OUTPUT_DIR/scripts/review-usable.sh"
+      dcb_chmod_exec "$OUTPUT_DIR/scripts/review-usable.sh"
     fi
 
     tpl="$(require_playbook_template check-review-usable.sh)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/check-review-usable.sh"
     if [[ -f "$OUTPUT_DIR/scripts/check-review-usable.sh" ]]; then
-      chmod +x "$OUTPUT_DIR/scripts/check-review-usable.sh"
+      dcb_chmod_exec "$OUTPUT_DIR/scripts/check-review-usable.sh"
     fi
   fi
 
@@ -7994,6 +9643,18 @@ install_playbook_rules() {
 write_playbook_version_file() {
   local dest="$OUTPUT_DIR/$PLAYBOOK_REL_ROOT/VERSION" tmp
   local ver="${PLAYBOOK_VERSION:-(unspecified)}"
+  if [[ "$UPGRADE" == "true" && "$DRY_RUN" == "true" ]]; then
+    # 何も書かない: 一時ファイルを作らず、中身をパイプでハッシュへ流す。
+    local h
+    h="$( {
+      echo "# devcontainer-bootstrap が記録した ai-playbook のソース情報。"
+      echo "# version は --playbook-version 指定時のタグ。未指定なら (unspecified)。"
+      echo "version=$ver"
+      echo "source=${PLAYBOOK_FROM:-<adjacent checkout>}"
+    } | dcb_file_sha256 /dev/stdin)"
+    upgrade_apply_file "$dest" "" "$h"
+    return 0
+  fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-playbook-version.XXXXXX")"
   {
     echo "# devcontainer-bootstrap が記録した ai-playbook のソース情報。"
@@ -8008,23 +9669,291 @@ write_playbook_version_file() {
   rm -f "$tmp"
 }
 
+# ── --upgrade の振り分け ────────────────────────────────────────────────────
+#
+# 新しい版の中身（ファイル）と現物と ORIGIN の記録を突き合わせ、ファイルごとに振り分ける。
+# write_file（DCB 自身のテンプレート）と apply_file_with_policy（規範経由のファイル）の
+# 両方から呼ぶ共通の入口。--dry-run のときは計画を出すだけで何も書かない。
+#
+#   現物が無い                                  -> 生成する（新しい版で増えた分・消えた分）
+#   現物 = 新しい版                             -> 更新済み（手を入れていても、同じ内容なら）
+#   現物 = 記録したハッシュ（手を入れていない） -> 新しい版で更新する（モードは変えない）
+#   上記以外（手を入れた。記録が無い現物も含む）-> 上書きせず <path>.dcb-new を置く
+#
+# 記録が無いのに現物がある場合は「手を入れた」扱いにする。由来が分からない現物を
+# 上書きすると、利用側の改善を黙って消しうるため、安全側（温存 + .dcb-new）へ倒す。
+# どの場合も、ORIGIN へ書くのは新しい版のハッシュ（UPGRADE_HASHES）。温存したファイルにも
+# 新しい版のハッシュを記録するので、次の --upgrade でも「記録と現物が違う = 手を入れた」
+# として温存され、doctor は「生成時から変わった」と報告する。.dcb-new が取り込み待ちの印。
+# 書き込み先の親ディレクトリ（実体）が出力先（実体）の中にあるか。シンボリックリンクの
+# ディレクトリ経由で出力先の外へ書かないための検査。親がまだ無いときは、存在する最も
+# 近い祖先で判定する（mkdir -p はその先を作るだけで、祖先を越えない）。
+upgrade_parent_inside_output() {
+  local d root real
+  # 出力先がまだ無ければ、その配下には書き込み先の親も存在せず、たどるリンクも無い
+  # （mkdir -p が出力先ごと新規に作る）。
+  [[ -d "$OUTPUT_DIR" ]] || return 0
+  d="$(dirname "$1")"
+  while [[ ! -d "$d" ]]; do d="$(dirname "$d")"; done
+  real="$(cd -P "$d" 2>/dev/null && pwd -P)" || return 1
+  root="$(cd -P "$OUTPUT_DIR" 2>/dev/null && pwd -P)" || return 1
+  [[ "$real" == "$root" || "$real" == "$root"/* ]]
+}
+
+# 従来の経路（--upgrade を付けない再実行・--force・規範の配置）の書き込み先の検査。
+# 親ディレクトリの実体が出力先の外なら、何も書かずに止める（--upgrade の経路と同じ判定）。
+dcb_guard_parent() {
+  if ! upgrade_parent_inside_output "$1"; then
+    echo "error: $1 の親ディレクトリが出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
+    exit 1
+  fi
+}
+
+# 本物のディレクトリが書き込み先に居座っているときは、何も書かずに止める。
+# ディレクトリを指すリンクは対象外（dcb_place_file がリンク自体を置き換える）。
+dcb_refuse_dir_dest() {
+  if [[ -d "$1" && ! -L "$1" ]]; then
+    echo "error: $1 はディレクトリです。書き込まずに止めます。" >&2
+    exit 1
+  fi
+}
+
+# 一時ファイル tmp を dest へ mv で置く（生成先を書く経路の共通の出口）。
+# dest がシンボリックリンクなら、指す先がファイルでもディレクトリでも、先にリンク自体を
+# 消す。mv はディレクトリを指すリンクを置き換えず、その中へ移してしまうため。
+# 消してから mv するまでのあいだにリンクを置き直された場合（同時に書き換える相手がいる
+# ときだけ起きる）に備え、mv のあとで dest が通常ファイルであることを確かめる。そうで
+# なければ、リンク先へ入った一時ファイルを消してエラーにする（リンク先の既存の中身は
+# 触らない。mv -T は BSD に無いので使わない）。
+dcb_place_file() { # tmp dest
+  local tmp="$1" dest="$2"
+  dcb_refuse_dir_dest "$dest"
+  [[ -L "$dest" ]] && rm -f "$dest"
+  mv -f "$tmp" "$dest"
+  if [[ -L "$dest" || ! -f "$dest" ]]; then
+    [[ -d "$dest" ]] && rm -f "$dest/$(basename "$tmp")"
+    echo "error: $dest が書き込み中にリンクへ置き換えられました。止めます。" >&2
+    exit 1
+  fi
+}
+
+# src を dest へ書く。通常ファイルか存在しない生成先は、従来どおり cp でその場に書く
+# （親に書き込み権限が無くても、ファイル自体が書ければ成功する。ハードリンクの先にも
+# 反映される）。シンボリックリンクのときだけ、リンク自体を消してから書く。
+dcb_install_file() { # src dest mode
+  dcb_refuse_dir_dest "$2"
+  [[ -L "$2" ]] && rm -f "$2"
+  cp "$1" "$2"
+  chmod "$3" "$2"
+}
+
+# 今回書く予定のすべての生成先について、親ディレクトリの実体が出力先の中かを、
+# 書き込みを始める前に検査する（途中まで書いてから止まらないようにする）。
+dcb_precheck_destinations() {
+  local rel
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    dcb_guard_parent "$OUTPUT_DIR/$rel"
+  done <<EOF2
+$(printf '%s\n' "$sorted_rels"
+  printf '%s\n' "$ORIGIN_REL_PATH"
+  [[ "$MANAGE_GITIGNORE" == "true" ]] && printf '%s\n' ".gitignore"
+  if should_install_playbook; then
+    playbook_installed_rel_paths
+    playbook_rules_rel_paths
+  fi)
+EOF2
+}
+
+# 新しい版を中身だけ書く。open 時に既存ファイルがあれば失敗させる（noclobber）ので、
+# リンクを張られた先へは書かない。
+upgrade_write_new() {
+  ( set -C; cat "$1" > "$2" )
+}
+
+upgrade_apply_file() {
+  local dest="$1" src="$2" rel newh curh rec mode verb
+  rel="${dest#"$OUTPUT_DIR"/}"
+  if ! upgrade_parent_inside_output "$dest"; then
+    echo "error: $dest の親ディレクトリが出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
+    exit 1
+  fi
+  # 3 番目の引数は --dry-run 専用: 新しい版の中身をファイルにせず（一時ファイルも
+  # 書かない）、ハッシュだけを渡す。このとき src は空で、差分の要約は出せない。
+  if [[ $# -ge 3 ]]; then
+    newh="$3"
+  else
+    newh="$(dcb_file_sha256 "$src")"
+  fi
+  UPGRADE_HASHES="${UPGRADE_HASHES}${rel}"$'\t'"${newh}"$'\n'
+  rec="$(dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "hash:$rel" 2>/dev/null || true)"
+
+  # シンボリックリンク（切れたものを含む）と通常ファイル以外は、たどらず比較もせず、
+  # 手を入れた扱いにして新しい版を .dcb-new として置く（リンク先を書き換えない）。
+  if [[ -L "$dest" || ( -e "$dest" && ! -f "$dest" ) ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "plan: keep (symlink or not a regular file) $dest -> $dest.dcb-new"
+    else
+      upgrade_place_dcbnew "$dest" "$src"
+      echo "keep (symlink or not a regular file): $dest -> $dest.dcb-new"
+    fi
+    return 0
+  fi
+
+  if [[ ! -e "$dest" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "plan: create $dest"
+      return 0
+    fi
+    mkdir -p "$(dirname "$dest")"
+    upgrade_write_new "$src" "$dest"
+    chmod 644 "$dest"
+    [[ "$dest" == *.sh ]] && chmod +x "$dest"
+    echo "write: $dest (new)"
+    return 0
+  fi
+
+  curh="$(dcb_file_sha256 "$dest")"
+  if [[ "$curh" == "$newh" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "plan: up-to-date $dest"
+    else
+      rm -f "$dest.dcb-new"
+      echo "up-to-date: $dest"
+    fi
+    return 0
+  fi
+
+  if [[ -n "$rec" && "$curh" == "$rec" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "plan: update $dest"
+      return 0
+    fi
+    # cat で中身だけ差し替える（mv / cp だとモード・所有者が変わりうる）。
+    cat "$src" > "$dest"
+    rm -f "$dest.dcb-new"
+    echo "write: $dest (upgraded)"
+    return 0
+  fi
+
+  if [[ -n "$rec" ]]; then verb="modified"; else verb="no record"; fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "plan: keep ($verb) $dest -> $dest.dcb-new"
+  else
+    upgrade_place_dcbnew "$dest" "$src"
+    echo "keep ($verb): $dest -> $dest.dcb-new"
+  fi
+  if [[ -n "$src" && -f "$dest" && ! -L "$dest" ]]; then upgrade_diff_summary "$dest" "$src"; fi
+  return 0
+}
+
+# <dest>.dcb-new を通常ファイルとして置く。既にあるもの（リンクや通常ファイル以外を含む）は
+# 先に消す。モードは元のファイルに揃える（元がリンク等でモードが読めなければ 644）。
+upgrade_place_dcbnew() {
+  local dest="$1" src="$2" mode=""
+  if [[ -e "$dest.dcb-new" || -L "$dest.dcb-new" ]]; then
+    rm -f "$dest.dcb-new"
+    if [[ -e "$dest.dcb-new" || -L "$dest.dcb-new" ]]; then
+      echo "error: $dest.dcb-new を置き換えられません（通常のファイルではなく消せない）。" >&2
+      exit 1
+    fi
+  fi
+  if [[ -f "$dest" && ! -L "$dest" ]]; then mode="$(file_mode_octal "$dest")"; fi
+  upgrade_write_new "$src" "$dest.dcb-new"
+  chmod "${mode:-644}" "$dest.dcb-new"
+}
+
+# 差分の要約（変更行数と unified diff の先頭数行）を、字下げして出す。
+upgrade_diff_summary() {
+  local cur="$1" new="$2" n_del n_add
+  command -v diff >/dev/null 2>&1 || { echo "    (diff コマンドが無いため差分の要約を省略)"; return 0; }
+  n_del="$(diff "$cur" "$new" | grep -c '^<' || true)"
+  n_add="$(diff "$cur" "$new" | grep -c '^>' || true)"
+  echo "    diff: -${n_del} +${n_add} lines (現物 -> 新しい版)"
+  diff -u "$cur" "$new" | sed -n '3,12p' | sed 's/^/    /' || true
+}
+
+# 記録にあって、新しい版では生成されなくなったファイルを報告する（削除はしない）。
+upgrade_report_removed() {
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" new_rels rel
+  [[ -f "$origin" ]] || return 0
+  new_rels="$( { printf '%s\n' "$sorted_rels"; playbook_installed_rel_paths; playbook_rules_rel_paths; } | sort -u)"
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    if ! printf '%s\n' "$new_rels" | grep -Fxq -- "$rel"; then
+      echo "no longer generated (not deleted): $OUTPUT_DIR/$rel"
+    fi
+  done < <(sed -n 's/^hash://p' "$origin" | sed 's/=[^=]*$//')
+}
+
+# 記録の対象（旧 ORIGIN と新しい版の両方）のうち、<path>.dcb-new が残っているものを
+# UPGRADE_LEFTOVER へ集める。生成対象から外れたファイルの古い .dcb-new も数える。
+# ORIGIN を書き直す前に呼ぶこと（旧 ORIGIN を読むため）。
+upgrade_collect_leftover() {
+  # 記録の一覧には頼らず、出力先の中を探す（ORIGIN を書き直すと、生成対象から外れた
+  # ファイルは記録から消えるため、2 回目以降の --upgrade で見失う）。
+  # リンクはたどらない。.git と node_modules は除く。
+  UPGRADE_LEFTOVER=""
+  [[ -d "$OUTPUT_DIR" ]] || return 0
+  UPGRADE_LEFTOVER="$(find "$OUTPUT_DIR" \( -name .git -o -name node_modules \) -prune -o -name '*.dcb-new' -print | sort)"
+  [[ -z "$UPGRADE_LEFTOVER" ]] || UPGRADE_LEFTOVER="${UPGRADE_LEFTOVER}"$'\n'
+}
+
+# upgrade 中は、新しい版を書いたあとの chmod +x を既存ファイルへ掛けない
+# （既存ファイルのモードを変えない。新規は upgrade_apply_file が整える）。
+dcb_chmod_exec() {
+  [[ "$UPGRADE" == "true" ]] && return 0
+  # 温存したシンボリックリンクは、たどってリンク先のモードを変えない。
+  [[ -L "$1" ]] && return 0
+  chmod +x "$1"
+}
+
 write_file() {
-  local rel="$1" content="$2" out tmp
+  local rel="$1" content="$2" out tmp tmp2
   out="$OUTPUT_DIR/$rel"
-  if [[ -e "$out" && "$FORCE" != "true" ]]; then
+  if [[ "$UPGRADE" == "true" && "$DRY_RUN" == "true" ]]; then
+    # 何も書かない: 一時ファイルを作らず、中身をパイプでハッシュへ流して判定する。
+    local h
+    if [[ "$out" == *.json ]]; then
+      h="$(render_content "$content" | perl -0777 -pe 's/,\s*([}\]])/$1/g' | jq . | dcb_file_sha256 /dev/stdin)"
+    else
+      h="$(render_content "$content" | dcb_file_sha256 /dev/stdin)"
+    fi
+    upgrade_apply_file "$out" "" "$h"
+    return 0
+  fi
+  if [[ "$UPGRADE" == "true" ]]; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
+    render_content "$content" > "$tmp"
+    if [[ "$out" == *.json ]]; then
+      perl -0777 -i -pe 's/,\s*([}\]])/$1/g' "$tmp"
+      tmp2="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
+      jq . "$tmp" > "$tmp2"
+      mv "$tmp2" "$tmp"
+    fi
+    upgrade_apply_file "$out" "$tmp"
+    rm -f "$tmp"
+    return 0
+  fi
+  dcb_guard_parent "$out"
+  # 切れたシンボリックリンクも「既存のファイル」として扱う（-e だけでは無いと判定する）。
+  if [[ ( -e "$out" || -L "$out" ) && "$FORCE" != "true" ]]; then
     echo "skip (exists): $out"
     SKIPPED_DESTS="${SKIPPED_DESTS}${out}"$'\n'
     return 0
   fi
   mkdir -p "$(dirname "$out")"
+  dcb_refuse_dir_dest "$out"
   tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
   render_content "$content" > "$tmp"
   if [[ "$out" == *.json ]]; then
     perl -0777 -i -pe 's/,\s*([}\]])/$1/g' "$tmp"
+    # 従来どおりその場に書く。シンボリックリンクのときだけ、リンク自体を消してから書く。
+    [[ -L "$out" ]] && rm -f "$out"
     jq . "$tmp" > "$out"
     rm -f "$tmp"
   else
-    mv "$tmp" "$out"
+    dcb_place_file "$tmp" "$out"
   fi
   # mktemp は 0600 で作成し mv がそれを維持するため、生成ファイルが読めるよう正規化する。
   chmod 644 "$out"
@@ -8066,16 +9995,62 @@ EOF
   printf '%s' "$out"
 }
 
+
+# 規範経由で .ai-playbook/** へ置くファイル（規範本体の .md と VERSION）の相対パス。
+# install_playbook_rules の配置対象と同じ規則（README.md / CHANGELOG.md は除く）で
+# 数える。規範を配置しない構成では何も出さない。
+playbook_rules_rel_paths() {
+  local src rel
+  should_install_playbook || return 0
+  while IFS= read -r src; do
+    [[ -n "$src" ]] || continue
+    rel="${src#"$PLAYBOOK_DIR"/}"
+    [[ "$rel" == "README.md" || "$rel" == "CHANGELOG.md" ]] && continue
+    printf '%s\n' "$PLAYBOOK_REL_ROOT/$rel"
+  done < <(find "$PLAYBOOK_DIR" -type f -name '*.md' | sort)
+  printf '%s\n' "$PLAYBOOK_REL_ROOT/VERSION"
+}
+
+# 規範の取得元の記録（source と ref。2 行で出す）を決める。
+#   tag      --playbook-version（ref = タグ）
+#   url      URL 形式の --playbook-from（ref = URL。ただし @ ? # を含む URL は
+#            資格情報や署名を含みうるので ref を記録しない）
+#   local    ローカルのパス（ref を記録しない。絶対パスは利用側リポジトリへコミット
+#            されると困るうえ、相対パスは実行した場所が変わると意味が変わる）
+#   adjacent --with-playbook だけで、隣接チェックアウトを使った場合
+origin_playbook_source() {
+  if [[ -n "$PLAYBOOK_VERSION" ]]; then
+    printf 'tag\n%s\n' "$PLAYBOOK_VERSION"
+  elif [[ -z "$PLAYBOOK_FROM" ]]; then
+    printf 'adjacent\n\n'
+  elif [[ "$PLAYBOOK_FROM" =~ ^https?:// ]]; then
+    if [[ "$PLAYBOOK_FROM" == *[@?#]* ]]; then
+      printf 'url\n\n'
+    else
+      printf 'url\n%s\n' "$PLAYBOOK_FROM"
+    fi
+  else
+    printf 'local\n\n'
+  fi
+}
+
 # .devcontainer/ORIGIN を生成する。DCB の版・使った --with-* フラグ・各生成物の
 # ハッシュを記録し、doctor.sh が生成後の乖離（生成時からの変更・上流の更新）を
 # 診断するために使う。.ai-playbook/VERSION と同じ、機械可読な
 # key=value 形式にする。
 #
-# ハッシュの対象は sorted_rels（DCB 自身のテンプレート）と
-# playbook_installed_rel_paths（規範経由の非 .ai-playbook 出力）の和集合。
-# .ai-playbook/** 本体と .ai-playbook/VERSION は対象外（あちらは
-# --playbook-conflict-policy と .ai-playbook/VERSION が別に担う。二重に記録すると
-# 片方だけ更新されたときにどちらが正本か読めなくなる）。
+# ハッシュの対象は sorted_rels（DCB 自身のテンプレート）、
+# playbook_installed_rel_paths（規範経由の非 .ai-playbook 出力）、
+# playbook_rules_rel_paths（規範経由で置く .ai-playbook/** の本体と VERSION）の和集合。
+# .ai-playbook/VERSION は取得元の記録でもあるが、現物のハッシュも記録する
+# （--upgrade が「手を入れていないか」を判定するため。役割の分担は README で述べる）。
+#
+# ハッシュのほかに、生成結果を左右する入力（project-name / languages / with-* /
+# base-image / gitignore / 規範の取得元）を input: 行で記録する。--upgrade が
+# 同じ入力で生成し直すためで、読み戻しは dcb_origin_load_inputs が担う。
+# --playbook-conflict-policy は「既存ファイルへの対処」であって生成結果を決める
+# 入力ではない（--upgrade は自分の振り分けで決める）ので記録しない。--force /
+# --output-dir / --dry-run も同様に記録しない（出力先の絶対パスを残さない）。
 #
 # 記録は「今回の実行で確実に生成された」ことが分かる場合にだけ作る。対象のうち
 # 1 つでも skip（既存を温存）されていれば、その現物の由来を今回の実行は保証
@@ -8093,16 +10068,20 @@ EOF
 # 生成物を直したときと同じく --force（および必要なら
 # --playbook-conflict-policy overwrite）で明示的に再生成すること。
 write_origin_record() {
-  local dest="$OUTPUT_DIR/$ORIGIN_REL_PATH" tmp rel h flags_csv origin_rels skipped_rel=""
-  if [[ -e "$dest" && "$FORCE" != "true" ]]; then
+  local dest="$OUTPUT_DIR/$ORIGIN_REL_PATH" tmp rel h flags_csv origin_rels skipped_rel="" languages_csv pb_src pb_ref prev_mode
+  dcb_guard_parent "$dest"
+  if [[ ( -e "$dest" || -L "$dest" ) && "$FORCE" != "true" && "$UPGRADE" != "true" ]]; then
     echo "skip (exists): $dest"
     return 0
   fi
 
-  origin_rels="$( { printf '%s\n' "$sorted_rels"; playbook_installed_rel_paths; } | sort -u)"
+  origin_rels="$( { printf '%s\n' "$sorted_rels"; playbook_installed_rel_paths; playbook_rules_rel_paths; } | sort -u)"
 
+  # --upgrade は温存したファイルにも新しい版のハッシュを記録する（記録の規則が違う）ので、
+  # 「温存が 1 つでもあれば作らない」を適用しない。
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
+    [[ "$UPGRADE" == "true" ]] && break
     if printf '%s' "$SKIPPED_DESTS" | grep -Fxq -- "$OUTPUT_DIR/$rel"; then
       skipped_rel="$rel"
       break
@@ -8123,16 +10102,53 @@ EOF
     echo "# doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。"
     echo "version=$DCB_VERSION"
     echo "flags=$flags_csv"
+    echo "inputs-format=1"
+    dcb_origin_line input:project-name "$PROJECT_NAME"
+    languages_csv=""
+    for rel in "${LANGUAGES[@]}"; do
+      if [[ -z "$languages_csv" ]]; then languages_csv="$rel"; else languages_csv="$languages_csv,$rel"; fi
+    done
+    dcb_origin_line input:languages "$languages_csv"
+    if [[ -n "$BASE_IMAGE_OVERRIDE" ]]; then
+      echo "input:base-image-mode=override"
+    else
+      echo "input:base-image-mode=auto"
+    fi
+    # auto のときの値は、生成時の環境（docker の有無・アーキテクチャ・レジストリの
+    # 応答）で決まった選択結果。再現すべき入力ではなく、観測記録として残す。
+    dcb_origin_line input:base-image "$BASE_IMAGE"
+    echo "input:manage-gitignore=$MANAGE_GITIGNORE"
+    dcb_origin_line input:gitignore-targets "$GITIGNORE_TARGETS"
+    if should_install_playbook; then
+      echo "input:playbook=installed"
+      pb_src="$(origin_playbook_source)"
+      dcb_origin_line input:playbook-source "$(printf '%s\n' "$pb_src" | sed -n 1p)"
+      pb_ref="$(printf '%s\n' "$pb_src" | sed -n 2p)"
+      if [[ -n "$pb_ref" ]]; then
+        dcb_origin_line input:playbook-ref "$pb_ref"
+      fi
+    else
+      echo "input:playbook=none"
+    fi
     while IFS= read -r rel; do
       [[ -n "$rel" ]] || continue
-      h="$(dcb_file_sha256 "$OUTPUT_DIR/$rel")"
+      h=""
+      if [[ "$UPGRADE" == "true" ]]; then
+        h="$(printf '%s' "$UPGRADE_HASHES" | awk -F'\t' -v r="$rel" '$1 == r { h = $2 } END { print h }')"
+      fi
+      [[ -n "$h" ]] || h="$(dcb_file_sha256 "$OUTPUT_DIR/$rel")"
       echo "hash:$rel=$h"
     done <<EOF
 $origin_rels
 EOF
   } > "$tmp"
-  mv "$tmp" "$dest"
-  chmod 644 "$dest"
+  # --upgrade は既存 ORIGIN のモードを保つ（無ければ 644）。従来の経路は常に 644。
+  prev_mode=""
+  if [[ "$UPGRADE" == "true" && -f "$dest" && ! -L "$dest" ]]; then
+    prev_mode="$(file_mode_octal "$dest")"
+  fi
+  dcb_place_file "$tmp" "$dest"
+  chmod "${prev_mode:-644}" "$dest"
   echo "write: $dest"
 }
 
@@ -8171,7 +10187,11 @@ fi
 # 合流させるので、dry-run の計画と実際の書き込みは条件付きファイルでも一致する。
 sorted_rels="$( { template_rel_paths; conditional_template_rel_paths; } | sort)"
 
-if [[ "$DRY_RUN" == "true" ]]; then
+# 書き込みを始める前に、すべての生成先の親ディレクトリを検査する（--dry-run と
+# --upgrade も同じ。1 つでも出力先の外を指していれば、何も書かずに止まる）。
+dcb_precheck_destinations
+
+if [[ "$DRY_RUN" == "true" && "$UPGRADE" != "true" ]]; then
   echo "[bootstrap] dry-run: no files will be written"
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
@@ -8219,11 +10239,25 @@ $sorted_rels
 EOF
 
 if [[ "$MANAGE_GITIGNORE" == "true" ]]; then
-  upsert_gitignore
+  if [[ "$UPGRADE" == "true" && "$DRY_RUN" == "true" ]]; then
+    echo "plan: $OUTPUT_DIR/.gitignore (managed section update)"
+  else
+    upsert_gitignore
+  fi
 fi
 
 if should_install_playbook; then
   install_playbook_rules
+fi
+
+if [[ "$UPGRADE" == "true" ]]; then
+  upgrade_report_removed
+  upgrade_collect_leftover
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "plan: $OUTPUT_DIR/$ORIGIN_REL_PATH (rewritten from the new version)"
+    echo "[bootstrap] dry-run: no files were written"
+    exit 0
+  fi
 fi
 
 # 由来の記録は、DCB 自身のテンプレートと、規範経由で配置される非 .ai-playbook
@@ -8231,5 +10265,12 @@ fi
 # より先に書くと、この票の動機だったファイル（review-gate.yml /
 # second-opinion-review.sh 等）が記録に載らない（実測）。
 write_origin_record
+
+if [[ "$UPGRADE" == "true" && -n "$UPGRADE_LEFTOVER" ]]; then
+  echo "[bootstrap] upgrade: 取り込み待ちの .dcb-new が残っています（手を入れたファイルの隣の新しい版、または以前の実行の残り）:" >&2
+  printf '  %s' "$UPGRADE_LEFTOVER" >&2
+  echo "[bootstrap] completed (with .dcb-new)"
+  exit 2
+fi
 
 echo "[bootstrap] completed"

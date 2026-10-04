@@ -6,6 +6,38 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.15.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.5.0 以降のまま**（新しい雛形を要求しない。雛形は 15 種のまま）。台帳の手順を持つ `/intake` と `/land` の雛形、16 章「セッション間の協調」、`AGENTS.md` の例示は ai-playbook v0.7.0 に入っているので、`--playbook-version v0.7.0` を勧める。
+- **共有台帳とセッション協調フックの解放を、呼び出しごとに行うようにした**（ojos/ai-packages-dev#425）。台帳の登録に任意の「呼び出しの識別子」（8 列目。`claim` / `release` の `--call <ID>`）を持たせ、識別子付きの解放はその識別子の登録だけを外す。フックは `tool_use_id` を渡すため、同じセッションが同じ種類の操作を並行しても先に終わった呼び出しが他方の登録を外さず、複合コマンドが拒否されたときに先行する登録を外すこともない。衝突の判定は従来どおり（種類・作業ツリーの単位）。識別子を渡さない使い方と、7 列の古い台帳ファイルは従来どおり動く。フックの冒頭と README に書いていた 2 件の限界を外した。
+- **並行セッションの共有台帳 `scripts/session-ledger.sh` を生成物へ足した**（ojos/ai-packages-dev#395）。同じホストで並行して動く AI セッションが、issue・文書・マージ/リリース・作業ツリーの git 操作・重いゲートを `claim` で登録し、`check` で衝突を確かめる。置き場所は `git rev-parse --git-common-dir` の配下で、セッションごとに別ファイルへ追記する。持ち主の PID が消えた登録と、更新が止まった登録は失効する。台帳は実行環境に依存しないので、`--with-*` に関わらず常に生成する。フックと settings.json の配線は、下の「セッション協調フック」の項目。
+- **セッション協調フック `scripts/session-coord-hook.sh` を `--with-claude` で生成する**（ojos/ai-packages-dev#395）。`.claude/settings.json` の hooks に SessionStart・PreToolUse（Bash と Edit|Write）・PostToolUse（Bash）・SessionEnd の配線を足した（既存の `confirm-merge-hook.sh` の配線は PreToolUse の先頭に残る）。SessionStart は他のセッションの登録を要約して表示する。PreToolUse の Bash は、マージ・リリース（`gh pr merge`・`gh release`・merge エンドポイントへの PUT・`mergePullRequest`）、同じ作業ツリーでの git 操作（checkout / switch / rebase / reset / fetch など）、重いゲート（`verify.sh` / `loop-gate.sh`）の同時起動を拒否し、同じ issue へのブランチ作成での着手を警告する。Edit|Write は他のセッションが登録している文書を警告する。拒否・警告には相手の識別子・登録の種類・調整の手順を添える。台帳の読み書きに失敗したときは警告して通す。マージ・git 操作・ゲートは実行のあいだだけ登録し（PreToolUse で登録、PostToolUse で解放）、issue はブランチ作成で登録して SessionEnd で解放する。セッションの識別子は台帳の既定（祖先で最初のシェル以外のプロセス）で、フックと Bash のコマンドで揃うことを実機で確認した。既存の `.claude/settings.json` は温存されるため、README の hooks を手で足す。
+- **台帳に `refresh` を足した**（ojos/ai-packages-dev#395）。自分の生きている登録を、最後の更新から 5 分以上たっていれば claim し直して更新時刻を新しくする。長いセッションの登録が失効（既定 8 時間）しないよう、フックが PreToolUse のたびに呼ぶ。
+- 同梱の `/intake` と `/land` のスキル雛形（ai-playbook 側）が、着手のときの `claim issue`、マージの前の `check merge`、作業の終わりの `release` を手順に持つ。
+- **`scripts/check-doc-links.sh` が、括弧を含むリンク先（例: `docs/foo(bar).md`）を最初の `)` で切らず、1 つのリンク先として検査するようにした**（ojos/ai-packages-dev#415）。タイトルや `<...>` の中の括弧は数えず、対応が取れないときは従来どおり最初の `)` で切るため、従来検査できていたリンクを漏らさない。
+- **README「資格情報の扱い」に、fine-grained PAT の権限の例を足した**（ojos/ai-packages-dev#416）。Checks は fine-grained PAT では選べず、非公開リポジトリでは `check-runs` と `gh pr checks` が 403 になる。同梱の `/land` スキル（ai-playbook の雛形）は、Actions と Commit statuses の権限だけで CI を待つ。
+- **規範を置くとき、入口ファイルに `AGENTS.md` を加えた**（ojos/ai-packages-dev#397）。Codex など `AGENTS.md` を読む実行環境が、規範の入口から 3 層構造へたどれる。`CLAUDE.md` / `.github/copilot-instructions.md` と同じ雛形（`templates/entry.md`）の写しで、既存の `AGENTS.md` は `--playbook-conflict-policy` に従う。`--without-playbook` など規範を置かない生成では作らない。由来記録（`.devcontainer/ORIGIN`）のハッシュの記録の対象にも含まれる。
+- README に、実行環境ごとの対応範囲の表を足した。機構（スキル・委譲先エージェント・フック）は Claude Code 向けだけで、この方針は変わらない。
+- **`bootstrap.sh --upgrade` を追加した**（ojos/ai-packages-dev#396）。生成したプロジェクトが、1 コマンドで新しい版の DCB の生成物と規範へ追従できる。`.devcontainer/ORIGIN` に記録した入力で生成し直し、引数で渡したものだけを上書きする。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方。
+- ファイルごとの振り分け: 手を入れていない（現物 = 記録したハッシュ）なら新しい版で更新する。手を入れた（記録の無い現物も含む）なら上書きせず `<path>.dcb-new`（モードは元のファイルに揃える）を隣へ置き、差分の要約を出す。新しい版で増えた分は生成する。新しい版で生成されなくなった分は報告だけして削除しない。手を入れたが新しい版と同じ内容なら更新済みとして扱う。手を入れたファイルは自動では混ぜない。`.dcb-new` が取り込み待ちの印になる。
+- 終了コードは、全件適用 = 0、`.dcb-new` を残した = 2、失敗 = 1。`--upgrade --dry-run` は計画だけを出して何も書かない。`--upgrade` と `--force` は同時に指定できない（エラー）。出力先の既定は現在のディレクトリ。生成先のシンボリックリンクはたどらず、手を入れた扱いにする。
+- 注意: `--with-*` は足せるが外せない（外すときは生成し直す）。生成されなくなったファイルは報告するだけで削除しない。規範の取得元が `local`（ローカルのパス）の場合は、記録していないため `--playbook-from` の明示が要る。追従先は実行した `bootstrap.sh` の版で、最新版をネットワークへ問い合わせない。
+- **`.devcontainer/ORIGIN` に、生成結果を左右する入力と、規範経由のファイルのハッシュを記録するようにした。** 既存の行（`version=` / `flags=` / `hash:<path>=`）は変えず、`inputs-format=1` と `input:<名前>=<値>` の行を足す。記録する入力は `--project-name` / `--languages` / `--base-image` を指定したか（指定しなければ `auto`）と、その値 / `--no-gitignore`・`--gitignore-targets` / 規範を置いたか・取得元の種類（`tag` / `url` / `local` / `adjacent`）。値の中の改行・`%` だけを `%0A` / `%0D` / `%25` へ置き換えるので、カンマ・空白・`=` を含む値も読み戻せる。規範経由で置くファイル（`.ai-playbook/**` の規範本体と `VERSION`）のハッシュも記録対象に加えた。
+- **ローカルのパスは ORIGIN へ書かない**（ORIGIN からは利用側リポジトリへ絶対パスが残らない）。`--playbook-from` が URL のときだけ値を残すが、`@` `?` `#` を含む URL（資格情報や署名を含みうる）は書かない。`--playbook-conflict-policy` / `--force` / `--dry-run` / `--output-dir` は生成結果を決める入力ではないので記録しない。
+- **`.ai-playbook/VERSION` と ORIGIN の役割を分けた。** `VERSION` は規範の取得元（どのタグ・どこから取り込んだか。`version=` / `source=`）の記録で、従来どおり残る（`source=` にはローカルのパスが残る）。ORIGIN は生成の入力と現物のハッシュの記録。
+- **`doctor.sh` が、残っている `*.dcb-new` を WARN で一覧し、取り込み方（中身を見て手で混ぜてから `.dcb-new` を消す）を出す。** あわせて ORIGIN の書式を検査する。認識できない行・不正な値・入力の必須の行の欠落は FAIL にする。新しい形式（`inputs-format=1`）では `version=` と `flags=` を必須にし、同じ `input:` の名前の重複も FAIL にする。入力の行が無い古い ORIGIN は、今までどおり読める。
+- **`--upgrade` を付けない再実行・`--force`・規範の配置が、生成先のシンボリックリンクをたどって出力先の外へ書かないようにした**（ojos/ai-packages-dev#418）。切れたリンクを含め「既存のファイルがある」として扱う。既定（skip）は温存して報告し、`--force` / `--playbook-conflict-policy overwrite` はリンク自体を通常ファイルで置き換える（リンク先は触らない）。生成先の親ディレクトリの実体が出力先の外なら、何も書かずにエラー（終了コード 1）で止める。リンクでない生成先の挙動は変わらない。
+- **既存フラグの挙動は変わらない。** `--upgrade` を付けない再実行と `--force` は従来どおり。既存の生成先に規範が入っていて `.ai-playbook/**` を温存した再実行では、ORIGIN を作らない（温存したファイルの由来を保証できないという従来の規則が、`.ai-playbook/**` にも及ぶ）。
+- `--upgrade` の記録が無い生成先で、必須の引数（`--project-name` / `--languages`）を明示したときは、`error:` ではなく `note:` の 1 行だけを出して続ける。引数が足りないときだけ、`error:` と案内を出して止まる。
+
+### 移行
+- 規範を置いて再生成すると、リポジトリ直下に `AGENTS.md` が増える。既に独自の `AGENTS.md` がある場合は、既定ポリシー（`skip`）で温存される。
+- **既存の生成先が `--upgrade` で追従できるようになる。** 初回だけ、記録の状態に応じた準備が要る。
+  - ORIGIN に `inputs-format=1` がある（この版以降で生成した）生成先: 生成先のディレクトリで `bash bootstrap.sh --upgrade --dry-run` を実行して計画を確かめ、`--dry-run` を外して実行する。引数は要らない。ただし、規範の取得元が `local` や `@` `?` `#` を含む URL の生成先は、`--playbook-from <path|url>` を付ける。
+  - 古い ORIGIN（`inputs-format` が無い）、または ORIGIN が無い生成先: 記録から入力を再現できないので、**引数を明示した初回の `--upgrade` が要る。** `--project-name` / `--languages`（必須）と、使っていた `--with-*`・`--base-image`・規範の取得元を、生成時と同じに指定する。この実行で ORIGIN が新しい形式で書き直され、以後は引数なしで追従できる。
+  - 古い ORIGIN は規範経由のファイル（`.ai-playbook/**` など）のハッシュを持たないことがある。記録の無いファイルは、新しい版と内容が違えば「手を入れた」扱いになり、`.dcb-new` が置かれる。見比べて取り込み、`.dcb-new` を消す。残っていると終了コードは 2 になり、`doctor.sh` が WARN で知らせる。
+
 ## v0.14.0
 
 ### Summary
