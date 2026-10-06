@@ -17,6 +17,10 @@ LANGUAGES=()
 # 例: aws gcp claude gemini copilot copilot-review。has_with で参照する。
 # 判定は完全一致なので、copilot-review を足しても copilot の判定には影響しない。
 WITH_SET=()
+# --without-<名前> で打ち消された装備の集合。--upgrade が記録した集合から外す。
+WITHOUT_SET=()
+# --upgrade で、外す前の集合（記録 + 明示）。外したフラグが生成していたファイルの特定に使う。
+UPGRADE_PREV_WITH=()
 FORCE="false"
 DRY_RUN="false"
 MANAGE_GITIGNORE="true"
@@ -57,7 +61,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.15.0"
+DCB_VERSION="v0.16.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -92,6 +96,13 @@ options:
   --with-copilot              Install GitHub Copilot CLI + extensions (persisted)
   --with-copilot-review       Place the remote review-gate workflows only
                               (requires rules placement; no local tooling)
+  --without-<name>            Counterpart of each --with-<name> above (aws, gcp, claude,
+                              gemini, antigravity, codex, copilot, copilot-review).
+                              With --upgrade, removes it from the recorded set and deletes
+                              the files only it generated, if unmodified (modified ones
+                              are kept and reported; --dry-run prints plan: remove).
+                              Without --upgrade it is the same as not passing --with-<name>.
+                              Passing both for one name is an error.
   --output-dir <path>         Output directory (default: $PWD/<project-name>)
   --base-image <image>        Override auto-selected devcontainer base image
   --dry-run                   Show planned outputs without writing files
@@ -235,6 +246,17 @@ while [[ $# -gt 0 ]]; do
     # （手元の開発ツール / リモートのレビュー機構）、片方だけ欲しい構成が実在する。
     # 1 つのフラグで束ねると「リモートのゲートだけ欲しい」を機構で表現できない。
     --with-copilot-review) WITH_SET+=("copilot-review"); shift ;;
+    # --with-<名前> と対になる打ち消し。--upgrade では記録した集合から外し、外したフラグ
+    # でだけ生成していたファイルのうち手を入れていないものを削除する（#444）。--upgrade
+    # 以外では「付けない」と同じなので受け付けるだけで、既存のファイルには触れない。
+    --without-aws)               WITHOUT_SET+=("aws"); shift ;;
+    --without-gcp)               WITHOUT_SET+=("gcp"); shift ;;
+    --without-claude)            WITHOUT_SET+=("claude"); shift ;;
+    --without-gemini)            WITHOUT_SET+=("gemini"); shift ;;
+    --without-antigravity)       WITHOUT_SET+=("antigravity"); shift ;;
+    --without-codex)             WITHOUT_SET+=("codex"); shift ;;
+    --without-copilot)           WITHOUT_SET+=("copilot"); shift ;;
+    --without-copilot-review)    WITHOUT_SET+=("copilot-review"); shift ;;
     --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
     # 廃止フラグは黙殺せず、移行先を示して停止する。黙って無視すると
     # 「指定したのに注入されない」状態を作り、資格情報の所在をふたたび曖昧にする。
@@ -261,6 +283,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# 同じ名前の --with- と --without- を同時に渡されたら、どちらを採るか決められないので
+# 何も書かずに止める（指定の順序で勝敗を決めない）。
+for w in ${WITHOUT_SET[@]+"${WITHOUT_SET[@]}"}; do
+  for x in ${WITH_SET[@]+"${WITH_SET[@]}"}; do
+    if [[ "$w" == "$x" ]]; then
+      echo "error: --with-$w と --without-$w は同時に指定できません。" >&2
+      exit 1
+    fi
+  done
+done
+
 # --upgrade は「手を入れたものを上書きしない」が前提。--force は「手を入れたものも
 # 上書きする」なので、同時に指定すると意味が両立しない。片方優先にせず指定の時点で止める。
 if [[ "$UPGRADE" == "true" && "$FORCE" == "true" ]]; then
@@ -284,7 +317,7 @@ require_cmd curl
 # --upgrade の入力の決定。ORIGIN に記録した入力を読み、引数で明示されたものだけを上書きする。
 # 規則:
 #   project-name / languages / base-image / gitignore-targets  明示があればそれ、無ければ記録
-#   --with-*   記録した集合へ明示分を足す（外す手段は無い。外したいときは再生成する）
+#   --with-*   記録した集合へ明示分を足す。--without-<名前> は、足したあとの集合から外す
 #   --no-gitignore  明示があれば false、無ければ記録
 #   規範  --playbook-from / --playbook-version の明示は取得元ごと置き換える。
 #         --without-playbook は none。それ以外は記録の取得元を再現する
@@ -362,6 +395,17 @@ if [[ "$UPGRADE" == "true" ]]; then
   # $PWD/<name> を導くと、記録から読む名前と出力先の関係が循環する。
   [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
   upgrade_merge_inputs
+  # 外す前の集合を残してから、--without-<名前> の分を外す（同名の --with- との同時指定は検査で除いてある）。
+  UPGRADE_PREV_WITH=(${WITH_SET[@]+"${WITH_SET[@]}"})
+  if [[ ${#WITHOUT_SET[@]} -gt 0 ]]; then
+    kept=()
+    for w in ${WITH_SET[@]+"${WITH_SET[@]}"}; do
+      drop="false"
+      for x in "${WITHOUT_SET[@]}"; do [[ "$w" == "$x" ]] && drop="true"; done
+      [[ "$drop" == "true" ]] || kept+=("$w")
+    done
+    WITH_SET=(${kept[@]+"${kept[@]}"})
+  fi
 fi
 
 [[ -n "$PROJECT_NAME" ]] || { echo "error: --project-name is required" >&2; usage; exit 1; }
@@ -726,7 +770,7 @@ jobs:
   verify-commit-identity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 範囲指定で履歴を辿るため全履歴が要る。
           fetch-depth: 0
@@ -830,7 +874,7 @@ jobs:
     # if: github.event.pull_request.head.repo.fork != true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 全履歴・全 ref を取る。
           #
@@ -856,9 +900,9 @@ jobs:
       # 毎回消す作業をさせることになる。
       #
       # 例（そのまま貼らず、実態に合わせて書く）:
-      #   - uses: actions/setup-node@v4
+      #   - uses: actions/setup-node@v7
       #     with:
-      #       node-version: '20'
+      #       node-version: '24'
       #   - run: npm ci
       #   - run: sudo apt-get update && sudo apt-get install -y shellcheck
 
@@ -1879,6 +1923,12 @@ main() {
 
   if [[ -z "$records" ]]; then
     echo "[identity] 検査対象のコミットがありません（範囲: $range）"
+    # 判定は通過のまま変えない（push 前のゲートとしては、これから push するコミットが
+    # 無いだけである）。ただ、何も検査していないことを読み取れるよう、push 済みの
+    # 履歴を確かめる手段を示す（#442）。全履歴（HEAD）で空なら案内しても意味が無い。
+    if [[ "$range" != "HEAD" ]]; then
+      echo "[identity] この範囲では何も検査していません。push 済みの履歴まで確かめるなら: bash scripts/verify-commit-identity.sh --full"
+    fi
     echo "IDENTITY_PASS"
     exit 0
   fi
@@ -3319,15 +3369,22 @@ function normalize(p,   parts, n, out, m, i, s) {
   for (i = 1; i <= m; i++) s = (s == "") ? out[i] : s "/" out[i]
   return s
 }
-BEGIN { infence = 0; fmark = ""; fline = 0 }
+BEGIN { infence = 0; fmark = ""; flen = 0; fline = 0 }
 # フェンスはマーカーの種類（``` / ~~~）まで見て、開いたときと同じ種類でだけ閉じる
 # （数の偶奇では見ない。一方の中にもう一方を書く形があると偶奇では状態が反転する）。
+# 閉じるのは CommonMark どおり、**開きと同じ文字で、開き以上の長さを持ち、後ろに
+# 空白しか無い**行だけである（#439）。種類だけで見ると、4 連のフェンスの中に書いた
+# ``` や ```sh の例でフェンスが早く閉じ、続くコードの中のリンクを検査してしまう。
 /^[[:space:]]*(```|~~~)/ {
   fl = $0
   sub(/^[[:space:]]*/, "", fl)
   mk = substr(fl, 1, 1)
-  if (!infence) { infence = 1; fmark = mk; fline = FNR; next }
-  if (mk == fmark) { infence = 0; fmark = ""; next }
+  match(fl, (mk == "`") ? "^`+" : "^~+")
+  ml = RLENGTH
+  if (!infence) { infence = 1; fmark = mk; flen = ml; fline = FNR; next }
+  if (mk == fmark && ml >= flen && substr(fl, ml + 1) ~ /^[[:space:]]*$/) {
+    infence = 0; fmark = ""; flen = 0; next
+  }
   next
 }
 infence { next }
@@ -6894,8 +6951,13 @@ TMPL
 #   SESSION_LEDGER_ID があればそれを使う（英数字と ._- 以外は _ になる）。無ければ
 #   pid-<持ち主の PID>。持ち主の PID は SESSION_LEDGER_PID があればそれ、無ければ祖先の
 #   プロセスをたどって、最初に現れるシェル以外のプロセス（セッションを動かしている
-#   本体）。見つからなければ親プロセス。識別子は pid-<PID>-<開始時刻の cksum> で、
+#   本体）。見つからなければ親プロセス。識別子は pid-<PID>-<開始時刻のキー> で、
 #   PID が再利用されても別のセッションとして扱う。
+#   開始時刻のキー: /proc/<PID>/stat の 22 列目（起動からの経過のクロック数）。ホストの
+#   時刻の付け直しやタイムゾーンで変わらない。/proc が無い環境（macOS など）では、
+#   TZ=UTC・LC_ALL=C で読んだ `ps -o lstart=` の cksum に落とす（時刻の付け直しで変わり
+#   うる）。キーの取り方が違う版の台帳（#433 より前の、lstart の cksum）の登録は、キーが
+#   一致しないため失効として扱う（誤って止める側には倒れない）。
 #   人がシェルから直接使うときは、同じ端末から起動した複数のシェルが同じ持ち主に
 #   なりうるので、SESSION_LEDGER_ID を明示する。
 #
@@ -6903,6 +6965,8 @@ TMPL
 #   次のどちらかなら、その登録は失効したものとして無視する。
 #     - 持ち主の PID のプロセスが存在しない
 #     - そのセッションの最後の更新から SESSION_LEDGER_TTL 秒（既定 28800）を超えた
+#       （実行のあいだだけ持つ登録 = merge / git / gate は、セッションの最後の更新ではなく、
+#       その登録（同じ kind, target）の最後の claim から数える。refresh で生かし続けない）
 #
 # 出力と終了コード（check / claim）:
 #   標準出力の 1 行目が判定。LEDGER_OK（衝突なし）/ LEDGER_WARN（警告して通す）/
@@ -6914,10 +6978,13 @@ TMPL
 #   使い方の誤りは 2。
 #
 # 更新（refresh）:
-#   自分に生きている登録があり、最後の更新から SESSION_LEDGER_REFRESH_MIN 秒（既定 300）
-#   以上たっていれば、その登録を 1 件だけ claim し直す（追記のみ）。失効の判定はセッション
-#   単位で最後の更新を見るため、1 件で足りる。長く続くセッションが、フックなどから呼んで
-#   失効を避けるための入口。頻繁に呼んでも台帳が膨らまない。
+#   自分に生きている issue / doc の登録があり、最後の更新から SESSION_LEDGER_REFRESH_MIN 秒
+#   （既定 300）以上たっていれば、その登録を 1 件だけ claim し直す（追記のみ）。issue / doc の
+#   失効の判定はセッション単位で最後の更新を見るため、1 件で足りる。長く続くセッションが、
+#   フックなどから呼んで失効を避けるための入口。頻繁に呼んでも台帳が膨らまない。
+#   merge / git / gate の登録は claim し直さず、その失効も延ばさない。実行のあいだだけ持つ
+#   はずの登録が、解放し損ねたまま（フックの版の切り替えなど）生き続けて、他のセッションを
+#   止め続けないようにするため（#433）。
 #
 # 環境変数: SESSION_LEDGER_ID / SESSION_LEDGER_PID / SESSION_LEDGER_TTL /
 #           SESSION_LEDGER_REFRESH_MIN / SESSION_LEDGER_DIR（置き場所を差し替える。試験用）
@@ -7004,11 +7071,28 @@ owner_pid() {
 
 # 持ち主を特定できないときは SELF_ID を空にし、登録・確認を警告して通す（fail-open）。
 # SESSION_LEDGER_ID を明示した場合は、PID を特定できなくても親プロセスを使う。
-# プロセスの開始時刻の cksum。PID が再利用されたとき、別のプロセスと見分けるために使う。
+# プロセスの開始時刻のキー。PID が再利用されたとき、別のプロセスと見分けるために使う。
+# /proc があれば stat の 22 列目（起動からの経過のクロック数。時刻の付け直しやタイムゾーンで
+# 変わらない）。2 列目のプロセス名は空白や括弧を含みうるので、最後の ")" の後ろ（3 列目から）
+# を数える。/proc が無ければ、TZ と言語を固定した lstart の cksum。
 # 取れないときは - を返す（従来の PID だけの判定に落ちる）。
 proc_start_key() { # pid
-  local lstart sum
-  lstart="$(ps -o lstart= -p "$1" 2>/dev/null)"
+  local stat start lstart sum
+  case "$1" in '' | *[!0-9]*) printf '%s' "-"; return 0 ;; esac
+  if [ -r "/proc/$1/stat" ]; then
+    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || stat=""
+    case "$stat" in
+      *')'*)
+        stat="${stat##*\)}"
+        start="$(printf '%s\n' "$stat" | awk '{ print $20 }')"
+        case "$start" in
+          '' | *[!0-9]*) ;;
+          *) printf '%s' "$start"; return 0 ;;
+        esac
+        ;;
+    esac
+  fi
+  lstart="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null)"
   [ -n "$lstart" ] || { printf '%s' "-"; return 0; }
   sum="$(printf '%s' "$lstart" | cksum | cut -d' ' -f1)"
   printf '%s' "${sum:--}"
@@ -7156,6 +7240,8 @@ normalize_target() { # kind target
 
 # 1 セッションぶんのファイルを再生して、いま有効な登録を TSV で出す:
 #   sid kind target pid worktree 最後の更新(epoch) 開始時刻のキー 識別子
+# 最後の更新は、issue / doc ならセッションの最後の行の時刻、merge / git / gate なら
+# その（kind, target）の有効な claim のうち最後の時刻（refresh で延ばさない。#433）。
 # 壊れた行は読み飛ばし、件数を警告する。
 replay_file() { # file sid
   awk -v sid="$2" -v file="$1" '
@@ -7166,7 +7252,7 @@ replay_file() { # file sid
       cid = (NF >= 8 && $8 != "") ? $8 : "-"
       key = $3 "\034" $4 "\034" cid
       if ($2 == "claim") {
-        live[key] = 1; kind[key] = $3; tgt[key] = $4; pid[key] = $5; wt[key] = $6; cids[key] = cid
+        live[key] = 1; ctime[key] = $1 + 0; kind[key] = $3; tgt[key] = $4; pid[key] = $5; wt[key] = $6; cids[key] = cid
         skey[key] = (NF >= 7 && $7 ~ /^[0-9]+$/) ? $7 : "-"
       } else {
         # 識別子の付いた解放は、その識別子の登録だけを（kind / target で絞って）外す。
@@ -7185,10 +7271,12 @@ replay_file() { # file sid
       for (x in live) {
         kt = kind[x] "\034" tgt[x]
         if (!(kt in seen) || cids[x] != "-") { seen[kt] = 1; pick[kt] = x }
+        if (!(kt in klast) || ctime[x] > klast[kt]) klast[kt] = ctime[x]
       }
       for (kt in pick) {
         x = pick[kt]
-        printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", sid, kind[x], tgt[x], pid[x], wt[x], last, skey[x], cids[x]
+        upd = (kind[x] == "issue" || kind[x] == "doc") ? last : klast[kt]
+        printf "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", sid, kind[x], tgt[x], pid[x], wt[x], upd, skey[x], cids[x]
       }
       if (bad > 0) printf "[session-ledger] WARN: %s: 壊れた行を %d 件読み飛ばしました。\n", file, bad > "/dev/stderr"
     }
@@ -7399,6 +7487,8 @@ cmd_refresh() {
     [ -n "$r_sid" ] || continue
     [ "$r_sid" = "$SELF_ID" ] || continue
     [ "$r_state" = "live" ] || continue
+    # 実行のあいだだけ持つ登録は更新しない（解放し損ねた登録を生かし続けないため。#433）。
+    case "$r_kind" in issue | doc) ;; *) continue ;; esac
     if [ "$r_age" -ge "$min" ]; then
       CALL_ID="${r_cid:--}"
       append_record claim "$r_kind" "$r_tgt" || warn "台帳へ書き込めませんでした。更新できていません。"
@@ -7480,7 +7570,8 @@ TMPL
 #   gh pr merge / gh release create|edit|delete|upload /      merge                   拒否
 #     gh api の merge エンドポイントへの PUT / mergePullRequest
 #   git checkout|switch|rebase|reset|fetch|pull|merge|        git（作業ツリー）       拒否
-#     cherry-pick|revert|stash|restore|clean|am
+#     cherry-pick|revert|stash|restore|clean|am|
+#     add|commit|rm|mv（index を変える操作。#438）
 #   verify.sh / loop-gate.sh                                  gate                    拒否
 #   git checkout -b / git switch -c / git worktree add -b     issue（ブランチ名の     警告
 #     / gh issue develop（ブランチ名が番号で始まる場合）       先頭の番号）
@@ -7504,8 +7595,10 @@ TMPL
 #     鍵にした印（一時ディレクトリ）へ控え、解放はその一覧のすべての台帳へ行う（印が無い
 #     ときは cwd の台帳だけ）。
 #     tool_use_id が入力に無いときは、識別子なしで（種類と対象の単位で）登録・解放する。
-#     限界: 利用者が確認（ask）を断った場合は、どちらも来ないため、次に同じ種類の操作を
-#     通すか、セッションが終わる（SessionEnd）か、持ち主が消えるまで登録が残る。
+#     限界: 利用者が確認（ask）を断った場合は、どちらも来ないため、セッションが終わる
+#     （SessionEnd）か、持ち主が消えるか、その登録の時刻から失効する（既定 8 時間。refresh
+#     では延びない）まで登録が残る（識別子なしで登録したときは、次に同じ種類の操作を通した
+#     ときにも外れる）。
 #     バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放される。
 #   - issue: ブランチ作成の時点で登録し、SessionEnd まで持つ。ただし、その呼び出しが失敗した
 #     （PostToolUseFailure）ときは、その呼び出しで新しく登録した issue だけを解放する（ブランチ
@@ -7516,6 +7609,8 @@ TMPL
 #
 # 長いセッションの失効を避けるため、PreToolUse（Bash・Edit|Write）のたびに
 # `session-ledger.sh refresh` を呼ぶ（前回の更新から一定時間たっていなければ何もしない）。
+# refresh が延ばすのは issue / doc の登録の失効だけで、merge / git / gate の登録は延ばさない
+# （解放し損ねた登録を生かし続けないため。#433）。
 #
 # ── セッションの識別子 ────────────────────────────────────────────────────────
 #
@@ -7853,7 +7948,10 @@ classify_git() { # k（git の位置）
   done
   [[ -n "$sub" ]] || return 0
   case "$sub" in
-    checkout | switch | rebase | reset | fetch | pull | merge | cherry-pick | revert | restore | clean | am)
+    # add / commit / rm / mv も index を変える。同じ作業ツリーで並行すると、一方が stage した
+    # ものを他方の commit が取り込む・.git/index.lock で片方が落ちるなど、双方の作業を壊す
+    # （#438）。いちばん頻度の高い干渉なので、他の操作と同じく拒否の対象にする。
+    checkout | switch | rebase | reset | fetch | pull | merge | cherry-pick | revert | restore | clean | am | add | commit | rm | mv)
       add_git_dir "$(toplevel_of "$CUR_DIR" "$dir")"
       ;;
     stash)
@@ -9528,9 +9626,32 @@ install_playbook_rules() {
   tpl="$(require_playbook_template project-ai-rules.md)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/project-ai-rules.md"
 
-  # 入口ファイルは実行環境ごとに 1 つ。内容は同一で、雛形も 1 つ。
+  # 入口ファイルは実行環境ごとに 1 つ。雛形は 1 つ（entry.md）。
+  #
+  # **CLAUDE.md にだけ、規範を全文取り込む節を足す**（#441）。entry.md は規範を
+  # パスで挙げるだけなので、エージェントが自分から読みにいかない限り規範は文脈に
+  # 載らない（利用側で、ツールを使わせない問いに規範の中身を答えられなかった）。
+  # 取り込みの節（Claude Code の `@パス`）も規範パッケージの雛形
+  # claude-entry-imports.md が持ち、DCB は entry.md の後ろへつなげるだけにする
+  # （取り込む先のファイル名を DCB が知らない。規範側の再編で黙って壊れない）。
+  # AGENTS.md / copilot-instructions.md には取り込みの構文が無いので足さない。
+  #
+  # 雛形が無い古い規範（v0.8.0 より前）では、取り込みの節なしで従来どおり置き、
+  # 案内だけを出す（この雛形のために要求する規範の版を上げない）。
   tpl="$(require_playbook_template entry.md)"
-  apply_file_with_policy "$tpl" "$OUTPUT_DIR/CLAUDE.md"
+  local imports="$PLAYBOOK_DIR/templates/claude-entry-imports.md" claude_entry
+  if [[ -f "$imports" ]]; then
+    claude_entry="$(mktemp "${TMPDIR:-/tmp}/dcb-claude-entry.XXXXXX")" || {
+      echo "error: 一時ファイルを作れません（CLAUDE.md の組み立て）。" >&2
+      exit 1
+    }
+    cat "$tpl" "$imports" > "$claude_entry"
+    apply_file_with_policy "$claude_entry" "$OUTPUT_DIR/CLAUDE.md"
+    rm -f "$claude_entry"
+  else
+    echo "note: 規範に templates/claude-entry-imports.md が無いため、CLAUDE.md に規範の取り込みの節を足しません（ai-playbook v0.8.0 以降で足します）。" >&2
+    apply_file_with_policy "$tpl" "$OUTPUT_DIR/CLAUDE.md"
+  fi
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/AGENTS.md"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/copilot-instructions.md"
 
@@ -9761,7 +9882,9 @@ $(printf '%s\n' "$sorted_rels"
   if should_install_playbook; then
     playbook_installed_rel_paths
     playbook_rules_rel_paths
-  fi)
+  fi
+  # --upgrade --without-<名前> の削除候補も、削除の段より前に検査する。
+  [[ "$UPGRADE" == "true" ]] && upgrade_off_rels)
 EOF2
 }
 
@@ -9873,16 +9996,64 @@ upgrade_diff_summary() {
   diff -u "$cur" "$new" | sed -n '3,12p' | sed 's/^/    /' || true
 }
 
-# 記録にあって、新しい版では生成されなくなったファイルを報告する（削除はしない）。
+# --without-<名前> で外したフラグでだけ生成していたファイルの一覧（外す前の集合で生成
+# されていて、外した後の集合では生成されないもの）を標準出力へ出す。--without-<名前> が
+# 無ければ空。削除の段（upgrade_report_removed）と書き込み前の事前検査が同じ一覧を使う。
+upgrade_off_rels() {
+  [[ ${#WITHOUT_SET[@]} -gt 0 ]] || return 0
+  # フラグだけの差を取る。--without-playbook を併せて渡されても、規範経由の出力
+  # （review-gate.yml など）が候補から落ちないよう、どちらの側も規範は配置する扱いで
+  # 数える（規範の有無による差は、フラグの差ではないので打ち消し合う）。
+  local prev_rels cur_rels saved_pb="$WITH_PLAYBOOK" cur_with=()
+  cur_with=(${WITH_SET[@]+"${WITH_SET[@]}"})
+  WITH_PLAYBOOK="true"
+  WITH_SET=(${UPGRADE_PREV_WITH[@]+"${UPGRADE_PREV_WITH[@]}"})
+  prev_rels="$( { template_rel_paths; conditional_template_rel_paths; playbook_installed_rel_paths; } | sort -u)"
+  WITH_SET=(${cur_with[@]+"${cur_with[@]}"})
+  cur_rels="$( { template_rel_paths; conditional_template_rel_paths; playbook_installed_rel_paths; } | sort -u)"
+  WITH_PLAYBOOK="$saved_pb"
+  comm -23 <(printf '%s\n' "$prev_rels") <(printf '%s\n' "$cur_rels")
+}
+
+# 記録にあって、新しい版では生成されなくなったファイルを報告する（原則として削除しない）。
+# 例外: --without-<名前> で外したフラグでだけ生成していたファイル（外す前の集合で生成
+# されていて、外した後の集合では生成されないもの）は、ORIGIN に記録したハッシュと現物が
+# 一致する（手を入れていない）ときに限り削除する。手を入れたものは残して報告する。
+# ほかの理由で生成されなくなったファイルは、従来どおり報告だけにする。
 upgrade_report_removed() {
-  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" new_rels rel
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" new_rels rel dest rec curh off_rels=""
   [[ -f "$origin" ]] || return 0
   new_rels="$( { printf '%s\n' "$sorted_rels"; playbook_installed_rel_paths; playbook_rules_rel_paths; } | sort -u)"
+  off_rels="$(upgrade_off_rels)"
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
-    if ! printf '%s\n' "$new_rels" | grep -Fxq -- "$rel"; then
-      echo "no longer generated (not deleted): $OUTPUT_DIR/$rel"
+    if printf '%s\n' "$new_rels" | grep -Fxq -- "$rel"; then continue; fi
+    dest="$OUTPUT_DIR/$rel"
+    if [[ -n "$off_rels" ]] && printf '%s\n' "$off_rels" | grep -Fxq -- "$rel"; then
+      if [[ -L "$dest" || ( -e "$dest" && ! -f "$dest" ) ]]; then
+        echo "keep (symlink or not a regular file, no longer generated): $dest"
+      elif [[ ! -e "$dest" ]]; then
+        continue
+      else
+        rec="$(dcb_origin_get "$origin" "hash:$rel" 2>/dev/null || true)"
+        curh="$(dcb_file_sha256 "$dest")"
+        if [[ -n "$rec" && "$curh" == "$rec" ]]; then
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "plan: remove $dest"
+          else
+            upgrade_parent_inside_output "$dest" || { echo "error: $dest の親ディレクトリが出力先の外を指しています（シンボリックリンク）。" >&2; exit 1; }
+            rm -f "$dest"
+            echo "remove: $dest (flag removed, unmodified)"
+          fi
+        elif [[ "$DRY_RUN" == "true" ]]; then
+          echo "plan: keep (modified, no longer generated) $dest"
+        else
+          echo "keep (modified, no longer generated): $dest"
+        fi
+      fi
+      continue
     fi
+    echo "no longer generated (not deleted): $dest"
   done < <(sed -n 's/^hash://p' "$origin" | sed 's/=[^=]*$//')
 }
 

@@ -6,6 +6,24 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.16.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.5.0 以降のまま**（新しい雛形を必須にしない）。`CLAUDE.md` に規範を取り込む節（ojos/ai-packages-dev#441）は ai-playbook v0.8.0 の `templates/claude-entry-imports.md` を使い、それより前の版では節なしで置いて `note:` で案内する。第二意見の記録の経路の修正（ojos/ai-packages-dev#436 / ojos/ai-packages-dev#437 / ojos/ai-packages-dev#440）も ai-playbook v0.8.0 に入っているので、`--playbook-version v0.8.0` を勧める。
+- **生成する `CLAUDE.md` に、規範 2 つを全文取り込む節を足した**（ojos/ai-packages-dev#441）。末尾に `@.ai-playbook/shared-ai-rules.md` と `@.github/project-ai-rules.md` の 2 行を置き、Claude Code が規範を毎セッションの文脈へ載せる（生成物で約 53KB）。従来はパスを挙げるだけで、エージェントが読みにいかない限り規範は文脈に載らなかった（ツールを使わせない問いに、規範の中身を「不明」と答えた）。`AGENTS.md` / `copilot-instructions.md` は雛形のまま。節の中身は ai-playbook の `templates/claude-entry-imports.md` が持ち、DCB は `entry.md` の後ろへつなげるだけ。この雛形が無い ai-playbook（v0.8.0 より前）では、従来どおり節なしで置き、`note:` で案内する（要求する ai-playbook の版は上げない）。
+- **`scripts/verify-commit-identity.sh` が、範囲が空で何も検査せずに通ったときに、そのことと `--full` の案内を出すようにした**（ojos/ai-packages-dev#442）。push した後に loop-gate を回すと範囲（`origin/main..HEAD`）が空になり、`IDENTITY_PASS` だけでは検査が済んだと取り違えやすかった。`IDENTITY_PASS` の行と終了コードは変えない（読む側の loop-gate・CI はそのまま）。
+- **README の「利用側の設定手順（許可 author email）」に、新しいリポジトリでの順番を足した**（ojos/ai-packages-dev#443）。リポジトリ変数 `ALLOWED_AUTHOR_EMAILS` はリポジトリを作ってからでないと設定できないため、生成物をそのまま最初に push すると identity-guard が必ず失敗する。リポジトリを作る → 変数を設定する → push する、の順を案内し、先に push した場合の再実行の手順も書いた。
+- **`scripts/check-doc-links.sh` が、コードフェンスの閉じを CommonMark どおりに判定するようにした**（ojos/ai-packages-dev#439）。閉じるのは、開きと同じ文字で開き以上の長さを持ち、後ろに空白しか無い行だけ。従来は文字の種類だけで見ていたため、4 連のバッククォートのフェンスの中に書いた ``` や ```sh の例でフェンスが早く閉じ、続くコードの中のリンクを検査し、最後のフェンスを「閉じていない」と報告していた。
+- **セッション協調のフック `scripts/session-coord-hook.sh` が、index を変える `git add` / `commit` / `rm` / `mv` も作業ツリーの git 操作として登録し、同じ作業ツリーで他のセッションと重なれば拒否するようにした**（ojos/ai-packages-dev#438）。従来は対象外で、同じ作業ツリーで 2 つのセッションが同時に add・commit しても検出されなかった（一方が stage したものを他方の commit が取り込む、`.git/index.lock` で片方が落ちる）。登録はコマンドの実行のあいだだけなので、止まる時間は短い。
+- **`--upgrade` で装備を外せるようにした**（ojos/ai-packages-dev#444）。`--with-<名前>` ごとに対になる `--without-<名前>`（aws / gcp / claude / gemini / antigravity / codex / copilot / copilot-review）を足した。`--upgrade --without-<名前>` は記録した集合から外し、ORIGIN の `flags=` からも消す。外したフラグでだけ生成していたファイルは、ORIGIN に記録したハッシュと一致する（手を入れていない）ものだけを削除し、手を入れたものは残して報告する。`--dry-run` では `plan: remove` と出して何も消さない。削除の対象の親ディレクトリが出力先の外を指すシンボリックリンクなら、ほかの生成物も ORIGIN も書かずに終了コード 1 で止める（書き込み前の事前検査に削除の対象も含める。ojos/ai-packages-dev#453。`--dry-run` でも同じ）。この削除は外す操作に限った例外で、ほかの理由で生成されなくなったファイルは従来どおり報告だけにする。同じ名前の `--with-` と `--without-` を同時に渡すと、何も書かずにエラーで止まる。`--upgrade` 以外では「付けない」と同じ扱いで、既存のファイルには触れない。従来は「足せるが外せない」ため、外すには生成し直すしかなかった。リモート最終ゲートを外すときの生成物以外の作業（project-ai-rules の記述・required check・Copilot の自動レビューの設定）は README に案内がある。
+- **共有台帳 `scripts/session-ledger.sh` の開始時刻のキーを、ホストの時刻の付け直しやタイムゾーンで変わらない値にした**（ojos/ai-packages-dev#433）。従来は `ps -o lstart=` の cksum で、Docker Desktop の VM のようにスリープや復帰で時刻が付け直される環境では、同じプロセスでもキーが変わった。そのため、動いているセッションの登録が他のセッションの check から失効とみなされ、マージ・git 操作・重いゲートの同時実行を止める保護が黙って切れていた。Linux では `/proc/<PID>/stat` の 22 列目（起動からの経過のクロック数）を使い、`/proc` が無い環境（macOS）では `TZ=UTC`・`LC_ALL=C` で読んだ `lstart` の cksum に落とす。
+- **台帳の `refresh` が、マージ・git 操作・重いゲートの登録を生かし続けないようにした**（ojos/ai-packages-dev#433）。これらは実行のあいだだけ持つ登録なので、`refresh` で claim し直さず、失効もセッションの最後の更新ではなく、その登録の時刻から数える。フックの版の切り替えや確認（`ask`）の拒否で解放し損ねた登録が、セッションが続く限り他のセッションを止め続けることがなくなる（既定の 8 時間で失効する）。issue と文書の登録は従来どおり `refresh` で延びる。台帳の書式（列）は変えていない。
+- **生成する workflow の `actions/checkout@v4` を `@v7` へ上げた**（ojos/ai-packages-dev#432）。対象は `.github/workflows/identity-guard.yml` と `.github/workflows/verify.yml`。v4 は Node.js 20 で動き、GitHub Actions で非推奨の警告が出る。v5 以降は Node.js 24 で動く。`verify.yml` のコメントにある例も `actions/setup-node@v7`・`node-version: '24'` に揃えた。README の該当する記述も合わせた。
+
+### 移行
+- 更新前の台帳（`lstart` の cksum のキー）に書かれた登録は、キーが一致しないため失効として扱う（誤って止める側には倒れない）。更新したあとは、動いているセッションも新しい識別子（`pid-<PID>-<新しいキー>`）の台帳ファイルへ書く。更新の直後は、それまでの登録（着手した issue など）が他のセッションから見えなくなるので、必要なら `scripts/session-ledger.sh claim issue <番号>` で登録し直してください。
+- 生成済みの workflow は `--upgrade` で追従できる（手を入れていれば `.dcb-new` が置かれる）。手で直す場合は `actions/checkout@v4` を `@v7` へ書き換えてください。セルフホストのランナーでは、Actions Runner v2.327.1 以降が要る。
+
 ## v0.15.0
 
 ### Summary

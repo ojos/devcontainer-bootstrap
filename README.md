@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.15.0`
+- `v0.16.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.15.0
+TAG=v0.16.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -97,7 +97,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.7.0
+  --languages node,go --with-claude --playbook-version v0.8.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.15.0
+TAG=v0.16.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -140,7 +140,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.15.0
+TAG=v0.16.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -262,6 +262,7 @@ fi
 - `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
+- `--without-aws` / `--without-gcp` / `--without-claude` / `--without-gemini` / `--without-antigravity` / `--without-codex` / `--without-copilot` / `--without-copilot-review`（`--with-<名前>` のそれぞれと対になる打ち消し。`--upgrade` では、記録した集合から外し、外したフラグでだけ生成していたファイルのうち手を入れていないものを削除します。`--upgrade` 以外では「付けない」と同じなので受け付けるだけで、既存のファイルには触れません。同じ名前の `--with-<名前>` と同時に指定するとエラーで止まり、何も書きません。下記「`--upgrade` の注意」参照）
 - `--playbook-version <tag>`（既定: 空。既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.4`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
 - `--playbook-from <path|url>`（既定: 空。ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
 - `--playbook-conflict-policy <skip|overwrite|prompt>`（既定: `skip`。**規範ファイル**に既存がある場合の扱い）
@@ -326,8 +327,10 @@ fi
 
 `--upgrade` の注意:
 
-- **`--with-*` は足せるが外せません。** 引数で渡した `--with-*` は記録した集合へ足されます。外したいときは、生成し直してください。
-- **生成されなくなったファイルは報告するだけで、削除しません。** 不要なら手で消してください。
+- **`--with-*` は足せます。外すには `--without-<名前>` を使います。** 引数で渡した `--with-*` は記録した集合へ足されます。`--upgrade --without-<名前>` は記録した集合から外し、ORIGIN の `flags=` からも消えます。生成し直す必要はありません。同じ名前の `--with-` と `--without-` を同時に渡すとエラーで止まります。
+- **外すときは、外したフラグでだけ生成していたファイルを、手を入れていないものに限って削除します。** ORIGIN に記録したハッシュと現物が一致するものを削除し（`remove: <path> (flag removed, unmodified)`）、手を入れたものは残して `keep (modified, no longer generated): <path>` と報告します。`--dry-run` では `plan: remove <path>` と出すだけで、何も消しません。ORIGIN は外した結果で書き直すため、残したファイルは記録から外れ、次の `--upgrade` の対象にも出ません（不要なら手で消してください）。外していないフラグで生成されるファイルは対象外です。`--upgrade` 以外で `--without-<名前>` を渡した場合は、新規生成なら付けないのと同じで、既存のファイルは削除しません。
+- **リモート最終ゲート（`--without-copilot-review`）を外すときは、生成物以外の作業が残ります。** DCB は次を変えません。(1) `.github/project-ai-rules.md` の「リモート最終ゲート」の記述を、置かない構成に合わせて直す。(2) リポジトリの required check（ブランチ保護・ruleset）に `review-gate` を入れていれば外す（ワークフローが無くなると、その check は永久に待ち状態になりマージが止まります）。(3) GitHub 側の Copilot の自動レビュー（ruleset の「Automatically request Copilot code review」など）の設定を止める。
+- **ほかの理由で生成されなくなったファイルは報告するだけで、削除しません。** 不要なら手で消してください（`--without-<名前>` で外したフラグのファイルだけが例外です）。
 - **規範の取得元が `local` の場合は、`--playbook-from` の明示が要ります。** ローカルのパスは記録しないため再現できません（`@` `?` `#` を含む URL も同じです。取得元の種類が `tag` / `adjacent` なら引数なしで再現します）。
 - **記録に入力が無い古い ORIGIN、または ORIGIN が無い出力先では、引数を明示しないと止まります。** `--project-name` / `--languages`（必須）と、使っていた `--with-*` や規範の取得元を明示した初回の `--upgrade` で、記録が書き直されます。
 - 追従先は、実行した `bootstrap.sh` の版です。ネットワークへ最新版を問い合わせません。
@@ -348,7 +351,7 @@ fi
 | `.ai-playbook/**` | 共通規範、ロール契約、タスクプレイブック、レビュー運用、intake 規律 |
 | `.ai-playbook/VERSION` | 規範の**取得元**（`version=` / `source=`）を on-disk に残す記録。どの取得元から取り込んだかを生成後の環境から照合できる。生成の入力と現物のハッシュは `.devcontainer/ORIGIN` が記録する（下記「生成物の由来の記録」） |
 | `.github/project-ai-rules.md` | プロジェクト共通ルールの雛形 |
-| `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線） |
+| `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線）。`CLAUDE.md` だけは、末尾に規範 2 つ（`.ai-playbook/shared-ai-rules.md` / `.github/project-ai-rules.md`）を `@` で取り込む節を足す。Claude Code は、これで規範の全文を毎セッションの文脈へ載せる（生成物で約 53KB） |
 | `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外） |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
 | `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
@@ -722,7 +725,15 @@ CI に固有の email を焼き込まないため、**利用側リポジトリ�
 1. GitHub リポジトリの **Settings → Secrets and variables → Actions → Variables** を開く。
 2. `ALLOWED_AUTHOR_EMAILS` という **Repository variable** を作成し、許可する author email を設定する（複数はカンマまたは空白区切り。例: `you@example.com`）。
 
-未設定のまま CI が走ると、`verify-commit-identity.sh` は許可 email を解決できず fail-closed で失敗します（検査を素通りさせないため）。コンテナ内・手元では `.env` の `GIT_IDENTITY_EMAIL` が自動でフォールバックとして使われるため、通常は追加設定なしで `bash scripts/verify-commit-identity.sh` を実行できます。
+未設定のまま CI が走ると、`verify-commit-identity.sh` は許可 email を解決できず fail-closed で失敗します（検査を素通りさせないため）。
+
+**新しいリポジトリでは、最初の push より前に変数を設定します。** リポジトリ変数はリポジトリを作ってからでないと設定できないため、生成物をそのまま最初に push すると、その push の identity-guard は必ず失敗します（失敗の理由は、ジョブのログに「リポジトリ変数 `ALLOWED_AUTHOR_EMAILS` を設定してください」と出ます）。順番は次のとおりです。
+
+1. GitHub でリポジトリを作る（まだ push しない）
+2. 上の手順で `ALLOWED_AUTHOR_EMAILS` を設定する
+3. push する
+
+先に push してしまった場合は、変数を設定してから、失敗した identity-guard の実行を再実行してください（`gh run rerun <実行 ID> --failed`、または Actions の画面の「Re-run failed jobs」）。fail-closed の動作としては正しく、設定すれば緑になります。コンテナ内・手元では `.env` の `GIT_IDENTITY_EMAIL` が自動でフォールバックとして使われるため、通常は追加設定なしで `bash scripts/verify-commit-identity.sh` を実行できます。
 
 ## 機密混入検査
 
@@ -855,7 +866,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.15.0
+version=v0.16.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -866,7 +877,7 @@ input:manage-gitignore=true
 input:gitignore-targets=
 input:playbook=installed
 input:playbook-source=tag
-input:playbook-ref=v0.7.0
+input:playbook-ref=v0.8.0
 hash:.devcontainer/compose.yaml=<sha256>
 hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
@@ -886,7 +897,7 @@ hash:.env.example=<sha256>
 | 入力 | 扱い | 理由 |
 |---|---|---|
 | `--project-name` / `--languages` | 記録する（`input:project-name` / `input:languages`） | 生成結果を決める必須の入力 |
-| `--with-*` | `flags=` に記録する | 同上。`--upgrade` は記録した集合へ、引数で渡した分を足す |
+| `--with-*` | `flags=` に記録する | 同上。`--upgrade` は記録した集合へ、引数で渡した分を足し、`--without-<名前>` で渡した分を外す |
 | `--base-image` | 指定の有無（`input:base-image-mode=override` / `auto`）と、そのとき使った値（`input:base-image`）を記録する | `auto` のときの値は、生成時の環境（docker の有無・アーキテクチャ・レジストリの応答）で決まった観測記録で、再現すべき入力ではない。`override` のときだけ `--upgrade` が再現する |
 | `--no-gitignore` / `--gitignore-targets` | 記録する（`input:manage-gitignore` / `input:gitignore-targets`） | 生成結果（`.gitignore`）を決める |
 | 規範の取得元（`--playbook-version` / `--playbook-from` / `--with-playbook`） | 種類（`input:playbook-source` = `tag` / `url` / `local` / `adjacent`）と、記録できる場合の値（`input:playbook-ref`）を記録する。配置しないときは `input:playbook=none` | `tag` と、`@` `?` `#` を含まない URL だけ値を記録する。ローカルのパスは、絶対パスがコミットされると困り、相対パスは実行した場所で意味が変わるため記録しない。`@` `?` `#` を含む URL は資格情報や署名を含みうるため記録しない（これらは `--upgrade` で `--playbook-from` の明示が要る） |
@@ -979,15 +990,15 @@ squash 本文の組み立て方（PR の説明文だけを使うか、各コミ�
 | イベント | 対象 | 判定 |
 |---|---|---|
 | `SessionStart` | — | 他のセッションの登録を要約して表示する（他に登録が無ければ何も出さない） |
-| `PreToolUse` | `Bash` | `gh pr merge` / `gh release create`・`edit`・`delete`・`upload` / REST の merge への `PUT` / `mergePullRequest`、同じ作業ツリーでの `git checkout`・`switch`・`rebase`・`reset`・`fetch`・`pull`・`merge` など、`verify.sh` / `loop-gate.sh` の起動を、他のセッションの登録と衝突するなら**拒否**する。ブランチ作成（`git checkout -b feat/395-…` など）で、他のセッションが着手している issue なら**警告**する |
+| `PreToolUse` | `Bash` | `gh pr merge` / `gh release create`・`edit`・`delete`・`upload` / REST の merge への `PUT` / `mergePullRequest`、同じ作業ツリーでの `git checkout`・`switch`・`rebase`・`reset`・`fetch`・`pull`・`merge` や、index を変える `add`・`commit`・`rm`・`mv` など、`verify.sh` / `loop-gate.sh` の起動を、他のセッションの登録と衝突するなら**拒否**する。ブランチ作成（`git checkout -b feat/395-…` など）で、他のセッションが着手している issue なら**警告**する |
 | `PreToolUse` | `Edit\|Write` | 他のセッションが登録している文書なら**警告**する（通す） |
 | `PostToolUse` / `PostToolUseFailure` | `Bash` | `PreToolUse` で登録した「実行のあいだだけの登録」（マージ・作業ツリー・ゲート）を解放する。終了コードが 0 以外の呼び出しや中断は `PostToolUse` ではなく `PostToolUseFailure` が来るため、両方へ配線する |
 | `SessionEnd` | — | 自分の登録をすべて解放する |
 
 - **拒否と警告の出力に、相手のセッションの識別子・登録の種類・作業ツリー・調整の手順が含まれます。** 調整は、Claude Code では `ListAgents` で相手を確かめて `SendMessage` で連絡します（他の実行環境では利用者を経由します）。
-- **フックが自分で登録する時点:** マージ・作業ツリーの git 操作・重いゲートは、実行の直前に登録し、終わったら解放します（登録と解放には、その呼び出しの `tool_use_id` を呼び出しの識別子として渡し、解放はその識別子の登録だけを外します。同じセッションで同じ種類の Bash 呼び出しが並行しても、先に終わった方が他方の登録を外さず、複合コマンドが拒否されたときも、同じセッションの先行する登録は残ります。`tool_use_id` が入力に無いときは、識別子なしで種類と対象の単位で扱います）。issue はブランチ作成の時点で登録し、`SessionEnd` まで持ちます。文書は、フックは確かめるだけで登録しません（長く触る文書は、セッション自身が `session-ledger.sh claim doc <パス>` で登録します）。拒否したときは、その呼び出しで登録したものを解放してから拒否します（issue は、拒否しないと決まってから登録します）。**限界:** 確認（`ask`）を利用者が断った場合は `PostToolUse` も `PostToolUseFailure` も来ないため、次に同じ種類の操作を通すか、セッションが終わるか、持ち主のプロセスが消えるまで登録が残ります。バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放されます。
+- **フックが自分で登録する時点:** マージ・作業ツリーの git 操作・重いゲートは、実行の直前に登録し、終わったら解放します（登録と解放には、その呼び出しの `tool_use_id` を呼び出しの識別子として渡し、解放はその識別子の登録だけを外します。同じセッションで同じ種類の Bash 呼び出しが並行しても、先に終わった方が他方の登録を外さず、複合コマンドが拒否されたときも、同じセッションの先行する登録は残ります。`tool_use_id` が入力に無いときは、識別子なしで種類と対象の単位で扱います）。issue はブランチ作成の時点で登録し、`SessionEnd` まで持ちます。文書は、フックは確かめるだけで登録しません（長く触る文書は、セッション自身が `session-ledger.sh claim doc <パス>` で登録します）。拒否したときは、その呼び出しで登録したものを解放してから拒否します（issue は、拒否しないと決まってから登録します）。**限界:** 確認（`ask`）を利用者が断った場合は `PostToolUse` も `PostToolUseFailure` も来ないため、セッションが終わるか、持ち主のプロセスが消えるか、その登録の時刻から失効する（既定 8 時間。`refresh` では延びません）まで登録が残ります。バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放されます。
 - **セッションの識別子は台帳の既定に任せます。** フックも `Bash` ツールのコマンドも Claude Code 本体のプロセスの子として動くため、「祖先で最初のシェル以外のプロセス」が同じ本体になり、識別子が揃います（実機で確認済み）。`SESSION_LEDGER_ID` / `SESSION_LEDGER_PID` を渡せば、それが優先されます。
-- **長いセッションの失効を避けるため、`PreToolUse` のたびに `session-ledger.sh refresh` を呼びます**（前回の更新から 5 分以上たっていなければ何もしません）。
+- **長いセッションの失効を避けるため、`PreToolUse` のたびに `session-ledger.sh refresh` を呼びます**（前回の更新から 5 分以上たっていなければ何もしません）。延ばすのは issue と文書の登録の失効だけで、マージ・git 操作・重いゲートの登録は延ばしません。実行のあいだだけ持つはずの登録を、解放し損ねたまま生かし続けないためです。
 - **台帳そのものの読み書きに失敗したときは、警告（`systemMessage`）を出して通します（fail-open）。** 台帳が見つからない・置き場所を作れない・git リポジトリの外・出力を読めない場合です。台帳の不具合ですべての操作が止まるのを避けるためで、空のペイロードを `ask` にする確認フックとは逆です（あちらは承認の記録が目的で、こちらは合図だからです）。
 - コマンドの見分け方は確認フックと同じ考え方（クォートを認識して節に分け、節の先頭のコマンドで判定する）の縮小版です。`bash -c "..."` の中身や変数展開の結果などは取りこぼします。**うっかりの衝突へ合図を出す機構であって、意図的な迂回を防ぐ境界ではありません。**
 - 台帳は排他制御ではなく合図です。2 つのセッションがほぼ同時に登録すると、両方が通ることがあります。
@@ -1044,7 +1055,7 @@ squash 本文の組み立て方（PR の説明文だけを使うか、各コミ�
 
 確認側を別に置くのは、**要求側の契機が届かないことがある**ためです。届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑なので、最終ゲートだけが黙って抜けます。同じ契機を見る 2 本目では塞げないため、確認側は `opened` / `synchronize` / `reopened` / `ready_for_review` に加えて**20 分ごとの定期実行**を張ります。判定は head SHA への commit status（`review-gate`）として出します。定期実行から見た PR にはジョブの成否が紐づかず、status でなければ PR 上に何も現れないためです。`opened` の契機だけは、要求が届くまで 120 秒待ってから判定します（要求側と同時に走るため）。
 
-**「要求されたか」と「読まれたか」は別です。** GitHub は 1 ファイルの差分が大きすぎると、レビュー対象の差分（`patch`）を API から落とします。この状態でも Copilot は要求どおりレビューを投稿しますが、中身は「1 行も読めなかった」という定型文だけになり、要求も投稿も記録として残るため、「要求されたか」しか見ない判定は緑を出し続けます。確認側はこれを塞ぐため、変更ファイルに読める差分があるか（原因そのもの）と、投稿されたレビューが定型文だけでないか（最後の砦）の 2 段で見ます。この判定は `review-gate.yml` へ埋め込まず `scripts/review-usable.sh` へ切り出してあります。確認側は `actions/checkout@v4` で**既定ブランチ**（PR の変更ブランチではありません）からこのスクリプトを取得してから呼び出します。PR 側から取得すると、PR の投稿者がスクリプトを書き換えるだけでゲートを常に緑にできてしまうためです。
+**「要求されたか」と「読まれたか」は別です。** GitHub は 1 ファイルの差分が大きすぎると、レビュー対象の差分（`patch`）を API から落とします。この状態でも Copilot は要求どおりレビューを投稿しますが、中身は「1 行も読めなかった」という定型文だけになり、要求も投稿も記録として残るため、「要求されたか」しか見ない判定は緑を出し続けます。確認側はこれを塞ぐため、変更ファイルに読める差分があるか（原因そのもの）と、投稿されたレビューが定型文だけでないか（最後の砦）の 2 段で見ます。この判定は `review-gate.yml` へ埋め込まず `scripts/review-usable.sh` へ切り出してあります。確認側は `actions/checkout@v7` で**既定ブランチ**（PR の変更ブランチではありません）からこのスクリプトを取得してから呼び出します。PR 側から取得すると、PR の投稿者がスクリプトを書き換えるだけでゲートを常に緑にできてしまうためです。
 
 > **前提**: リポジトリ所有者の Copilot サブスクリプションで「Copilot code review」が有効でないと、reviewers 要求が 422 で失敗します。`--with-copilot-review` を指定しなければ、これらのワークフローとスクリプトは配置されません（他ベンダーのリモートレビューを使う場合は強制されません）。
 
