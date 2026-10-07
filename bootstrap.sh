@@ -34,6 +34,15 @@ GITIGNORE_TARGETS_EXPLICIT="false"
 # （温存したファイルにも新しい版のハッシュを記録するため、現物ではなくこちらを ORIGIN へ書く）。
 UPGRADE_HASHES=""
 UPGRADE_LEFTOVER=""
+# --upgrade が「雛形が変わっておらず、現物 = accepted:」として温存した相対パスの一覧（改行区切り）。
+# ORIGIN の accepted: 行（取り込み済みの記録）は、これらのパスの分だけを引き継ぐ。許可の一覧に
+# するのは、更新・新規作成・up-to-date・.dcb-new など、ほかのどの分岐でも古い記録を残さないため
+# （落とす側を列挙すると、分岐を足したときに漏れて古い記録が生き残る）。
+UPGRADE_ACCEPT_KEEP=""
+# --accept <path>...: 手を入れたファイルを取り込み済みとして ORIGIN へ記録する（3 つ目の動作）。
+ACCEPT="false"
+ACCEPT_PATHS=()
+PLAYBOOK_CONFLICT_POLICY_EXPLICIT="false"
 
 BASE_IMAGE_OVERRIDE=""
 BASE_IMAGE=""
@@ -61,7 +70,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.16.0"
+DCB_VERSION="v0.17.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -114,6 +123,13 @@ options:
                               override the recorded inputs. Not combinable with --force;
                               --dry-run prints the plan only. Exit: 0 all applied,
                               2 some <path>.dcb-new left, 1 failure.
+  --accept <path>...          Record edited files as accepted in .devcontainer/ORIGIN
+                              (output dir defaults to $PWD). Use it after merging the
+                              package's changes by hand: doctor.sh then treats the file as
+                              accepted instead of reporting it as changed. Each path needs a
+                              hash: record, an existing file and no <path>.dcb-new beside it;
+                              otherwise nothing is written. Not combinable with generation
+                              options or --upgrade; --output-dir and --dry-run are allowed.
   --no-gitignore              管理対象の .gitignore セクションを更新しない
   --gitignore-targets <csv>   Additional template names to use (e.g. VisualStudioCode,JetBrains)
   --with-playbook             Install shared AI rules (ai-playbook) and entry files
@@ -224,6 +240,23 @@ dcb_origin_load_inputs() {
 }
 # <<< dcb-origin-io
 
+# ファイルの sha256 を計算する。sha256sum は GNU coreutils 前提で macOS 既定には無い
+# （shasum -a 256 を使う）。両方無い環境向けに openssl も試す。いずれも無ければ、
+# 生成そのものは終わっているのに由来だけ記録できない中途半端な状態を隠さず落とす。
+dcb_file_sha256() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$f" | awk '{print $NF}'
+  else
+    echo "error: sha256 を計算できるコマンドが見つかりません（sha256sum / shasum / openssl のいずれかが必要です）" >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-name)     PROJECT_NAME="$2"; shift 2 ;;
@@ -271,13 +304,18 @@ while [[ $# -gt 0 ]]; do
     --dry-run)          DRY_RUN="true"; shift ;;
     --force)            FORCE="true"; shift ;;
     --upgrade)          UPGRADE="true"; shift ;;
+    # 取り込み済みの記録。後ろの "-" で始まらない引数をすべてパスとして受ける。
+    --accept)
+      ACCEPT="true"; shift
+      while [[ $# -gt 0 && "$1" != -* ]]; do ACCEPT_PATHS+=("$1"); shift; done
+      ;;
     --no-gitignore)     MANAGE_GITIGNORE="false"; MANAGE_GITIGNORE_EXPLICIT="true"; shift ;;
     --gitignore-targets)   GITIGNORE_TARGETS="$2"; GITIGNORE_TARGETS_EXPLICIT="true"; shift 2 ;;
     --with-playbook)    WITH_PLAYBOOK="true"; shift ;;
     --without-playbook) WITH_PLAYBOOK="false"; shift ;;
     --playbook-from)    PLAYBOOK_FROM="$2"; shift 2 ;;
     --playbook-version) PLAYBOOK_VERSION="$2"; shift 2 ;;
-    --playbook-conflict-policy) PLAYBOOK_CONFLICT_POLICY="$2"; shift 2 ;;
+    --playbook-conflict-policy) PLAYBOOK_CONFLICT_POLICY="$2"; PLAYBOOK_CONFLICT_POLICY_EXPLICIT="true"; shift 2 ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -301,6 +339,169 @@ if [[ "$UPGRADE" == "true" && "$FORCE" == "true" ]]; then
   echo "       --upgrade は手を入れたファイルを上書きせず <path>.dcb-new を隣へ置きます。" >&2
   echo "       --force は手を入れたファイルも上書きするため、意味が両立しません。" >&2
   exit 1
+fi
+
+# --accept は 3 つ目の動作（生成・--upgrade とは別）。生成の引数や --upgrade と混ぜると、
+# 何を書くのかが曖昧になるので、ORIGIN を書く前に止める。--output-dir と --dry-run だけは併用できる。
+if [[ "$ACCEPT" == "true" ]]; then
+  accept_conflict=""
+  [[ -z "$PROJECT_NAME" ]] || accept_conflict="$accept_conflict --project-name"
+  [[ ${#LANGUAGES[@]} -eq 0 ]] || accept_conflict="$accept_conflict --languages"
+  [[ ${#WITH_SET[@]} -eq 0 ]] || accept_conflict="$accept_conflict --with-*"
+  [[ ${#WITHOUT_SET[@]} -eq 0 ]] || accept_conflict="$accept_conflict --without-*"
+  [[ -z "$BASE_IMAGE_OVERRIDE" ]] || accept_conflict="$accept_conflict --base-image"
+  [[ "$FORCE" != "true" ]] || accept_conflict="$accept_conflict --force"
+  [[ "$UPGRADE" != "true" ]] || accept_conflict="$accept_conflict --upgrade"
+  [[ "$MANAGE_GITIGNORE_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --no-gitignore"
+  [[ "$GITIGNORE_TARGETS_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --gitignore-targets"
+  [[ -z "$WITH_PLAYBOOK" ]] || accept_conflict="$accept_conflict --with-playbook/--without-playbook"
+  [[ -z "$PLAYBOOK_FROM" ]] || accept_conflict="$accept_conflict --playbook-from"
+  [[ -z "$PLAYBOOK_VERSION" ]] || accept_conflict="$accept_conflict --playbook-version"
+  [[ "$PLAYBOOK_CONFLICT_POLICY_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --playbook-conflict-policy"
+  if [[ -n "$accept_conflict" ]]; then
+    echo "error: --accept は生成の引数や --upgrade と同時に指定できません（指定されたもの:$accept_conflict）。" >&2
+    echo "       --output-dir と --dry-run だけが併用できます。何も書かずに止めます。" >&2
+    exit 1
+  fi
+  if [[ ${#ACCEPT_PATHS[@]} -eq 0 ]]; then
+    echo "error: --accept にはパスが 1 つ以上必要です（例: --accept .devcontainer/devcontainer.json）。" >&2
+    exit 1
+  fi
+fi
+
+# ── --accept: 取り込み済みの記録 ────────────────────────────────────────────
+#
+# 手を入れたファイルの現物のハッシュを、ORIGIN の accepted:<path>=<ハッシュ> として記録する。
+# パッケージの指示どおりに手で取り込みを済ませたファイルは、記録（hash:）とは一致しない
+# ままなので、doctor.sh は「変化した」と報告し続ける。取り込み済みの印を残す入口がここ。
+# ORIGIN を書くのは bootstrap.sh だけという分担を保つため、doctor.sh には持たせない。
+# version= と hash: は書き換えない（雛形の記録は、--upgrade が判定する基準のまま残す）。
+#
+# 受け付けるのは、hash: の記録があり、現物が通常ファイルで、<path>.dcb-new が残っていない
+# パスだけ。1 つでも満たさなければ何も書かずに止める（全件を検査してから書く）。
+# 現物が hash: と一致するパスは、accepted を外して「変更なし」と報告する。
+# この位置（引数解析の直後）で動くため、後ろで定義される補助関数には頼らない。
+
+# 利用者が渡したパスを、出力先からの相対パスへ整える（先頭の ./ と、出力先の絶対パスの接頭辞を外す）。
+accept_normalize_path() {
+  local p="$1"
+  while [[ "$p" == ./* ]]; do p="${p#./}"; done
+  p="${p#"$OUTPUT_DIR"/}"
+  printf '%s' "$p"
+}
+
+# 出力先の中に ORIGIN の実体があるかを確かめ、書き込み先の ORIGIN を検査する。
+# 問題があれば何も書かずに止める。
+accept_guard_origin() {
+  local origin="$1" real root
+  if [[ ! -f "$origin" ]]; then
+    echo "error: --accept: $origin がありません（このディレクトリは DCB の生成物ではない、または記録が消えています）。" >&2
+    exit 1
+  fi
+  real="$(cd -P "$(dirname "$origin")" 2>/dev/null && pwd -P)" || real=""
+  root="$(cd -P "$OUTPUT_DIR" 2>/dev/null && pwd -P)" || root=""
+  if [[ -L "$origin" || -z "$real" || -z "$root" || ( "$real" != "$root" && "$real" != "$root"/* ) ]]; then
+    echo "error: --accept: $origin が出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
+    exit 1
+  fi
+}
+
+accept_run() {
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" raw rel dest curh rec bad="" tmp kind h real root
+  local actions="" plan_prefix="" seen=$'\n'
+  accept_guard_origin "$origin"
+  [[ "$DRY_RUN" == "true" ]] && plan_prefix="plan: "
+  # 検査（何も書かない）。結果は actions へ「accept|unchanged<TAB>パス<TAB>ハッシュ」で積む。
+  for raw in "${ACCEPT_PATHS[@]}"; do
+    rel="$(accept_normalize_path "$raw")"
+    dest="$OUTPUT_DIR/$rel"
+    if [[ -z "$rel" ]]; then
+      bad="$bad"$'\n'"  - '$raw': パスが空です"
+      continue
+    fi
+    # 同じパスを重ねて渡しても、accepted: の行は 1 行にする。
+    case "$seen" in *$'\n'"$rel"$'\n'*) continue ;; esac
+    seen="$seen$rel"$'\n'
+    if ! rec="$(dcb_origin_get "$origin" "hash:$rel" 2>/dev/null)"; then
+      bad="$bad"$'\n'"  - $rel: ORIGIN に hash: の記録がありません（DCB が生成したファイルではありません）"
+      continue
+    fi
+    if [[ -L "$dest" || ! -f "$dest" ]]; then
+      bad="$bad"$'\n'"  - $rel: 現物が通常のファイルとして存在しません"
+      continue
+    fi
+    # 親ディレクトリがリンクで出力先の外を指していれば拒む（--upgrade と同じ判定）。外の
+    # ファイルのハッシュを、生成先の取り込み済みとして記録しないため。
+    real="$(cd -P "$(dirname "$dest")" 2>/dev/null && pwd -P)" || real=""
+    root="$(cd -P "$OUTPUT_DIR" 2>/dev/null && pwd -P)" || root=""
+    if [[ -z "$real" || -z "$root" || ( "$real" != "$root" && "$real" != "$root"/* ) ]]; then
+      bad="$bad"$'\n'"  - $rel: 親ディレクトリが出力先の外を指しています（シンボリックリンク）"
+      continue
+    fi
+    if [[ -e "$dest.dcb-new" || -L "$dest.dcb-new" ]]; then
+      bad="$bad"$'\n'"  - $rel: $rel.dcb-new が残っています（先に新しい版との差分を取り込み、.dcb-new を消してください）"
+      continue
+    fi
+    curh="$(dcb_file_sha256 "$dest")"
+    if [[ "$curh" == "$rec" ]]; then
+      actions="${actions}unchanged"$'\t'"${rel}"$'\t'"${curh}"$'\n'
+    else
+      actions="${actions}accept"$'\t'"${rel}"$'\t'"${curh}"$'\n'
+    fi
+  done
+  if [[ -n "$bad" ]]; then
+    echo "error: --accept: 取り込み済みにできないパスがあります。何も書かずに止めます:$bad" >&2
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r kind rel h; do
+    [[ -n "$kind" ]] || continue
+    if [[ "$kind" == "accept" ]]; then
+      echo "${plan_prefix}accept: $rel ($h)"
+    else
+      echo "${plan_prefix}unchanged: $rel (現物は hash: の記録と一致しています。accepted は不要なので外します)"
+    fi
+  done <<EOF2
+$actions
+EOF2
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[bootstrap] dry-run: no files were written"
+    return 0
+  fi
+
+  # 書き直す。対象パスの既存の accepted: 行を落とし、accept のぶんを末尾へ足す。
+  # 中身だけを差し替える（cat > で、ORIGIN のモード・所有者を変えない）。
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-accept.XXXXXX")"
+  # 一覧は改行を含むので -v ではなく環境変数で渡す（macOS の awk は -v の値の改行を拒む）。
+  DCB_ACCEPT_ACTIONS="$actions" awk '
+    BEGIN {
+      n = split(ENVIRON["DCB_ACCEPT_ACTIONS"], a, "\n")
+      for (i = 1; i <= n; i++) {
+        if (a[i] == "") continue
+        split(a[i], f, "\t")
+        drop["accepted:" f[2] "="] = 1
+      }
+    }
+    {
+      for (k in drop) if (index($0, k) == 1) next
+      print
+    }
+  ' "$origin" > "$tmp"
+  while IFS=$'\t' read -r kind rel h; do
+    [[ "$kind" == "accept" ]] || continue
+    echo "accepted:$rel=$h" >> "$tmp"
+  done <<EOF2
+$actions
+EOF2
+  cat "$tmp" > "$origin"
+  rm -f "$tmp"
+  echo "write: $origin"
+}
+
+if [[ "$ACCEPT" == "true" ]]; then
+  [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
+  accept_run
+  exit 0
 fi
 
 # ── 検証 ───────────────────────────────────────────────────────────────
@@ -471,8 +672,8 @@ image_supports_platform() {
   manifest="$(docker manifest inspect "$image" 2>/dev/null || true)"
   [[ -n "$manifest" ]] || return 1
 
-  printf '%s' "$manifest" | grep -q "\"os\": \"$os\"" || return 1
-  printf '%s' "$manifest" | grep -q "\"architecture\": \"$arch\"" || return 1
+  printf '%s' "$manifest" | grep "\"os\": \"$os\"" >/dev/null || return 1
+  printf '%s' "$manifest" | grep "\"architecture\": \"$arch\"" >/dev/null || return 1
   return 0
 }
 
@@ -668,6 +869,12 @@ services:
       - /var/run/docker.sock:/var/run/docker-host.sock
 __VOLUME_MOUNTS__
     command: sleep infinity
+    # PID 1 を Docker の組み込みの init にして、孤児になったプロセスを回収させる。
+    # sleep は子を回収しないため、これが無いと、コンテナの中で親を失ったプロセス
+    # （シェル・git・テストの子など）がゾンビとして溜まり続け、数日でプロセス数の
+    # 上限に達する。そうなると docker exec（エディタの接続）もコンテナ内のセッションも
+    # 止まる。消さないこと。効かせるにはコンテナの作り直しが要る。
+    init: true
 __SECURITY_OPT__
 __VOLUME_SECTION__
 TMPL
@@ -2658,7 +2865,7 @@ fi
 
 while IFS= read -r key; do
   [[ -n "$key" ]] || continue
-  if printf '%s' "$key" | grep -Eqi "$SECRET_KEY_RE"; then
+  if printf '%s' "$key" | grep -Ei "$SECRET_KEY_RE" >/dev/null; then
     ng "$ENV_EXAMPLE に値が入っています（雛形はキー名だけを共有する）: $key"
   fi
 done <<<"$example_valued"
@@ -3490,20 +3697,20 @@ printf '%s\n' \
 diag="$(awk -v DIR="." -v FILE="selftest.md" -f "$EXTRACT" "$selftest")" \
   || fail "自己診断で抽出器が異常終了しました。検査が成立していないため失敗させます。"
 
-printf '%s\n' "$diag" | grep -q "^L	absent.md	" \
+printf '%s\n' "$diag" | grep "^L	absent.md	" >/dev/null \
   || fail "自己診断に失敗しました: 壊れたリンクを抽出できません。検査が成立していないため失敗させます。"
-printf '%s\n' "$diag" | grep -q "^L	present.md	" \
+printf '%s\n' "$diag" | grep "^L	present.md	" >/dev/null \
   || fail "自己診断に失敗しました: 正常なリンクを抽出できません。検査が成立していないため失敗させます。"
-if printf '%s\n' "$diag" | grep -q "nope-in-bt-fence.md"; then
+if printf '%s\n' "$diag" | grep "nope-in-bt-fence.md" >/dev/null; then
   fail "自己診断に失敗しました: 3 連バッククォートのフェンスの内側を拾っています。検査が成立していないため失敗させます。"
 fi
-if printf '%s\n' "$diag" | grep -q "nope-in-tilde-fence.md"; then
+if printf '%s\n' "$diag" | grep "nope-in-tilde-fence.md" >/dev/null; then
   fail "自己診断に失敗しました: ~~~ のフェンスの内側を拾っています。検査が成立していないため失敗させます。"
 fi
-if printf '%s\n' "$diag" | grep -q "tel:"; then
+if printf '%s\n' "$diag" | grep "tel:" >/dev/null; then
   fail "自己診断に失敗しました: スキーム付きのリンクを相対パスとして扱っています。検査が成立していないため失敗させます。"
 fi
-if printf '%s\n' "$diag" | grep -q "^U	"; then
+if printf '%s\n' "$diag" | grep "^U	" >/dev/null; then
   fail "自己診断に失敗しました: 閉じているフェンスを未閉と判定しています。検査が成立していないため失敗させます。"
 fi
 
@@ -3511,7 +3718,7 @@ unclosed_test="$WORK/selftest-unclosed.md"
 printf '%s\n' '```' '[in-open-fence](nope.md)' > "$unclosed_test"
 diag_unclosed="$(awk -v DIR="." -v FILE="selftest-unclosed.md" -f "$EXTRACT" "$unclosed_test")" \
   || fail "自己診断で抽出器が異常終了しました。検査が成立していないため失敗させます。"
-printf '%s\n' "$diag_unclosed" | grep -q "^U	" \
+printf '%s\n' "$diag_unclosed" | grep "^U	" >/dev/null \
   || fail "自己診断に失敗しました: 閉じていないフェンスを検出できません。検査が成立していないため失敗させます。"
 
 # ── 追跡対象の集合を作る ─────────────────────────────────────────────────────
@@ -9262,7 +9469,12 @@ render_content() {
       sed_args+=(-e "/\"__IF_WITH_${wf_upper}__\"/d")
     fi
   done
-  printf '%s' "$content" | sed "${sed_args[@]}"
+  # 中身は $(...) を通る過程で末尾の改行が剥がれている。POSIX のテキストファイルとして
+  # 末尾を改行で終えるため、空でなければ 1 つ補う（#462）。補わないと、利用者が手で
+  # 整えた版や .dcb-new との diff に「\ No newline at end of file」が出る。
+  if [[ -n "$content" ]]; then
+    printf '%s\n' "$content" | sed "${sed_args[@]}"
+  fi
 }
 
 build_gitignore_block() {
@@ -9301,10 +9513,15 @@ upsert_gitignore() {
   [[ -f "$gitignore_path" ]] && prev_mode="$(file_mode_octal "$gitignore_path")"
 
   if [[ -f "$gitignore_path" ]]; then
+    # 管理区画を取り除き、末尾の空行も落とす。前回足した区切りの空行は区画の
+    # 外にあるため、落とさないと実行のたびに 1 行ずつ累積する（#460）。
+    # 空行は直後に空でない行が来たときだけ出力する。
     awk -v start="$GITIGNORE_BEGIN" -v end="$GITIGNORE_END" '
       $0 == start {skip=1; next}
       $0 == end {skip=0; next}
-      !skip {print}
+      skip {next}
+      /^[[:space:]]*$/ {pending = pending $0 "\n"; next}
+      {printf "%s", pending; pending=""; print}
     ' "$gitignore_path" > "$tmp"
     if [[ -s "$tmp" ]]; then
       printf '\n' >> "$tmp"
@@ -9799,6 +10016,9 @@ write_playbook_version_file() {
 #   現物が無い                                  -> 生成する（新しい版で増えた分・消えた分）
 #   現物 = 新しい版                             -> 更新済み（手を入れていても、同じ内容なら）
 #   現物 = 記録したハッシュ（手を入れていない） -> 新しい版で更新する（モードは変えない）
+#   新しい版 = 記録 かつ 現物 = accepted（手を入れ、取り込み済みにした）
+#                                               -> 雛形が変わっていないので、温存して報告するだけ
+#                                               （.dcb-new は置かず、残っている古い .dcb-new も消さない）
 #   上記以外（手を入れた。記録が無い現物も含む）-> 上書きせず <path>.dcb-new を置く
 #
 # 記録が無いのに現物がある場合は「手を入れた」扱いにする。由来が分からない現物を
@@ -9895,7 +10115,7 @@ upgrade_write_new() {
 }
 
 upgrade_apply_file() {
-  local dest="$1" src="$2" rel newh curh rec mode verb
+  local dest="$1" src="$2" rel newh curh rec acc mode verb
   rel="${dest#"$OUTPUT_DIR"/}"
   if ! upgrade_parent_inside_output "$dest"; then
     echo "error: $dest の親ディレクトリが出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
@@ -9956,6 +10176,22 @@ upgrade_apply_file() {
     cat "$src" > "$dest"
     rm -f "$dest.dcb-new"
     echo "write: $dest (upgraded)"
+    return 0
+  fi
+
+  # 雛形が変わっておらず（新しい版 = 記録）、現物が取り込み済みの記録（accepted:）と一致する。
+  # 取り込むべき差分が無いので .dcb-new は置かない。
+  # accepted と一致しない現物には、雛形が変わっていなくても .dcb-new を置く。.dcb-new を置いた
+  # 時点で hash: は新しい版になり accepted: は外れるので、取り込む前に .dcb-new を失っても、
+  # 同じ版の --upgrade をやり直せば作り直される（hash: だけで判定すると作り直されない）。
+  acc="$(dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "accepted:$rel" 2>/dev/null || true)"
+  if [[ -n "$rec" && "$newh" == "$rec" && -n "$acc" && "$curh" == "$acc" ]]; then
+    UPGRADE_ACCEPT_KEEP="${UPGRADE_ACCEPT_KEEP}${rel}"$'\n'
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "plan: keep (modified, template unchanged) $dest"
+    else
+      echo "keep (modified, template unchanged): $dest"
+    fi
     return 0
   fi
 
@@ -10027,9 +10263,9 @@ upgrade_report_removed() {
   off_rels="$(upgrade_off_rels)"
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
-    if printf '%s\n' "$new_rels" | grep -Fxq -- "$rel"; then continue; fi
+    if printf '%s\n' "$new_rels" | grep -Fx -- "$rel" >/dev/null; then continue; fi
     dest="$OUTPUT_DIR/$rel"
-    if [[ -n "$off_rels" ]] && printf '%s\n' "$off_rels" | grep -Fxq -- "$rel"; then
+    if [[ -n "$off_rels" ]] && printf '%s\n' "$off_rels" | grep -Fx -- "$rel" >/dev/null; then
       if [[ -L "$dest" || ( -e "$dest" && ! -f "$dest" ) ]]; then
         echo "keep (symlink or not a regular file, no longer generated): $dest"
       elif [[ ! -e "$dest" ]]; then
@@ -10134,23 +10370,6 @@ write_file() {
 
 # ── 生成物の由来の記録 ──────────────────────────────────────────────────────
 
-# ファイルの sha256 を計算する。sha256sum は GNU coreutils 前提で macOS 既定には無い
-# （shasum -a 256 を使う）。両方無い環境向けに openssl も試す。いずれも無ければ、
-# 生成そのものは終わっているのに由来だけ記録できない中途半端な状態を隠さず落とす。
-dcb_file_sha256() {
-  local f="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$f" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$f" | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 "$f" | awk '{print $NF}'
-  else
-    echo "error: sha256 を計算できるコマンドが見つかりません（sha256sum / shasum / openssl のいずれかが必要です）" >&2
-    exit 1
-  fi
-}
-
 # 選択された --with-* フラグを、重複を除いた昇順カンマ区切りへ整形する。
 # 順序を固定するのは、フラグの指定順が違っても同じ集合なら記録が一致するようにする
 # ため（受け入れ条件「同じ版・同じフラグで生成し直すと記録が一致する」）。
@@ -10239,7 +10458,7 @@ origin_playbook_source() {
 # 生成物を直したときと同じく --force（および必要なら
 # --playbook-conflict-policy overwrite）で明示的に再生成すること。
 write_origin_record() {
-  local dest="$OUTPUT_DIR/$ORIGIN_REL_PATH" tmp rel h flags_csv origin_rels skipped_rel="" languages_csv pb_src pb_ref prev_mode
+  local dest="$OUTPUT_DIR/$ORIGIN_REL_PATH" tmp rel h line flags_csv origin_rels skipped_rel="" languages_csv pb_src pb_ref prev_mode
   dcb_guard_parent "$dest"
   if [[ ( -e "$dest" || -L "$dest" ) && "$FORCE" != "true" && "$UPGRADE" != "true" ]]; then
     echo "skip (exists): $dest"
@@ -10253,7 +10472,7 @@ write_origin_record() {
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
     [[ "$UPGRADE" == "true" ]] && break
-    if printf '%s' "$SKIPPED_DESTS" | grep -Fxq -- "$OUTPUT_DIR/$rel"; then
+    if printf '%s' "$SKIPPED_DESTS" | grep -Fx -- "$OUTPUT_DIR/$rel" >/dev/null; then
       skipped_rel="$rel"
       break
     fi
@@ -10312,6 +10531,18 @@ EOF
     done <<EOF
 $origin_rels
 EOF
+    # --upgrade は取り込み済みの記録（accepted:）のうち、今回「雛形が変わっておらず、現物 =
+    # accepted:」として温存したパスの分だけを引き継ぐ（UPGRADE_ACCEPT_KEEP。それ以外は落とす）。
+    if [[ "$UPGRADE" == "true" && -f "$dest" ]]; then
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        rel="${line#accepted:}"
+        rel="${rel%=*}"
+        case $'\n'"$origin_rels"$'\n' in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
+        case $'\n'"$UPGRADE_ACCEPT_KEEP" in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
+        echo "$line"
+      done < <(grep '^accepted:' "$dest" || true)
+    fi
   } > "$tmp"
   # --upgrade は既存 ORIGIN のモードを保つ（無ければ 644）。従来の経路は常に 644。
   prev_mode=""

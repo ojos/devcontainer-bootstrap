@@ -49,12 +49,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.16.0`
+- `v0.17.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.16.0
+TAG=v0.17.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -97,7 +97,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.8.0
+  --languages node,go --with-claude --playbook-version v0.8.1
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +110,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.16.0
+TAG=v0.17.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -140,7 +140,7 @@ bash "$d/doctor.sh" --target-dir ./myapp
 検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
 
 ```bash
-TAG=v0.16.0
+TAG=v0.17.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -259,6 +259,7 @@ fi
 - `--dry-run`（既定: 無効。生成予定のパスを `plan:` 行として並べるだけで、**ファイルを 1 つも書きません**）
 - `--force`（既定: 無効。既存ファイルの上書きを許可します。下記「再実行したときの挙動」参照）
 - `--upgrade`（既定: 無効。記録した入力で生成し直し、手を入れていないファイルだけを新しい版へ更新します。振り分け・終了コード・`--dry-run`・注意は下記「再実行したときの挙動」参照。`--force` とは同時に指定できません）
+- `--accept <path>...`（既定: 無効。手を入れて取り込みを済ませたファイルを、ORIGIN へ「取り込み済み」として記録します。生成・`--upgrade` とは別の 3 つ目の動作で、生成の引数や `--upgrade` とは同時に指定できません。`--output-dir`（既定: カレントディレクトリ）と `--dry-run` とは併用できます。下記「`--accept`: 手を入れたファイルを取り込み済みとして記録する」参照）
 - `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
@@ -297,18 +298,20 @@ fi
 
 #### `--upgrade` の振り分け
 
-`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 5 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
+`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 6 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
 
 | 状態 | 動作 | 出力 |
 |---|---|---|
 | 手を入れていない（現物 = 記録したハッシュ） | 新しい版で更新する | `write: <path> (upgraded)` |
-| 手を入れた（現物 ≠ 記録）、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える | `keep (modified)` / `keep (no record)` |
+| 手を入れて取り込み済みにした（現物 = `accepted:`）うえで、新しい版 = 記録（雛形が変わっていない） | 取り込むべき差分が無いので、現物を温存して報告するだけ。`.dcb-new` は置かず、残っている古い `.dcb-new` も消さない | `keep (modified, template unchanged)` |
+| 手を入れた（現物 ≠ 記録）が取り込み済みではない、または雛形が変わった、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える | `keep (modified)` / `keep (no record)` |
 | 新しい版で増えた（現物が無い） | 生成する | `write: <path> (new)` |
 | 手を入れたが新しい版と同じ内容 | 更新済みとして扱い、古い `.dcb-new` があれば消す | `up-to-date` |
 | 新しい版で生成されなくなった | **報告するだけで削除しない**。記録からは外す | `no longer generated (not deleted)` |
 
 - 現物がシンボリックリンクなら、たどらず手を入れた扱いにして `.dcb-new` を置きます。親ディレクトリが出力先の外を指すリンクなら、何も書かずに止めます（終了コード 1）。
 - 手を入れたファイルにも、ORIGIN には**新しい版のハッシュ**を記録します。次回の `--upgrade` で、その `.dcb-new` を取り込まないまま現物が新しい版と同じになれば、更新済みとして扱います。
+- ORIGIN の `accepted:` 行（下記 `--accept`）は、`--upgrade` が引き継ぎます。ただし、その回に `.dcb-new` を置いた（雛形が変わった）ファイル、または新しい版で更新したファイルの分は落とします。雛形が変わったあとの現物は、取り込み済みの記録と照らす前提が変わっているためです（`doctor.sh` は FAIL を出します）。
 - 手を入れたファイルは**自動では混ぜません**（3 方向マージはしません）。`.dcb-new` と現物を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消してください。`.dcb-new` の残りは `doctor.sh` が WARN で報告します（[Doctor 自己診断](#doctor-自己診断)）。
 
 終了コード:
@@ -324,6 +327,23 @@ fi
 `--upgrade --dry-run` は振り分けの計画（`plan: ...`）だけを出し、**生成先には何も書きません**（出力先がまだ無ければ作りません）。規範を URL から取得する場合だけ、取得のために一時ディレクトリを使います。
 
 `--upgrade` は `--force` と同時に指定できません（エラーで止まり、何も書きません）。出力先の既定は現在のディレクトリです（生成先の中で実行する想定）。
+
+#### `--accept`: 手を入れたファイルを取り込み済みとして記録する
+
+パッケージの指示どおりに手を入れ、`.dcb-new` の差分の取り込みを済ませたファイルは、ORIGIN の `hash:`（雛形のハッシュ）とは一致しないままです。`doctor.sh` はこれを「生成時から変化しています」と報告し続けます。`--accept` は、その現物のハッシュを `accepted:<path>=<sha256>` として ORIGIN へ記録し、取り込み済みの印を残します。ORIGIN を書くのは `bootstrap.sh` だけ、という分担を保つため、`doctor.sh` には書き込みを持たせていません。
+
+```bash
+bash bootstrap.sh --accept .devcontainer/devcontainer.json scripts/verify.sh
+bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run   # 予定だけを出す
+```
+
+- 受け付けるのは、ORIGIN に `hash:` の記録があり、現物が通常ファイルで、`<path>.dcb-new` が残っていないパスだけです。**1 つでも満たさなければ、何も書かずに終了コード 1 で止まります**（有効なパスだけを先に書くことはしません）。
+- `version=` と `hash:` は書き換えません。`hash:` は、`--upgrade` が「雛形が変わったか」を判定する基準として残します。
+- 現物が `hash:` と一致するパスは、`accepted:` を外して「変更なし」（`unchanged:`）と報告します。同じパスを再度渡すと、行を差し替えます（行は 1 行のまま）。
+- 生成の引数（`--project-name` / `--languages` / `--with-*` / `--without-*` / `--base-image` / `--force` / `--no-gitignore` / `--gitignore-targets` / 規範の取得元など）や `--upgrade` と一緒に渡すと、何も書かずに止まります。`--output-dir` と `--dry-run` は併用できます（`--dry-run` は `plan:` 行だけを出し、ORIGIN を変えません）。パスは出力先からの相対パスで指定します。
+- 取り込み済みの記録は、**その内容の現物だけ**を許します。記録したあとでさらに手を入れると、`doctor.sh` は再び FAIL を出します（本当の乖離は引き続き検知します）。
+- 雛形が変わっていない版への `--upgrade` では、取り込み済みにしたファイル（現物 = `accepted:`）に `.dcb-new` を置かず、`accepted:` も引き継ぎます。したがって、取り込みを済ませて `--accept` したファイルは、`--upgrade` を繰り返しても `doctor.sh --strict` が 0 で終わる状態を保てます。
+- 手を入れても `--accept` していないファイルには、雛形が変わっていなくても `.dcb-new` を置きます。`.dcb-new` を取り込む前に失った場合も、同じ版で `--upgrade` をやり直せば作り直されます（`.dcb-new` を置いた時点で `accepted:` は外れるため）。
 
 `--upgrade` の注意:
 
@@ -805,7 +825,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 装備の選択によらず常に生成するもの（`--dry-run` を付けると、この一覧が `plan:` 行としてそのまま確認できます）:
 
 - `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `.devcontainer/compose.yaml` の `app` サービスを参照）
-- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置）
+- `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置。`init: true` で PID 1 を Docker の組み込みの init にし、孤児になったプロセスを回収させる。PID 1 の `sleep infinity` は子を回収しないため、これが無いとゾンビが溜まり、数日でプロセス数の上限に達して `docker exec` もコンテナ内のセッションも止まる。既存の生成先は `--upgrade` で取り込んだあと、コンテナの作り直し（Rebuild）で効く）
 - `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY` / `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
 - `scripts/fix-mount-owner.sh`（永続 volume のマウント先を remoteUser 所有へ戻す。`postCreateCommand` の先頭で実行）
 - `scripts/install-ai-tools.sh`（`postCreateCommand` の後段で実行。`--with-<ai>` で選んだ AI CLI だけを導入する。上記「AI CLI 導入挙動」参照）
@@ -866,7 +886,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.16.0
+version=v0.17.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -877,11 +897,12 @@ input:manage-gitignore=true
 input:gitignore-targets=
 input:playbook=installed
 input:playbook-source=tag
-input:playbook-ref=v0.8.0
+input:playbook-ref=v0.8.1
 hash:.devcontainer/compose.yaml=<sha256>
 hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
 ...
+accepted:.devcontainer/devcontainer.json=<sha256>   # 取り込み済みにしたファイルがあるときだけ
 ```
 
 | キー | 意味 |
@@ -891,6 +912,7 @@ hash:.env.example=<sha256>
 | `inputs-format` | 入力の記録の書式の版（現在は `1`）。この行があるときだけ `input:` の行を読みます |
 | `input:<名前>` | 生成結果を左右する入力（下記）。同じ名前は 1 回だけ。値の `%` `改行` は `%25` `%0A` `%0D` で符号化します |
 | `hash:<相対パス>` | その生成物の sha256（`sha256sum` が無い環境では `shasum -a 256`、それも無ければ `openssl dgst -sha256` を使います） |
+| `accepted:<相対パス>` | `bootstrap.sh --accept` が記録する、取り込み済みの現物の sha256。取り込み済みにしたファイルがあるときだけ書く（無い ORIGIN も有効）。`doctor.sh` は現物がこの値と一致すれば変化として扱わない。`--upgrade` は引き継ぎ、その回に `.dcb-new` を置いたファイルの分は落とす |
 
 記録する入力と、記録しない入力:
 
@@ -1166,13 +1188,14 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 |---|---|
 | 記録が無い | `[WARN]` **診断できません。** この生成先が本機能より前に作られたか、記録が削除された可能性があります。記録の無い生成先への遡及はできません |
 | 記録が壊れている（`version=` 行が読めない等） | `[FAIL]` 診断できません |
-| 記録した生成物が現物と一致しない | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告 |
+| 記録した生成物が現物と一致しないが、`accepted:` の記録（`bootstrap.sh --accept`）とは一致する | `[OK]` 取り込み済みとして件数を報告 |
+| 記録した生成物が現物と一致せず、`accepted:` の記録とも一致しない | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告し、`bootstrap.sh --accept <path>` の案内を添える |
 | 記録した生成物が消えている | `[FAIL]` 該当ファイル名を添えて報告 |
 | 記録の版が `doctor.sh` 自身の版より古い | `[WARN]` 「上流が更新されています」と報告 |
 | 記録の版が一致（または新しい） | `[OK]` |
 | `*.dcb-new` が残っている | `[WARN]` 一覧と取り込み方を出す（下記） |
 
-**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` 以外の行、`%` の不正な並び、不正な `hash:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
+**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` / `accepted:<パス>=<sha256>` 以外の行、`%` の不正な並び、不正な `hash:` / `accepted:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
 
 **残っている `*.dcb-new` の報告**: `bootstrap.sh --upgrade` が、手を入れたファイルの隣へ置いた新しい版（`<path>.dcb-new`）が出力先に残っていれば、`[WARN]` でパスを一覧します（`.git` と `node_modules` は除き、シンボリックリンクはたどりません）。取り込み方は、**元のファイルと `.dcb-new` の中身を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消す**ことです。自動では混ぜません。`--strict` では、これも失格になります。
 

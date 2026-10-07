@@ -12,7 +12,7 @@ set -euo pipefail
 # この比較には限界がある。doctor.sh は公開リリースごとに取得し直す前提であり、
 # 古い doctor.sh をそのまま使い続けると、上流がその後さらに新しくなっていても
 # 「上流が更新されています」を報告できない。診断結果にもこの限界を明示する。
-DCB_VERSION="v0.16.0"
+DCB_VERSION="v0.17.0"
 ORIGIN_REL_PATH=".devcontainer/ORIGIN"
 
 TARGET_DIR="$PWD"
@@ -100,7 +100,8 @@ dcb_version_lt() {
 # 見て通す（後方互換。診断は version= とハッシュで従来どおり成立する）。
 #
 # 行の文法: 空行・# 行のほかは version= / flags= / inputs-format= / input:<名前>= /
-# hash:<パス>=<sha256 の 64 桁> のどれかであること。読み飛ばして黙って通さない。
+# hash:<パス>=<sha256 の 64 桁> / accepted:<パス>=<sha256 の 64 桁>（bootstrap.sh --accept が
+# 書く取り込み済みの記録）のどれかであること。読み飛ばして黙って通さない。
 check_origin_format() {
   local origin_file="$1" line bad="" v val mode playbook source lang l_rest
   # 最終行が改行で終わっていなくても検査する。
@@ -115,6 +116,11 @@ check_origin_format() {
         # sha256 に = は入らないが、パスには入りうる。最後の = で区切る。
         val="${line##*=}"
         if ! [[ "$val" =~ ^[0-9a-f]{64}$ ]] || [[ -z "${line#hash:}" || "${line#hash:}" == "=$val" ]]; then bad="$bad [hash の行が不正: ${line%=*}]"; fi
+        ;;
+      accepted:?*=*)
+        # hash: の行と同じ形（パス + 最後の = + sha256 の 64 桁）。
+        val="${line##*=}"
+        if ! [[ "$val" =~ ^[0-9a-f]{64}$ ]] || [[ -z "${line#accepted:}" || "${line#accepted:}" == "=$val" ]]; then bad="$bad [accepted の行が不正: ${line%=*}]"; fi
         ;;
       *) bad="$bad [認識できない行: $line]" ;;
     esac
@@ -264,7 +270,7 @@ check_origin_record() {
 
   check_origin_format "$origin_file" || return 0
 
-  local hash_count=0 unchanged_count=0 changed="" missing="" line rel recorded_hash actual_hash
+  local hash_count=0 unchanged_count=0 accepted_count=0 changed="" missing="" line rel recorded_hash actual_hash accepted_hash
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     rel="${line#hash:}"
@@ -280,7 +286,14 @@ check_origin_record() {
     if [[ "$actual_hash" == "$recorded_hash" ]]; then
       unchanged_count=$((unchanged_count + 1))
     else
-      changed="$changed $rel"
+      # 手を入れた現物でも、取り込み済みとして記録した（accepted:）内容と一致すれば乖離としない。
+      # その後さらに手を入れれば accepted とも一致せず、changed に戻る。
+      accepted_hash="$(awk -v k="accepted:$rel=" 'index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$origin_file")"
+      if [[ -n "$accepted_hash" && "$actual_hash" == "$accepted_hash" ]]; then
+        accepted_count=$((accepted_count + 1))
+      else
+        changed="$changed $rel"
+      fi
     fi
   done < <(grep '^hash:' "$origin_file" || true)
 
@@ -290,10 +303,13 @@ check_origin_record() {
   fi
 
   if [[ -n "$changed" ]]; then
-    ng "changed since generation:$changed"
+    ng "changed since generation:$changed（取り込みを済ませた変更なら、bootstrap.sh --accept <path> で取り込み済みとして記録できます。そうでなければ、変更を戻すか .dcb-new を取り込んでください）"
   fi
   if [[ -n "$missing" ]]; then
     ng "recorded in origin but missing:$missing"
+  fi
+  if [[ "$accepted_count" -gt 0 ]]; then
+    ok "accepted as merged ($accepted_count file(s)): 取り込み済みとして記録した内容と一致しています"
   fi
   if [[ -z "$changed" && -z "$missing" ]]; then
     ok "unchanged since generation ($unchanged_count file(s))"

@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Termux:Widget のショートカットの雛形。~/.shortcuts/ に 1 ボタン 1 ファイルで置き、chmod +x する。
-# <別名> は ~/.ssh/config の Host、<操作> は attach <名前> / up <名前> / ls のどれか。
+# <別名> は ~/.ssh/config の Host、<操作> は attach <名前> / up <名前> / ls / doctor <名前> / rebuild <名前> のどれか
+# （入れないときの切り分けと作り直しも、ボタンにできる。説明は dev help <サブコマンド>）。
 # dev を .local/bin/dev と書くのは、ssh の非対話のコマンドでは外部の機械の ~/.profile が
 # 読まれず、~/.local/bin が PATH に無いため（ssh のコマンドはホームディレクトリで動くので相対で届く）。
 exec ssh -t <別名> .local/bin/dev <操作>

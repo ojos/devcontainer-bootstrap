@@ -6,6 +6,28 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.17.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.5.0 以降のまま**（新しい雛形を必須にしない）。第二意見の雛形の小さな修正（ojos/ai-packages-dev#462 / ojos/ai-packages-dev#471）が ai-playbook v0.8.1 に入っているので、`--playbook-version v0.8.1` を勧める。
+- **生成する `compose.yaml` の `app` サービスに `init: true` を足した**（ojos/ai-packages-dev#469）。PID 1 の `sleep infinity` は、親を失ったプロセスを回収しない。コンテナの中で孤児になったプロセス（シェル・git・テストの子など）がゾンビとして溜まり続け、数日でプロセス数の上限に達して、`docker exec`（エディタの接続）もコンテナの中のセッションも止まっていた（実測: `pids.current` 18034 / `pids.max` 18039、別の環境ではゾンビ 28517 個）。`init: true` で PID 1 を Docker の組み込みの init にし、孤児を回収させる。**効かせるには、コンテナの作り直し（Rebuild）が要る。**
+- **`bootstrap.sh --accept <path>...` を足した**（ojos/ai-packages-dev#461）。パッケージの指示どおりに手を入れ、取り込みを済ませたファイルを、`.devcontainer/ORIGIN` に `accepted:<path>=<ハッシュ>` として記録する。`doctor.sh` は、現物が取り込み済みの記録と一致すれば OK とし（`accepted as merged`）、記録とも雛形とも違えば従来どおり FAIL にする。これまでは手を入れたファイルで `doctor.sh` が常に FAIL し、利用側では解消できなかった（ORIGIN を手で書き換えるしかなかった）。受け付けるのは、ORIGIN に記録があり、現物があり、`.dcb-new` が残っていないパスだけ。`--output-dir` と `--dry-run` だけと併用できる。
+- **`--upgrade` は、雛形が変わっていない版で、取り込み済みにしたファイルに `.dcb-new` を置かなくなった**（ojos/ai-packages-dev#461）。「新しい版 = 記録」かつ「現物 = `accepted:`」のときだけ温存して `keep (modified, template unchanged)` と報告する。取り込み済みにしていないファイルには従来どおり置く（取り込む前に失った `.dcb-new` も、同じ版の `--upgrade` で作り直される）。`accepted:` は、温存したファイルの分だけを引き継ぐ。
+- **生成物の末尾を改行で終えるようにした**（ojos/ai-packages-dev#462）。`.env.example`・`scripts/*.sh`・`compose.yaml`・workflows など 25 本の末尾に改行が無く、手で整えた版や `.dcb-new` との diff に `\ No newline at end of file` が出ていた。**生成物の中身が変わる**ので、`--upgrade` で手を入れていないファイルは更新され、手を入れたファイルには `.dcb-new` が置かれる。
+- **`--upgrade` のたびに `.gitignore` の管理区画の手前へ空行が 1 行ずつ累積する不具合を直した**（ojos/ai-packages-dev#460）。累積していた空行も、次の `--upgrade` で 1 行に戻る。
+- **配布スクリプトの「パイプの後ろの `grep -q`」を取り除いた**（ojos/ai-packages-dev#471）。`grep -q` は一致した時点で読むのをやめるので、生産側が SIGPIPE を受けて `printf: write error: Broken pipe` を出すか、`pipefail` の下で一致を不一致と取り違える。`bootstrap.sh` とそのヒアドキュメントの中の配布スクリプトの 13 か所を、`-q` を外して `>/dev/null` を付ける形にした。
+- **devhost に `dev rebuild` / `dev doctor` / `dev help` を足した**（ojos/ai-packages-dev#472 / ojos/ai-packages-dev#475）。`PACKAGE_ARCHIVE.tar.gz` の `devhost/` に入る。
+  - `dev rebuild <名前> [--pull]` は、ユニット `dev-up@<名前>` が動いていれば止めてから作り直し、起こし直す（作り直しの途中でユニットの `up` と重ならない）。中断（ssh の切断を含む）でも、止めたユニットは起こし直す。`--pull` は作り直す前に `git pull --ff-only` する。
+  - `dev doctor <名前>` は、コンテナの状態、exec の疎通、プロセス数（上位の cgroup まで遡る）、ゾンビの数、`oom_kill`、ユニットの状態を 1 回で出す。「コンテナは動いているのに入れない」状態を、ホストに入らずに見分ける。
+  - `dev attach` は、入れなかったときに `dev doctor` と `dev rebuild` を案内する。
+  - `dev help <サブコマンド>` の説明は、devhost の README の「コマンドの説明」と照合している。
+
+### 移行
+- **`compose.yaml` の `init: true` は、`--upgrade` で取り込んだあと、コンテナを作り直すまで効かない。** 手を入れた `compose.yaml` には `.dcb-new` が置かれるので、`command: sleep infinity` の次の行へ `init: true` を写してください。作り直す前に溜まったゾンビは、作り直しで消える。
+- **生成物の末尾の改行（ojos/ai-packages-dev#462）で、手を入れたファイルには `.dcb-new` が置かれる。** 中身の違いが末尾の改行だけなら、`.dcb-new` で置き換えてから手を入れ直すか、末尾に改行を足して `.dcb-new` を消してください。取り込みが済んだら `bash bootstrap.sh --accept <path>` で取り込み済みにすると、次から `doctor.sh` が FAIL を出さなくなる。
+- **規範（ai-playbook）も v0.8.1 へ上げるには、`--upgrade --playbook-version v0.8.1` と指定する。** `--upgrade` は、明示しなければ ORIGIN に記録した規範の版（`input:playbook-ref`）を使い回す。指定しなくても、DCB 自身の生成物（`compose.yaml`・`scripts/*.sh` など）は新しい版になるが、規範から写す `scripts/second-opinion-review.sh` などは前の版のまま。
+- `--accept` を使わない場合のふるまい（手を入れたファイルに `.dcb-new` を置く・`doctor.sh` が FAIL を出す）は従来と同じ。
+
 ## v0.16.0
 
 ### Summary

@@ -6,7 +6,7 @@ devcontainer を起こし、入る**ための道具一式です。どのプロ�
 
 | ファイル | 置き場所（外部の機械 / 端末） | 役割 |
 |---|---|---|
-| `dev.sh` | `~/.local/bin/dev`（外部の機械） | 入口の道具。`ls` / `up` / `attach` / `supervise` |
+| `dev.sh` | `~/.local/bin/dev`（外部の機械） | 入口の道具。`ls` / `up` / `attach` / `supervise` / `rebuild` / `doctor` / `help` |
 | `dev-up@.service` | `~/.config/systemd/user/`（外部の機械） | 起動時と、コンテナが止まったときに起こし直すユニット |
 | `projects.example` | `~/.config/dev/projects`（外部の機械） | 設定ファイルの雛形（名前 → パス） |
 | `ssh_config.plain.example` | 端末の `~/.ssh/config` | ssh の入口の断片（経路: 素の SSH） |
@@ -42,6 +42,7 @@ AppArmor だけを外しても、seccomp が先に止めるので動きません
 | ① 電源・OS | 何も届かない | **範囲外**（物理的な対処） |
 | ② 外部の機械への SSH の入口（経路そのもの） | ssh が通らない | **範囲外**（経路の構築・運用。下記「SSH の経路」） |
 | ③ devcontainer | `dev ls` の CONTAINER が running でない | **自動**（`dev-up@<名前>`）。待てないときは `dev up <名前>` |
+| ③' devcontainer（動いているのに入れない） | CONTAINER は running だが `dev attach` が通らない | **手で**（`dev doctor <名前>` で切り分け、`dev rebuild <名前>` で作り直す） |
 | ④ tmux とその中のエージェント | `dev ls` の TMUX が none | **手で**（`dev attach <名前>`。指示の無いエージェントを自動で起こしても作業は進まない） |
 
 **特定のクラウドへの認証（AWS など）は devhost に組み込みません。** 認証は `dev attach` で
@@ -56,7 +57,7 @@ devhost は独立したリリースを持たず、**devcontainer-bootstrap（DCB
 手順の詳細と検証の意味は DCB の README の「devhost」の節を参照してください。
 
 ```bash
-TAG=v0.16.0   # DCB の最新安定リリース（devhost を同梱したのは v0.14.0 以降）
+TAG=v0.17.0   # DCB の最新安定リリース（devhost を同梱したのは v0.14.0 以降）
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
@@ -139,26 +140,160 @@ devcontainer.json が `shutdownAction: stopCompose` のプロジェクトでは�
 （0 以外で抜けるので `on-failure` でも）30 秒後に起こし直します。VS Code の停止も、docker kill も、
 デーモンの再起動も同じ扱いです。
 
-**引き換えに、意図して止めたいときはユニットを先に止めます。** Rebuild Container の前も同じです
-（止めずに Rebuild すると、30 秒後にユニットの `up` が VS Code のビルドと重なりえます）。
-
-```bash
-systemctl --user stop dev-up@<名前>.service    # 戻すのをやめる（コンテナは止めない）
-# … Rebuild や docker compose stop など …
-systemctl --user start dev-up@<名前>.service   # 再び見張る（止まっていれば起こす）
-```
+**引き換えに、意図して止めたいときはユニットを先に止めます。** 作り直しは `dev rebuild <名前>` が
+ユニットの停止と起こし直しまで行います（止めずに作り直すと、30 秒後にユニットの `up` が作り直しの
+途中に重なりえます。VS Code の Rebuild Container も同じなので、VS Code から作り直すときは先に
+`systemctl --user stop dev-up@<名前>.service` で止め、終わったら `start` で戻します）。
+作り直しを効かせる必要があるとき（例: compose の定義を変えたとき）も `dev rebuild` を使います。
 
 ## 使い方
 
+| コマンド | 何をするか |
+|---|---|
+| `dev ls` | 登録したプロジェクトの状態を並べる |
+| `dev up <名前>` | devcontainer を起こす |
+| `dev attach <名前>` | コンテナの中の tmux に入る |
+| `dev supervise <名前>` | 起こして止まるまで待つ（ユニットから使う） |
+| `dev rebuild <名前> [--pull]` | コンテナを作り直す |
+| `dev doctor <名前>` | 「動いているのに入れない」を見分ける |
+| `dev help [サブコマンド]` | 説明を出す |
+
+オプション・呼ぶ順序・終了コード・失敗したときの案内は、次の「コマンドの説明」にあります。
+同じ内容を端末で `dev help <サブコマンド>` として読めます（説明文の正本は `dev.sh` で、
+下のブロックは `dev help <サブコマンド>` の出力をそのまま載せたものです。`selftest.sh` が一致を照合します）。
+
+## コマンドの説明
+
+### dev ls
+
 ```text
-dev ls                   NAME / CONTAINER / UNIT / TMUX を 1 行ずつ
-dev up <名前>             devcontainer up --workspace-folder <パス>
-dev attach <名前>         devcontainer exec --workspace-folder <パス> tmux new-session -A -s <セッション>
+dev ls — 登録したプロジェクトの状態を並べる。
+
+使い方:
+  dev ls
+
+NAME / CONTAINER / UNIT / TMUX を 1 行ずつ出す。
+  CONTAINER  docker の状態（running / exited など）。無ければ none
+  UNIT       dev-up@<名前> の systemd のユニットの状態。systemctl が無ければ -
+  TMUX       コンテナの中の tmux のセッションの有無（CONTAINER が running のときだけ）
+CONTAINER が running でも入れないことがある。そのときは dev doctor <名前>。
+
+終了コード: 0 = 成功 / 2 = 使い方か設定ファイルの誤り
 ```
 
-- **`attach` はコンテナを起こしません。** 止まっていれば `dev up` を案内して止まります（ユニットが
-  起こし直している最中に 2 本目の `up` を重ねないため）。
-- 終了コードは 0 = 成功 / 1 = 実行の失敗 / 2 = 使い方か設定の誤り（未登録の名前を含む）。
+### dev up
+
+```text
+dev up — devcontainer を起こす（在れば何もしない）。
+
+使い方:
+  dev up <名前>
+
+devcontainer up --workspace-folder <パス> を呼ぶ。作り直しはしない（作り直すときは dev rebuild）。
+
+終了コード: 0 = 成功 / 1 = 起動の失敗 / 2 = 使い方か設定ファイルの誤り（未登録の名前を含む）
+失敗したとき: 経過の出力を読む。コンテナが戻らないときは dev doctor <名前>。
+```
+
+### dev attach
+
+```text
+dev attach — コンテナの中の tmux に入る（無ければ作る）。
+
+使い方:
+  dev attach <名前>
+
+devcontainer exec で tmux new-session -A -s <セッション名> を呼ぶ。セッション名の既定は main で、
+設定ファイルの tmux_session=<名前> で変えられる。コンテナは起こさない（ユニットが起こし直している
+最中に 2 本目の up を重ねないため）。
+
+終了コード: 0 = 成功 / 1 = コンテナが動いていない、または中へ入れなかった・セッションが異常終了した
+            （この 2 つは区別できない。元の終了コードは案内の文面に出す） / 2 = 使い方か設定の誤り
+失敗したとき:
+  コンテナが動いていない  dev up <名前>（ユニットを有効にしていれば 30 秒ほどで戻る）
+  入れなかった           dev doctor <名前> で切り分け、直らなければ dev rebuild <名前>
+```
+
+### dev supervise
+
+```text
+dev supervise — 起こして、止まるまで待つ（systemd のユニット dev-up@.service の ExecStart）。
+
+使い方:
+  dev supervise <名前>
+
+devcontainer up で起こし、docker wait でコンテナが止まるまで待つ。止まった理由を問わず、
+必ず 0 以外で終わる（ユニットの Restart=always が起こし直す）。人が直接使うものではない。
+意図して止めたいときはユニットを先に止める（dev rebuild は自分で止めて起こし直す）。
+
+終了コード: 1 = コンテナが止まった、または起こせなかった / 2 = 使い方か設定ファイルの誤り
+```
+
+### dev rebuild
+
+```text
+dev rebuild — コンテナを作り直す。
+
+使い方:
+  dev rebuild <名前> [--pull]
+
+呼ぶ順序:
+  1. --pull のときだけ git -C <パス> pull --ff-only。失敗したら、何も止めずに終わる
+  2. ユニット dev-up@<名前> が inactive / failed / unknown（ユニットを入れていない）でなければ止める
+     （起こし直しの待機中の activating も止める。止める必要の無いとき、または systemctl が無いときは
+     触らない）。systemctl はあるのに状態の語が得られないとき（問い合わせの失敗）は、
+     up と重なる危険を避けるため、何も作り直さずに 1 で止まる
+     （確かめる: systemctl --user status dev-up@<名前>）
+  3. devcontainer up --workspace-folder <パス> --remove-existing-container
+  4. 2 で止めたときだけ、ユニットを起こし直す。3 が失敗しても、INT / HUP / TERM で中断されても
+     （ssh の切断など）起こし直してから終わる（中断の終了コードは 130 / 129 / 143）
+ユニットを先に止めるのは、作り直しの途中でユニットの up が重ならないようにするため。
+各プロジェクトの compose や devcontainer.json は書き換えない。
+
+オプション:
+  --pull   作り直す前に git pull --ff-only する（利用者が明示したときだけ）
+
+終了コード: 0 = 作り直した / 1 = 失敗（pull・ユニットの停止・作り直し） / 2 = 使い方か設定の誤り
+失敗したとき: pull の失敗は手で解消してからやり直す。作り直しの失敗は出力を読み、dev doctor <名前>。
+```
+
+### dev doctor
+
+```text
+dev doctor — 「コンテナは動いているのに入れない」を見分ける。
+
+使い方:
+  dev doctor <名前>
+
+出す項目: コンテナの有無と状態 / exec が実際に通るか / cgroup の pids.current と pids.max /
+pids の上限に当たった回数 / ゾンビの数 / memory.events の oom_kill / ユニットの状態 / ユニットのログの末尾。
+cgroup は /proc/<コンテナの PID>/cgroup から求める（cgroup v2）。
+pids の上限は、コンテナの cgroup から根まで遡り、上限のある階層のうち現在値 / 上限 の比が最大のもので
+判定して、その階層を表示する（systemd の slice の TasksMax などに当たっていても見逃さない）。
+exec は 30 秒（環境変数 DEV_EXEC_TIMEOUT で変えられる。1 以上の整数）で返らなければ FAIL にする。
+TERM を送っても止まらないときは、さらに 5 秒（DEV_EXEC_KILL_GRACE。1 以上の整数）後に KILL する。
+
+判定:
+  FAIL  exec が通らないか返らない / pids が上限の 90% 以上 / pids.max が 0 /
+        コンテナが無いか動いていない
+  WARN  pids の上限に当たった回数が 1 以上 / ゾンビが 100 以上 / oom_kill が 1 以上
+  （読めない項目、pids.max が数でも max でもない値のときも WARN）
+
+終了コード: 0 = 問題なし / 1 = FAIL がある / 2 = 使い方か設定ファイルの誤り / 3 = WARN だけ
+失敗したとき: FAIL なら dev rebuild <名前> で作り直す。WARN だけなら原因を調べてから判断する。
+```
+
+### dev help
+
+```text
+dev help — サブコマンドの説明を出す。
+
+使い方:
+  dev help                  使い方の一覧
+  dev help <サブコマンド>    ls / up / attach / supervise / rebuild / doctor の説明
+
+終了コード: 0 = 成功 / 2 = 知らないサブコマンド
+```
 
 ## SSH の経路
 
@@ -245,5 +380,9 @@ grep -cF '<見分けの付く名前>' ~/.ssh/authorized_keys     # 0 である�
 bash devhost/selftest.sh   # DEVHOST_SELFTEST_PASS
 ```
 
-偽の devcontainer / docker / tmux / systemctl を PATH に置き、組み立てるコマンド・未登録の名前の拒否・
-設定ファイルの誤り・ユニットの要の行を見ます。偽物を本物に合わせたところは `selftest.sh` の冒頭にあります。
+偽の devcontainer / docker / tmux / systemctl / git / ps / journalctl を PATH に置き、組み立てるコマンド・
+未登録の名前の拒否・設定ファイルの誤り・`rebuild` と `doctor` の振る舞い・ユニットの要の行を見ます。
+加えて、上の「コマンドの説明」の各ブロックが `dev help` の出力と一致すること、載せたサブコマンドの集合が
+`dev` の受け付ける集合と一致することを照合します（説明の 1 行を書き換えた複製では落ちることも確かめます）。偽物を本物に合わせたところは `selftest.sh` の冒頭にあります。
+`dev doctor` が読む /proc と cgroup の根は、環境変数 `DEV_PROC_ROOT` / `DEV_CGROUP_ROOT` で差し替えられます
+（自己試験が偽の木を渡すためで、既定は本物の `/proc` と `/sys/fs/cgroup` です）。
