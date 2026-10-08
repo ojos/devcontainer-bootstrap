@@ -6,6 +6,20 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.18.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.5.0 以降のまま**（新しい雛形を必須にしない）。ai-playbook v0.8.2 は README だけの変更なので、`--playbook-version v0.8.2` にしても生成物は変わらない（変わるのは版の記録だけ。`.ai-playbook/VERSION` と、`.devcontainer/ORIGIN` の `input:playbook-ref`）。
+- **`bootstrap.sh` / `doctor.sh` / 生成物は v0.17.0 から変わらない**（版の記録 `DCB_VERSION` を除く）。`--upgrade` で追従すると、書き換わるのは `.devcontainer/ORIGIN` の版の記録だけで、手を入れたファイルにだけ従来どおり `.dcb-new` が置かれる。
+- **README に 3 パッケージ（ai-playbook / DCB / devcontainer-host）の関係を明示した**（ojos/ai-packages-dev#494）。それぞれ単体で使え、DCB を中心に組み合わせると効果が最大になる。DCB はほかの 2 つが着地する devcontainer を作り、ai-playbook の規範はその中に置かれ、devhost はそのコンテナを外部の機械で動かし続ける。devhost の節は、移り先の案内に加えて「devcontainer を外部の機械で常駐させる道具（DCB の生成物と組み合わせると前提が揃う）」として紹介する形にした。
+- **テストだけの変更**（ojos/ai-packages-dev#480）: テストの起動関数でベースイメージを固定し、`bootstrap.sh` を起動するたびのレジストリへの問い合わせをなくした。配布物は変わらない。
+- **`SHA256SUMS` に `PACKAGE_ARCHIVE.tar.gz` を加えた**（ojos/ai-packages-dev#491）。attestation の対象は `SHA256SUMS` 1 つなので、アーカイブが含まれていないと attestation からアーカイブまで辿れなかった。README の入手手順も、`SHA256SUMS` の行を抜き出して検証する形と、照合に失敗したら展開しない形（`&&` でつなぐ）に合わせた。
+- **devhost の同梱をやめた**（ojos/ai-packages-dev#486）。`PACKAGE_ARCHIVE.tar.gz` の `devhost/` と、README の「devhost」の節が指していた入手方法は、この版から無い。devhost（SSH で届く外部の機械で devcontainer を保つ道具。コマンド `dev`）は、独自の版を持つ公開リポジトリ `ojos/devcontainer-host` のリリースで配る。入手の手順は、そのリポジトリの README の「devhost を入手する」にある。`bootstrap.sh` / `doctor.sh` / 生成物は変わらない。
+
+### 移行
+- **DCB v0.14.0〜v0.17.0 に同梱されていた `dev` を使っている場合**: その `dev self-update` は取得先が DCB のリリースなので、この版以降の最新リリースでは `devhost/` が無く、何も置き換えずに止まる（終了コード 1）。**手で 1 度だけ入れ直す。** `ojos/devcontainer-host` のリリースから `RELEASE-MANIFEST.json` と `PACKAGE_ARCHIVE.tar.gz` を取得し、マニフェストの `checksums` と照合してから、`dev.sh` を `~/.local/bin/dev` へ置き直す。以降の `dev self-update` は `ojos/devcontainer-host` のリリースから更新できる。DCB の v0.17.0 以前のリリースに残る `devhost/` を取り出して使い続けることもできるが、更新は止まる。
+- DCB の生成物は変わらないので、`--upgrade` での追従は従来どおり（手を入れたファイルにだけ `.dcb-new` が置かれる）。
+
 ## v0.17.0
 
 ### Summary

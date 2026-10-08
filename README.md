@@ -26,6 +26,29 @@
 そのため、AI ルールだけが必要な場合は、このパッケージを介さず ai-playbook を直接導入できます。
 このパッケージは devcontainer と対応言語（node / go / python / php / rust / ruby）を前提とするため、それ以外の環境では ai-playbook 側の導入手順を使ってください。
 
+## 3 パッケージの関係
+
+<!-- package-relations:begin -->
+ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）は、それぞれ単体で使えます。DCB を中心に組み合わせると、効果が最大になります。
+
+| パッケージ | 単体での用途 | 配布先 |
+|---|---|---|
+| ai-playbook | AI 運用の規範（ルール）だけを、プロジェクトへ入れる | ojos/ai-playbook |
+| DCB | プロジェクトの devcontainer を 1 コマンドで生成する | ojos/devcontainer-bootstrap |
+| devhost | 任意の `devcontainer.json` を持つプロジェクトを、SSH で届く外部の機械で常駐させる | ojos/devcontainer-host |
+
+**DCB が中心です。** DCB は、ほかの 2 つが着地する場所（プロジェクトの devcontainer）を作ります。ai-playbook の規範はその中に置かれ（DCB が配布機構で、正本は ai-playbook です）、devhost はそのコンテナを外部の機械で動かし続けます。
+
+- **DCB と ai-playbook**: DCB が、生成先のプロジェクトへ規範を配置します（`--playbook-version` などで取得元を指定する。新しい版へ移るときは、`--upgrade` に新しい `--playbook-version` を渡す）。DCB は規範の内容を持ちません。
+- **DCB と devhost**: DCB の生成物には、devhost が前提にする、または助かるもの（tmux、compose の `init: true`、codex のサンドボックスの設定（`--with-codex` のとき）、UID の合わせ込み）が入っています。devhost は DCB の生成物でなくても使えますが、DCB の生成物ならこれらが最初から揃います。理由と意味は devhost の README の「DCB と一緒に使うと揃うもの」にあります。
+- **ai-playbook と devhost**: 今は直接の関係がありません。
+
+**入れ方は 2 段です。** 置く場所と単位が違うため、DCB のオプションでは devhost は入りません（DCB が書き込むのは生成先のプロジェクトの中だけで、外部の機械のホームやユーザーの systemd には書き込みません）。
+
+1. プロジェクトごとに、プロジェクトの中へ DCB で devcontainer（と、必要なら規範）を生成する。
+2. 外部の機械ごとに、外部の機械のホームへ devhost を入れ、設定ファイル（`projects`）にそのプロジェクトを 1 行足す。
+<!-- package-relations:end -->
+
 ## 実行前提コマンド
 
 `bootstrap.sh` は起動直後に次のコマンドの実在を検査し、**1 つでも欠けていればファイルを 1 つも書かずにエラー終了**します（`error: required command not found: <cmd>`）。
@@ -49,12 +72,12 @@
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.17.0`
+- `v0.18.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.17.0
+TAG=v0.18.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -88,7 +111,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 >
 > `SHA256SUMS` はスクリプトと同じリリースから同じ経路で取得します。**リリースを書き換えられる立場なら、スクリプトと `SHA256SUMS` の両方を同時に差し替えられます。**
 >
-> 現在のリリースは署名されていません。**この手順は、リリース自体の改ざんには対抗しません。** 取得元のタグを固定し、公開リポジトリのリリース履歴を信頼できる範囲で使ってください。
+> **この手順だけでは、リリース自体の改ざんには対抗しません。** リリースには artifact attestation が付いており、任意で検証できます（[任意: 署名の検証](#任意-署名の検証artifact-attestation)。GitHub CLI が要ります）。これを検証しない場合は、リリースの書き換えを防げません。取得元のタグを固定し、公開リポジトリのリリース履歴を信頼できる範囲で使ってください。
 
 AI 共通ルールも配置する場合は、ルールの取得元を指定します。一時ディレクトリから実行すると隣接チェックアウトが存在しないため、`--playbook-version` または `--playbook-from` が必要です（[AI 共通ルールの配置](#ai-共通ルールの配置)）。
 
@@ -97,7 +120,7 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.8.1
+  --languages node,go --with-claude --playbook-version v0.8.2
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
@@ -110,7 +133,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.17.0
+TAG=v0.18.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -123,7 +146,11 @@ if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c=
 bash "$d/doctor.sh" --target-dir ./myapp
 ```
 
-診断のたびに取得すれば、生成先のリポジトリへ `doctor.sh` を混入させずに済みます。手元へ置いて繰り返し使う場合は、`bootstrap.sh` と `doctor.sh` を同じディレクトリへ取得し、行を抜き出さずに `$sha256c -c SHA256SUMS` で両方を検証してください。
+診断のたびに取得すれば、生成先のリポジトリへ `doctor.sh` を混入させずに済みます。手元へ置いて繰り返し使う場合は、`bootstrap.sh` と `doctor.sh` を同じディレクトリへ取得し、`SHA256SUMS` から両方の行を抜き出して検証してください（`SHA256SUMS` は `PACKAGE_ARCHIVE.tar.gz` の行も持つため、アーカイブを取得していなければ行を抜き出さない `$sha256c -c SHA256SUMS` は失敗します）。
+
+```bash
+grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
+```
 
 ### リリース資産
 
@@ -133,56 +160,57 @@ bash "$d/doctor.sh" --target-dir ./myapp
 |---|---|
 | `bootstrap.sh` | 生成コマンド本体。単体で動作します |
 | `doctor.sh` | 生成後の自己診断コマンド。単体で動作します |
-| `SHA256SUMS` | 上の 2 つのチェックサム。`sha256sum -c SHA256SUMS`（macOS では `shasum -a 256 -c SHA256SUMS`）で**取得の破損**を検出します（守る範囲は [公開リリースからの利用](#公開リリースからの利用) の但し書きを参照）。片方だけ取得した場合は、その行を `grep` で抜き出して `-c -` へ渡します |
-| `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md` / **`devhost/`**）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合、**devhost を入手する場合**に使います |
+| `SHA256SUMS` | `bootstrap.sh` / `doctor.sh` / `PACKAGE_ARCHIVE.tar.gz` のチェックサム。3 つすべてを取得したなら `sha256sum -c SHA256SUMS`（macOS では `shasum -a 256 -c SHA256SUMS`）で**取得の破損**を検出します（守る範囲は [公開リリースからの利用](#公開リリースからの利用) の但し書きを参照）。一部だけ取得した場合は、その行を `grep` で抜き出して `-c -` へ渡します |
+| `PACKAGE_ARCHIVE.tar.gz` | そのリリース時点の公開リポジトリのツリー一式（`.git` と生成した 3 資産を除く。`bootstrap.sh` / `doctor.sh` / この README / `LICENSE` / `CHANGELOG.md`）。スクリプトと手順書を 1 つの塊として手元へ固定したい場合や、リリース間の差分を追いたい場合に使います |
 | `RELEASE-MANIFEST.json` | パッケージ名・版・資産一覧・チェックサムを機械可読にまとめたもの。`assets` がそのリリースに添付された資産の一覧、`checksums` が `PACKAGE_ARCHIVE.tar.gz` と `SHA256SUMS` のハッシュです |
 
-検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` のハッシュを持つため、マニフェストを起点に配布物全体まで辿れます。
+検証は 2 段構えです。`RELEASE-MANIFEST.json` が `SHA256SUMS` と `PACKAGE_ARCHIVE.tar.gz` のハッシュを持ち、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` / `PACKAGE_ARCHIVE.tar.gz` のハッシュを持ちます。
+**どの検証が何を保証するか**は次のとおりです。
+
+- この 2 段（マニフェスト → `SHA256SUMS` → 各ファイル）が検出するのは、取得の破損と、公開物どうしの食い違いです。マニフェストも `SHA256SUMS` と同じ経路で取得するため、リリースを書き換えられる立場なら両方を揃えて差し替えられます。
+- 後述の attestation が保証するのは、`SHA256SUMS` 1 つです。`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` / `PACKAGE_ARCHIVE.tar.gz` のハッシュを持つので、attestation の検証に続けて `SHA256SUMS` と取得物を照合すれば、この 3 つと、アーカイブの中身（`CHANGELOG.md` や README など）まで辿れます。**個別の資産として添付される `RELEASE-MANIFEST.json` は `SHA256SUMS` に載らないため、attestation の保証に入りません**（アーカイブの中の `CHANGELOG.md` は保証の範囲内で、アーカイブの外に個別に添付されたものがあれば範囲外です）。
+- **`PACKAGE_ARCHIVE.tar.gz` が `SHA256SUMS` に載るのは、v0.18.0 からです。** それより前の版（v0.17.0 まで）の `SHA256SUMS` には、アーカイブの行がありません。その場合、`SHA256SUMS` の照合（下の 2 行目）はアーカイブを確かめず、attestation もアーカイブには及びません。アーカイブはマニフェストのハッシュ（1 行目）だけで確かめることになり、マニフェストも attestation の保証外です。古い版のアーカイブを attestation の保証つきで使うことはできないので、保証が要るときは、アーカイブの行がある版を使ってください（`grep PACKAGE_ARCHIVE.tar.gz SHA256SUMS` で行の有無を確かめられます）。
+
+照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.17.0
+TAG=v0.18.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
 curl -sSL "${BASE}/SHA256SUMS" -o SHA256SUMS
+curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
+curl -sSL "${BASE}/doctor.sh" -o doctor.sh
 
 # sha256sum は GNU coreutils のコマンドで、macOS には無い。shasum へ分岐する。
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 
 # 1. マニフェストが記録したハッシュと実物を突き合わせる
-jq -r '.checksums | to_entries[] | "\(.value)  \(.key)"' RELEASE-MANIFEST.json | $sha256c -c -
-
-# 2. マニフェストが検証した SHA256SUMS で、実行するスクリプトを検証する
-curl -sSL "${BASE}/bootstrap.sh" -o bootstrap.sh
-curl -sSL "${BASE}/doctor.sh" -o doctor.sh
-$sha256c -c SHA256SUMS
-
-# アーカイブから中身を取り出す場合
-tar -xzf PACKAGE_ARCHIVE.tar.gz
+# 2. 検証したいスクリプトとアーカイブを SHA256SUMS で検証する
+# 3. 展開する（1 と 2 の両方が通ったときだけ）。アーカイブの中身はリポジトリのルートそのものなので、専用のディレクトリへ展開する。
+#    再実行できるよう mkdir -p を使う。前回の展開物が残っていれば上書きされるが、新しい版で消えたファイルは残るので、版を変えるときは dcb/ を消してから実行する
+jq -r '.checksums | to_entries[] | "\(.value)  \(.key)"' RELEASE-MANIFEST.json | $sha256c -c - \
+  && $sha256c -c SHA256SUMS \
+  && mkdir -p dcb && tar -xzf PACKAGE_ARCHIVE.tar.gz -C dcb && ls dcb/
 ```
 
-### devhost — 外部の機械で devcontainer を保つ道具
+### devhost — devcontainer を外部の機械で常駐させる道具
 
-**SSH で届く外部の機械（自宅のラップトップ、社内のサーバーなど）の上で devcontainer を起動したまま保ち、
-スマホやほかの端末から入って AI コーディングを続けるための道具一式**です。`PACKAGE_ARCHIVE.tar.gz` の
-`devhost/` 配下に同梱されています（上の 1. で `RELEASE-MANIFEST.json` と照合する対象に入ります。個別の URL は配っていません）。
+devcontainer を、SSH で届く外部の機械（自宅のラップトップ、社内のサーバーなど）の上で起動したまま保ち、
+スマホやほかの端末から入って AI コーディングを続けるための道具一式（コマンド `dev`）です。
+`devcontainer.json` を持つプロジェクトなら、DCB の生成物でなくても使えます。DCB の生成物には、devhost が前提にする、または助かるもの（tmux、compose の `init: true` など）が入っているので、組み合わせると前提が最初から揃います。関係の全体は上の「3 パッケージの関係」を参照してください。
+**DCB のリリースには同梱していません。** 独自の版を持つ公開リポジトリ `ojos/devcontainer-host` のリリースで配っています。
+外部の機械への導入の手順（マニフェストのハッシュの照合を含む）と使い方は、そのリポジトリの README の「外部の機械への導入」を参照してください。
 
-```bash
-# 上の 1. で照合した PACKAGE_ARCHIVE.tar.gz から取り出す。archive の中の名前は ./devhost/...
-# なので、./ を付けて指定する（GNU tar は devhost/ だと一致しない）。
-tar -xzf PACKAGE_ARCHIVE.tar.gz ./devhost
-ls devhost/
-```
-
-bootstrap.sh が生成するものではなく、利用者が外部の機械へ手で置く独立した道具です。導入手順・使い方・
-SSH の経路（素の SSH / Cloudflare Access / Tailscale）は、取り出した `devhost/README.md` を参照してください
-（配布先では `devhost/` がこの README と同じ階層に並ぶため、ここでは相対リンクにしません）。
+以前の DCB のリリース（v0.14.0〜v0.17.0）は `PACKAGE_ARCHIVE.tar.gz` の `devhost/` に同梱していました。
+その `dev` の `dev self-update` は更新できなくなり、何も置き換えずに止まります。**手で 1 度だけ入れ直してください**
+（手順は `ojos/devcontainer-host` の README の「DCB 同梱の古い版から移るとき」）。
 
 ### 任意: 署名の検証（artifact attestation）
 
-**この手順は任意です。** 上の 2 段検証は `curl` とチェックサム実装（`sha256sum` か `shasum -a 256`）だけで閉じていますが、こちらは [GitHub CLI](https://cli.github.com/) が要ります。
+**この手順は任意です。** 上の 2 段の検証は `curl` とチェックサム実装（`sha256sum` か `shasum -a 256`）だけで閉じていますが、こちらは [GitHub CLI](https://cli.github.com/) が要ります。
 
-リリースの `SHA256SUMS` には、GitHub Actions が発行した **artifact attestation**（SLSA provenance）が付いています。**そこから先は上のハッシュチェーンが繋ぐ**ので、検証するのは `SHA256SUMS` 1 つで足ります。
+リリースの `SHA256SUMS` には、GitHub Actions が発行した **artifact attestation**（SLSA provenance）が付いています。attestation の対象は `SHA256SUMS` 1 つで、`SHA256SUMS` が `bootstrap.sh` / `doctor.sh` / `PACKAGE_ARCHIVE.tar.gz` のハッシュを持ちます（アーカイブの行は、v0.18.0 から。それより前の版では、attestation はスクリプトの 2 つまでしか及びません）。**attestation の検証に続けて、上の手順で `SHA256SUMS` と取得物を照合してください**（attestation だけでは取得物までは確かめられません）。
 
 ```bash
 # 取得元の owner を BASE から取り出す（固有名を手で書かない）
@@ -886,7 +914,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.17.0
+version=v0.18.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -897,7 +925,7 @@ input:manage-gitignore=true
 input:gitignore-targets=
 input:playbook=installed
 input:playbook-source=tag
-input:playbook-ref=v0.8.1
+input:playbook-ref=v0.8.2
 hash:.devcontainer/compose.yaml=<sha256>
 hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
