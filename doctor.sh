@@ -12,7 +12,7 @@ set -euo pipefail
 # この比較には限界がある。doctor.sh は公開リリースごとに取得し直す前提であり、
 # 古い doctor.sh をそのまま使い続けると、上流がその後さらに新しくなっていても
 # 「上流が更新されています」を報告できない。診断結果にもこの限界を明示する。
-DCB_VERSION="v0.18.0"
+DCB_VERSION="v0.19.0"
 ORIGIN_REL_PATH=".devcontainer/ORIGIN"
 
 TARGET_DIR="$PWD"

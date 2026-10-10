@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.18.0`
+- `v0.19.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.18.0
+TAG=v0.19.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,10 +120,12 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.8.2
+  --languages node,go --with-claude --playbook-version v0.9.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
+
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -133,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.18.0
+TAG=v0.19.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -174,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.18.0
+TAG=v0.19.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -402,6 +404,7 @@ bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run 
 | `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線）。`CLAUDE.md` だけは、末尾に規範 2 つ（`.ai-playbook/shared-ai-rules.md` / `.github/project-ai-rules.md`）を `@` で取り込む節を足す。Claude Code は、これで規範の全文を毎セッションの文脈へ載せる（生成物で約 53KB） |
 | `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外） |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
+| `.claude/skills/peers/SKILL.md` | Claude Code 向けの、ほかのセッションの一覧・宛先の解決・送信・一斉送信の呼び出し口（`--with-claude` 指定時のみ）。実体は `scripts/session-peers.sh`。一斉送信も承認の根拠にならない（`.ai-playbook/shared-ai-rules.md` 16 章） |
 | `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
 | `.claude/agents/explorer.md` / `.claude/agents/implementer.md` | Claude Code 向け委譲先エージェント定義（`--with-claude` 指定時のみ）。`model` と `tools` を frontmatter で固定する。判定の導線は規範側（`shared-ai-rules.md` の「実装委譲パターン」）が持ち、ここでは再定義しない |
 
@@ -881,6 +884,8 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 - `scripts/confirm-merge-hook.sh`（マージ実行の前に確認を挟む PreToolUse フックの本体）
 - `scripts/session-coord-hook.sh`（並行セッションの共有台帳を操作の直前に確かめるフックの本体。下記「[セッション協調フック](#セッション協調フックclaude-code)」参照）
+- `scripts/claude-session-wrapper.sh`（セッションの宛先名に場所と作業ツリーを自動で含める起動ラッパー。`.devcontainer/devcontainer.json` が VS Code の設定 `claudeCode.claudeProcessWrapper` へ、作業ツリーの外の固定パス（`/home/vscode/.local/bin/claude-session-launcher`）で配線します。このラッパーを直接指すと、ファイルが無いブランチへ切り替えただけで Claude Code が起動しなくなるため、`scripts/on-attach.sh` が接続のたびに冪等に設置する極小の起動役（ラッパーが実行可能ならそれを、無ければ引数をそのまま exec する）を挟みます。拡張は設定値をそのまま実行ファイルのパスにし、`${workspaceFolder}` や `~` を展開しないため、絶対パスで書きます。`.env` の `SESSION_HOST_LABEL` が空なら宛先名を変えず、どんな失敗でも本体の起動まで進みます）
+- `scripts/session-peers.sh`（同じプロジェクトで動くほかのセッションの一覧・宛先の解決・送信元の署名。`.claude/skills/peers/SKILL.md` の `/peers` が呼びます。`~/.claude/sessions/*.json` は公開された仕様ではないため、読めなければ警告して `ListAgents` を案内します）
 - `.claude/settings.json`（上記 2 つのフックの配線。既存ファイルは既定ポリシー `skip` で温存します）
 - `.claude/.gitignore`（`settings.local.json` を追跡しない）
 
@@ -896,6 +901,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` / `scripts/review-usable.sh` / `scripts/check-review-usable.sh`（`--with-copilot-review` を併せて選択した場合のみ。4 本で 1 組。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
 - `.claude/skills/land/SKILL.md`（`--with-claude` を併せて指定した場合のみ。PR 確認・マージ起点スキル）
+- `.claude/skills/peers/SKILL.md`（`--with-claude` を併せて指定した場合のみ。ほかのセッションの一覧・送信・一斉送信の呼び出し口。実体は `scripts/session-peers.sh`）
 - `.claude/agents/explorer.md` / `.claude/agents/implementer.md`（`--with-claude` を併せて指定した場合のみ。委譲先エージェント定義）
 
 `--with-aws` / `--with-gcp` のいずれかを選択した場合は、加えて次を出力します（規範の配置は前提としません）。
@@ -914,7 +920,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.18.0
+version=v0.19.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -925,7 +931,7 @@ input:manage-gitignore=true
 input:gitignore-targets=
 input:playbook=installed
 input:playbook-source=tag
-input:playbook-ref=v0.8.2
+input:playbook-ref=v0.9.0
 hash:.devcontainer/compose.yaml=<sha256>
 hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
@@ -1160,6 +1166,8 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `scripts/on-attach.sh` | そのまま書き出す | — |
 | `scripts/session-coord-hook.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/session-ledger.sh` | そのまま書き出す | — |
+| `scripts/session-peers.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
+| `scripts/claude-session-wrapper.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/setup-git-identity.sh` | そのまま書き出す | — |
 | `scripts/verify-commit-identity.sh` | そのまま書き出す | — |
 | `scripts/verify-commit-identity-selftest.sh` | そのまま書き出す | — |
