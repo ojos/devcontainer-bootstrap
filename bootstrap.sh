@@ -70,7 +70,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.19.0"
+DCB_VERSION="v0.19.1"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -1377,23 +1377,29 @@ HELPER="$HERE/load-project-env.sh"
 # git rev-parse --show-toplevel で求め、その scripts/claude-session-wrapper.sh を呼ぶ。
 # ラッパーを配っていない構成（--with-claude なし）では何もしない。
 # 設置先は CLAUDE_SESSION_LAUNCHER で変えられる（試験用）。失敗しても on-attach は落とさない。
-# `--install-launcher` で起動役の設置だけを行える。devcontainer.json の onCreateCommand が、
-# 新しいコンテナへ初めて接続する前（Dev Containers は onCreateCommand の完了を待つ）に呼ぶ。
+# `--install-launcher` で起動役の設置だけを行える。v0.19.0 の devcontainer.json の
+# onCreateCommand が呼ぶため、後方互換として残す。いまの onCreateCommand は、このスクリプトを
+# 呼ばずに同じ中身を直接書き出す（on-attach.sh の版に左右されないため）。動きは同じではなく、
+# onCreateCommand はラッパーの有無によらず設置し、ここはラッパーが無ければ設置しない。
+# 起動役の中身の正本は下の LAUNCHER ヒアドキュメント（1 か所）。devcontainer.json の
+# onCreateCommand へは、bootstrap.sh の claude_launcher_lines がここから取り出して書き出す。
 install_claude_session_launcher() {
   local wrapper dest dir content current tmp
   wrapper="$(cd "$HERE/.." && pwd)/scripts/claude-session-wrapper.sh"
   [[ -f "$wrapper" ]] || return 0
   dest="${CLAUDE_SESSION_LAUNCHER:-$HOME/.local/bin/claude-session-launcher}"
-  content="$(printf '%s\n' \
-    '#!/bin/sh' \
-    '# scripts/on-attach.sh が設置する Claude Code の起動役。手で編集しない（接続のたびに書き直される）。' \
-    '# 起動したときの cwd の作業ツリーのラッパーが実行可能ならそれを、求められない・無いときは' \
-    '# 引数をそのまま exec する。' \
-    't="$(git rev-parse --show-toplevel 2>/dev/null)" || t=""' \
-    'if [ -n "$t" ] && [ -x "$t/scripts/claude-session-wrapper.sh" ]; then' \
-    '  exec "$t/scripts/claude-session-wrapper.sh" "$@"' \
-    'fi' \
-    'exec "$@"')"
+  content="$(cat <<'LAUNCHER'
+#!/bin/sh
+# Claude Code の起動役。コンテナの作成時と接続時に設置される。手で編集しない（書き直される）。
+# 起動したときの cwd の作業ツリーのラッパーが実行可能ならそれを、求められない・無いときは
+# 引数をそのまま exec する。
+t="$(git rev-parse --show-toplevel 2>/dev/null)" || t=""
+if [ -n "$t" ] && [ -x "$t/scripts/claude-session-wrapper.sh" ]; then
+  exec "$t/scripts/claude-session-wrapper.sh" "$@"
+fi
+exec "$@"
+LAUNCHER
+)"
   current="$(cat "$dest" 2>/dev/null || true)"
   if [[ "$current" == "$content" && -x "$dest" ]]; then
     return 0
@@ -7867,9 +7873,11 @@ TMPL
 #     ときにも外れる）。
 #     バックグラウンドで起動したゲートは、起動の呼び出しが返った時点で解放される。
 #   - issue: ブランチ作成の時点で登録し、SessionEnd まで持つ。ただし、その呼び出しが失敗した
-#     （PostToolUseFailure）ときは、その呼び出しで新しく登録した issue だけを解放する（ブランチ
-#     が作れていないため）。前から持っていた登録は外さない。区別は、PreToolUse で
-#     tool_use_id を鍵にした印（一時ディレクトリ）へ新しく登録した番号を控えて行う。
+#     （PostToolUseFailure）ときは、その呼び出しで新しく登録した issue のうち、
+#     この呼び出しで作ったブランチがいま在るもの（呼び出しの前には無く、いまは在る）だけを残し、
+#     それ以外は解放する（ブランチが作れていないため）。前から持っていた登録は外さない。区別は、
+#     PreToolUse で tool_use_id を鍵にした印（一時ディレクトリ）へ、新しく登録した番号と、作る
+#     ブランチの名前・リポジトリ・呼び出しの前から在ったかを控えて行う。
 #   - doc: フックは登録しない（確かめるだけ）。長く触る文書は、セッション自身が
 #     `session-ledger.sh claim doc <パス>` で登録する。編集のたびに登録すると警告が常時出る。
 #
@@ -8120,6 +8128,7 @@ HIT_MERGE=0
 HIT_GATE=0
 HIT_GIT_DIRS=""   # 改行区切り。作業ツリーのパス
 HIT_ISSUES=""     # 空白区切り。issue 番号
+HIT_BRANCHES=""   # 改行区切り。「番号 TAB リポジトリのディレクトリ TAB ブランチ名」（ブランチの作成から読んだ issue）
 
 toplevel_of() { # 基準ディレクトリ 相対ディレクトリ
   local base="$1" rel="$2" top=""
@@ -8144,12 +8153,27 @@ add_issue() {
 }
 
 # ブランチ名の先頭の番号（feat/395-x・395-x・fix/issue-12-x）を issue 番号とみなす。
-issue_from_branch() {
-  local b="$1" re
-  re='(^|/)(issue-|gh-)?([1-9][0-9]{0,5})([-_]|$)'
-  if [[ "$b" =~ $re ]]; then
-    add_issue "${BASH_REMATCH[3]}"
+ISSUE_BRANCH_RE='(^|/)(issue-|gh-)?([1-9][0-9]{0,5})([-_]|$)'
+issue_from_branch() { # ブランチ名 ブランチを作るリポジトリのディレクトリ
+  local b="$1" n
+  if [[ "$b" =~ $ISSUE_BRANCH_RE ]]; then
+    n="${BASH_REMATCH[3]}"
+    add_issue "$n"
+    # 失敗した呼び出しで「このブランチを作ったか」を確かめるため、正確な名前と場所を控える。
+    HIT_BRANCHES="${HIT_BRANCHES:+$HIT_BRANCHES$'\n'}$n"$'\t'"$2"$'\t'"$b"
   fi
+}
+
+# ローカルのブランチ b が、リポジトリ d にあるか（正確な ref だけを確かめる）。
+branch_exists() { # ディレクトリ ブランチ名
+  git -C "$1" show-ref --verify --quiet "refs/heads/$2" 2>/dev/null
+}
+
+# 失敗した呼び出しの後で、ブランチ b を作ったと言えるか。最初のコミットの前のリポジトリでは
+# refs/heads/b がまだ無いので、HEAD が b を指していること（symbolic-ref）も作った印とみなす。
+branch_present() { # ディレクトリ ブランチ名
+  branch_exists "$1" "$2" && return 0
+  [[ "$(git -C "$1" symbolic-ref -q HEAD 2>/dev/null)" == "refs/heads/$2" ]]
 }
 
 # W 配列の k 番目以降から、オプションを読み飛ばして最初の位置引数を返す（番号で）。
@@ -8206,7 +8230,15 @@ classify_git() { # k（git の位置）
   while [[ $j -lt $n ]]; do
     w="${W[$j]}"
     case "$w" in
-      -C) dir="${W[$((j + 1))]:-}"; j=$((j + 2)) ;;
+      -C)
+        # -C を重ねると、後の相対パスは前の -C から解決される（絶対パスなら置き換える）。
+        w="${W[$((j + 1))]:-}"
+        if [[ -z "$w" ]]; then :
+        elif [[ "$w" == /* || -z "$dir" ]]; then dir="$w"
+        else dir="$dir/$w"
+        fi
+        j=$((j + 2))
+        ;;
       -c | --git-dir | --work-tree | --namespace | --exec-path) j=$((j + 2)) ;;
       -*) j=$((j + 1)) ;;
       *) sub="$w"; break ;;
@@ -8231,7 +8263,7 @@ classify_git() { # k（git の位置）
     w="${W[$j]}"
     case "$sub:$w" in
       checkout:-b | checkout:-B | switch:-c | switch:-C | switch:--create | switch:--force-create | worktree:-b | worktree:-B)
-        issue_from_branch "${W[$((j + 1))]:-}"
+        issue_from_branch "${W[$((j + 1))]:-}" "$(toplevel_of "$CUR_DIR" "$dir")"
         ;;
     esac
     j=$((j + 1))
@@ -8287,6 +8319,7 @@ classify_command() { # コマンド文字列、基準ディレクトリ
   HIT_GATE=0
   HIT_GIT_DIRS=""
   HIT_ISSUES=""
+  HIT_BRANCHES=""
   CUR_DIR="$2"
   # 見るべき語が無ければ、解析しない。
   case "$text" in
@@ -8452,19 +8485,51 @@ release_call_dirs() { # 改行区切りの作業ディレクトリ
 $1
 EOF
 }
-write_issue_mark() {
-  local f
+# 印の書式: 1 行 1 件。ブランチの作成から読んだ issue は「番号 TAB ディレクトリ TAB ブランチ名 TAB 呼び出しの前にあったか(1/0)」、
+# それ以外は番号だけ（古い書式の印は空白区切りの番号の行で、これも読める）。
+write_issue_mark() { # 新しく登録した issue 番号（空白区切り）
+  local f n line b d e mark="" found
   f="$(issue_mark_path)" || return 0
-  printf '%s\n' "$1" >"$f" 2>/dev/null || true
+  for n in $1; do
+    found=0
+    while IFS=$'\t' read -r line d b; do
+      [[ -n "$line" && "$line" == "$n" ]] || continue
+      # 印はタブ区切り。ディレクトリにタブがあれば番号だけで記録する（従来どおり解放する側）。
+      [[ "$d" != *$'\t'* ]] || continue
+      found=1
+      e=0
+      ! branch_present "$d" "$b" || e=1
+      mark="${mark:+$mark$'\n'}$n"$'\t'"$d"$'\t'"$b"$'\t'"$e"
+    done <<EOF
+$HIT_BRANCHES
+EOF
+    [[ $found -eq 1 ]] || mark="${mark:+$mark$'\n'}$n"
+  done
+  printf '%s\n' "$mark" >"$f" 2>/dev/null || true
 }
 # 印を読んで消す。成功した呼び出しでは、読まずに消す（issue は SessionEnd まで持つ）。
 settle_issue_mark() { # release|keep
-  local f nums n
+  local f n d b e rest="" nums="" kept=" "
   f="$(issue_mark_path)" || return 0
   [[ -f "$f" ]] || return 0
   if [[ "$1" == "release" ]]; then
-    nums="$(cat "$f" 2>/dev/null)"
+    # `git switch -c 26-x && npm test` のように、ブランチを作ったあとの段で失敗した呼び出しでも、
+    # 着手は成立している。記録したブランチが、記録したリポジトリに「いま」あり、かつ呼び出しの
+    # 前には無かったときだけ、登録を残す（他のセッションへの警告を消さない）。それ以外は解放する。
+    while IFS=$'\t' read -r n d b e; do
+      [[ -n "$n" ]] || continue
+      case "$n" in *[!0-9\ ]*) continue ;; esac
+      if [[ -z "$b" ]]; then
+        nums="$nums $n"   # 番号だけの行（古い書式を含む）
+        continue
+      fi
+      nums="$nums $n"
+      if [[ "$e" == "0" ]] && branch_present "$d" "$b"; then kept="$kept$n "; fi
+    done <"$f"
     for n in $nums; do
+      case "$kept" in *" $n "*) continue ;; esac
+      case " $rest " in *" $n "*) continue ;; esac
+      rest="$rest $n"
       run_ledger "$cwd" release issue "$n"
     done
   fi
@@ -9708,38 +9773,95 @@ build_with_extensions_block() {
   printf '%s' "$out"
 }
 
+# Claude Code の起動役の置き場所。claudeCode.claudeProcessWrapper の設定
+# （build_vscode_settings_block）と、onCreateCommand の書き出し先
+# （build_on_create_command_block）の両方をここから作る。配線先と設置先が食い違わないようにする。
+# 絶対パスで書く（拡張は ~ や ${workspaceFolder} を展開しない）。ホームは、開発コンテナの
+# 既定のユーザー vscode の /home/vscode とする。
+# scripts/on-attach.sh の既定（$HOME/.local/bin/…）と CLAUDE_SESSION_LAUNCHER による上書きは別で、
+# 雛形の側に持つ。
+CLAUDE_LAUNCHER_PATH="/home/vscode/.local/bin/claude-session-launcher"
+
+# Claude Code の起動役（CLAUDE_LAUNCHER_PATH）の中身を、1 行ずつ出力する。
+# 正本は scripts/on-attach.sh の雛形にある install_claude_session_launcher の LAUNCHER
+# ヒアドキュメント（1 か所。scripts/ の写しとバイト一致する）。onCreateCommand
+# （build_on_create_command_block）へは、そこから取り出して書き出す。中身を 2 か所に書き写すと
+# 食い違うため、書き写さない。
+claude_launcher_lines() {
+  get_template_content 'scripts/on-attach.sh' | awk '
+    $0 ~ /<<.LAUNCHER.$/ { inside = 1; next }
+    inside && $0 == "LAUNCHER" { exit }
+    inside { print }
+  '
+}
+
+# 起動役の中身を検査する。onCreateCommand は中身を単一引用符で括った printf の引数にして
+# 書き出すため、空・単一引用符・制御文字（タブを含む）があると、空の起動役や壊れた sh を
+# 黙って置く devcontainer.json ができる。生成の時点で止める（終了コード 1）。
+# $(...) の中では exit しても生成が止まらないので、$(...) の外から呼ぶ。
+validate_claude_launcher_lines() {
+  local lines
+  lines="$(claude_launcher_lines)"
+  if [[ -z "$lines" ]]; then
+    echo "error: 起動役の中身を scripts/on-attach.sh の雛形（LAUNCHER ヒアドキュメント）から取り出せませんでした" >&2
+    return 1
+  fi
+  if [[ "$lines" == *"'"* ]]; then
+    echo "error: 起動役の中身に単一引用符があります（onCreateCommand の printf の引数に入れられません）" >&2
+    return 1
+  fi
+  if printf '%s\n' "$lines" | LC_ALL=C command grep -q '[[:cntrl:]]'; then
+    echo "error: 起動役の中身に制御文字（タブを含む）があります" >&2
+    return 1
+  fi
+  return 0
+}
+
 # devcontainer.json の customizations.vscode.settings（__VSCODE_SETTINGS__）。
 # --with-claude のときだけ、claudeCode.claudeProcessWrapper に起動役
-# （~/.local/bin/claude-session-launcher）を指定する。
+# （CLAUDE_LAUNCHER_PATH）を指定する。
 #
 # 作業ツリーの scripts/claude-session-wrapper.sh を直接指さない。そのファイルが無い
 # ブランチへ切り替えただけで Claude Code が一切起動しなくなるため、作業ツリーの外の固定パスに
-# 置いた極小の sh（scripts/on-attach.sh が接続のたびに冪等に設置する）を挟む。起動役は、
+# 置いた極小の sh（onCreateCommand が書き出し、scripts/on-attach.sh も接続のたびに冪等に設置する）を挟む。起動役は、
 # ラッパーが実行可能ならそれを、無ければ引数をそのまま exec する。
 #
 # 絶対パスで書く。拡張（anthropic.claude-code 2.1.296）は設定値を読んだ文字列をそのまま
 # 実行ファイルのパスにし、${workspaceFolder} や ~ を展開しない（extension.js で
 # 確認。実機での起動は未検証）。この設定は scope が machine なので、利用者の設定ではなく
-# devcontainer.json の settings（コンテナ側の machine 設定）に置く。ホームは、開発コンテナの
-# 既定のユーザー vscode の /home/vscode とする。
+# devcontainer.json の settings（コンテナ側の machine 設定）に置く。
 # 条件に合わないときは空（行ごと消え、直前の "]," の末尾カンマは write_file が畳む）。
 build_vscode_settings_block() {
   has_with claude || { printf ''; return; }
   printf '%s\n' \
     '      "settings": {' \
-    '        "claudeCode.claudeProcessWrapper": "/home/vscode/.local/bin/claude-session-launcher"' \
+    '        "claudeCode.claudeProcessWrapper": "'"$CLAUDE_LAUNCHER_PATH"'"' \
     '      }'
 }
 
 # devcontainer.json の onCreateCommand（__ON_CREATE_COMMAND__）。--with-claude のときだけ、
-# Claude Code の起動役を設置する。postAttachCommand（on-attach.sh）だけだと、新しいコンテナへ
-# 初めて接続したとき、設置より先に拡張が Claude を起動しうる。Dev Containers は既定の waitFor
-# （updateContentCommand）により onCreateCommand の完了を待つので、ここで設置すれば間に合う。
-# postAttachCommand での設置も残す（既存のコンテナへ後から適用するため）。失敗しても作成を止めない。
+# Claude Code の起動役を直接書き出す。postAttachCommand（on-attach.sh）だけだと、新しい
+# コンテナへ初めて接続したとき、設置より先に拡張が Claude を起動しうる。Dev Containers は既定の
+# waitFor（updateContentCommand）により onCreateCommand の完了を待つので、ここで設置すれば間に合う。
+#
+# on-attach.sh を呼ばない。配線（claudeProcessWrapper）と設置を同じファイルに置き、--upgrade で
+# 片方だけが新しくなる状態（古い on-attach.sh が設置を知らず、配線だけが入る）を起こさないため。
+# 形は文字列（1 行の sh）にする。配列にしても同じエスケープが要り、オブジェクトは並列実行になる。
+# 一時ファイルへ書いてから mv で置き換える（冪等。途中で壊れた起動役を残さない）。失敗しても
+# コンテナの作成は止めず、警告を出して終わる。書き出し先は CLAUDE_LAUNCHER_PATH（\$HOME は使わない）。
+# 中身は claude_launcher_lines（on-attach.sh の雛形から取り出す）で、on-attach.sh が置くものと同じ。
+# 動きは同じではない: on-attach.sh はラッパーが無いと設置しないが、こちらは無条件に設置する。
+# JSON のため バックスラッシュと二重引用符をエスケープする（jq で読むと元の sh に戻る）。
+# postAttachCommand での設置も残す（既存のコンテナへ後から適用するため）。
 # 条件に合わないときは空（行ごと消える）。末尾のカンマは write_file の整形が畳む。
 build_on_create_command_block() {
   has_with claude || { printf ''; return; }
-  printf '%s\n' '  "onCreateCommand": "bash scripts/on-attach.sh --install-launcher || true",'
+  local args cmd
+  args="$(claude_launcher_lines | sed -e "s/^/'/" -e "s/\$/'/" | tr '\n' ' ')"
+  # shellcheck disable=SC2016  # 設置する sh の $ はリテラル。展開は実行時にコンテナ側で起きる
+  cmd='f="'"$CLAUDE_LAUNCHER_PATH"'"; t="$f.oncreate.tmp"; { mkdir -p "${f%/*}" && printf '"'%s\n'"' '"$args"'>"$t" && chmod 755 "$t" && mv -f "$t" "$f"; } || { rm -f "$t"; echo "[onCreate] WARN: Claude Code の起動役を設置できませんでした: $f" >&2; }; true'
+  cmd="$(printf '%s' "$cmd" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  printf '  "onCreateCommand": "%s",\n' "$cmd"
 }
 
 # .env.example の __SESSION_HOST_LABEL_LINES__。--with-claude のときだけ、
@@ -10134,6 +10256,8 @@ render_content() {
       { print }
     ' <<<"$content")"
   }
+
+  if has_with claude; then validate_claude_launcher_lines || exit 1; fi
 
   subst_block __RUNTIME_CHECK_LINES__ "$(build_runtime_check_block)"
   subst_block __ACCEPTANCE_CHECK_LINES__ "$(build_acceptance_check_block)"
