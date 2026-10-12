@@ -6,6 +6,23 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.20.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.10.0 以降**（定期実行をなくし（ojos/ai-packages-dev#545）、`runs-on` を変数にした（ojos/ai-packages-dev#546）版）。 配置する規範の雛形（`review-gate.yml` / `second-opinion-gate.yml`）から `on.schedule` がなくなる。
+- **`--with-copilot-review` と規範の配置で生成されるゲートのワークフローが、20 分ごとの定期実行を持たなくなった**（ojos/ai-packages-dev#545）。定期実行は PR が 1 本も無いあいだも走り続けるため、private リポジトリでは Actions の課金枠を減らし続ける。利用側の実測では、7 日間に 438 回走り、Actions の実行全体の約 72% を占めた。
+  - 代わりに、`scripts/second-opinion-record.sh post` が投稿の直後に確認側を既定ブランチで手動実行（`workflow_dispatch`）し、`/land` がマージの直前に再判定する。
+  - 手動実行には、トークンの Actions の書き込み権限（fine-grained PAT なら Actions: Read and write）が要る。README の PAT の権限の表に足した。GitHub の公式ドキュメントに基づく記載で、実測ではない。
+  - 生成した出力に `schedule` が無いことを、`tests/test-review-gate.sh` が確かめる。
+- **生成されるワークフロー 5 本（`identity-guard.yml` / `verify.yml` と、規範の雛形の 3 本）の実行先を、リポジトリ変数 `ACTIONS_RUNS_ON` で切り替えられるようにした**（ojos/ai-packages-dev#546）。`runs-on` は `${{ vars.ACTIONS_RUNS_ON || 'ubuntu-latest' }}`。未設定・空なら従来どおり `ubuntu-latest`。private リポジトリで自前のランナーへ向けると、GitHub のランナーの課金枠を使わない。
+  - README に変数名・既定値・自前のランナーへ向けるときの注意（外部からの PR を受けるリポジトリでは使わない）と、自前のランナーに要る道具の一覧（git / gh / GNU coreutils など）を書いた。
+  - この版が要求する ai-playbook は、上の雛形の変更（ojos/ai-packages-dev#546）を含む版。**`--playbook-version` にこの変更を含まない古い ai-playbook を指定すると、`bootstrap.sh` が書く 2 本（`identity-guard.yml` / `verify.yml`）だけが変数の形になり、規範の雛形の 3 本は `ubuntu-latest` のまま残る。5 本すべてを変数の形にするには、この変更を含む ai-playbook と組み合わせる**（版の検査は機構では行わない）。
+
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** ai-playbook を配置している構成では、`--playbook-version v0.10.0` を付けて規範もあわせて上げる（付けないと、規範の雛形の 3 本は古いまま残る）。ai-playbook を配置していない構成には付けない（付けると、ai-playbook を新たに配置する）。雛形から写したワークフローに手を入れていなければ置き換わる（ORIGIN の hash が一致するもの）。置き換わるのは、`on.schedule` の削除（ojos/ai-packages-dev#545）と `runs-on` の変数化（ojos/ai-packages-dev#546）の 2 点。置き換わると、利用側の定期実行が止まる。`runs-on` は変数 `ACTIONS_RUNS_ON` を設定しない限り `ubuntu-latest` のままで、挙動は変わらない。
+- 手を入れたワークフローは置き換わらない。`on:` の `schedule:` と `cron:` を手で外し、`runs-on:` を手で同じ形にする。
+- `post` を打つトークンに Actions の書き込み権限が無いと、`post` は記録を投稿したあとで非 0 になる。手で起こすコマンドが出力される。
+
 ## v0.19.2
 
 ### Summary

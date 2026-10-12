@@ -70,7 +70,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.19.2"
+DCB_VERSION="v0.20.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -981,7 +981,7 @@ permissions:
 
 jobs:
   verify-commit-identity:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ACTIONS_RUNS_ON || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1061,7 +1061,7 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ACTIONS_RUNS_ON || 'ubuntu-latest' }}
 
     # fork からの PR の扱い: この雛形はスキップしない。
     #
@@ -11053,7 +11053,7 @@ install_playbook_rules() {
   # 使う構成が機構で表現できない（issue #230）。
   #
   # 雛形は 2 本で 1 組。copilot-review.yml が要求し、review-gate.yml が要求された
-  # ことを別の契機（PR 更新・定期実行）から確認する。要求側の契機は届かないことが
+  # ことを別の契機（PR 更新・手動実行）から確認する。要求側の契機は届かないことが
   # あり、届かなければ最終ゲートが黙って抜けるため、確認側だけを落として配置する
   # 選択肢は持たせない（規範 review-workflow.md「要求されたことを別の契機で確認する」）。
   #

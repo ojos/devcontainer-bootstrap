@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.19.2`
+- `v0.20.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.19.2
+TAG=v0.20.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,12 +120,12 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.9.2
+  --languages node,go --with-claude --playbook-version v0.10.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。新しく生成するときと `--upgrade` では v0.10.0 を勧めます。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.19.2
+TAG=v0.20.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.19.2
+TAG=v0.20.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -460,7 +460,7 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
   - 既定ブランチの追跡枝を解決できない環境では汚染を判定できないため、**従来どおり上流を使います**（判定不能を汚染扱いにすると、分岐点も取れないまま範囲を失うため）。
 - `loop-gate.sh` は source ガードを持ち、`source`（`.`）で読み込んだだけではゲート本体を実行せず、範囲解決の関数だけを提供します。範囲の決め方を単体で検証できるようにするためで、ルートへの `cd` もゲート本体側に置いてあり、読み込んだ側の作業ディレクトリを動かしません。
 - これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。規範を配置した場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、第二意見の `second-opinion-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
-- 上の 3 本は**手元から起動する入口**で、実行するかどうかは人に委ねられています。**回し忘れれば何も起きません。** `verify.sh` は `verify.yml` が CI で再実行して回し忘れを塞ぎますが（下記「受け入れ検証の CI ワークフロー」参照）、**第二意見は手元でしか走らないため、CI が再実行して確かめることができません。** そのため回したことの記録と、記録が無いことを別の契機（PR 更新・定期実行）から検出する確認側を、規範を配置したときにあわせて配置します。
+- 上の 3 本は**手元から起動する入口**で、実行するかどうかは人に委ねられています。**回し忘れれば何も起きません。** `verify.sh` は `verify.yml` が CI で再実行して回し忘れを塞ぎますが（下記「受け入れ検証の CI ワークフロー」参照）、**第二意見は手元でしか走らないため、CI が再実行して確かめることができません。** そのため回したことの記録と、記録が無いことを別の契機（PR 更新・手動実行）から検出する確認側を、規範を配置したときにあわせて配置します。定期実行は置きません（PR が無いあいだも走り続け、private リポジトリの Actions の課金枠を減らし続けるため）。`second-opinion-record.sh post` が投稿の直後に確認側を既定ブランチで手動実行し、`/land` がマージの直前に再判定します。
   - `loop-gate.sh` は第二意見の出力を捕まえ、`scripts/second-opinion-record.sh save` へ渡します。レビュー対象が無い（`REVIEW_NO_TARGET`）、または明示的にスキップした（`LOOP_GATE_REVIEW_CMD=''`）場合は記録しません——回していないものを「回した」と記録すると、確認側が偽の緑を出すためです。
   - 記録は `git rev-parse --git-path second-opinion` が返す worktree ごとのパスへ置き、レビューした対象（ステージ済み差分のツリー、またはコミット範囲の終端）を HEAD と突き合わせてから PR へ投稿します（`scripts/second-opinion-record.sh post`）。中身が変わっていれば投稿しません。
   - `.github/workflows/second-opinion-gate.yml` が、投稿された記録の head SHA がいまの head と一致するかを確認します。要求はしません（第二意見を回すかどうかは利用者側の判断のままです）。Dependabot のように回す著者が最初からいない PR は、`scripts/second-opinion-gate-exempt.sh` の判定で対象外にします。
@@ -514,6 +514,51 @@ VERIFY_ACCEPTANCE=scripts/acceptance-remote.sh bash scripts/verify.sh
 > ただし **fork からの PR には Secrets もリポジトリ変数も渡りません。** `acceptance.sh` へリポジトリ変数や Secrets に依存する検査を足すと、その検査は fork からの PR でだけ供給元を失い、fail-closed な検査であれば常に赤くなります。恒常的な赤は「赤を無視する習慣」を生むため、足す側で次のどちらかを選んでください。(1) 供給元を要する検査は `acceptance.sh` へ入れず専用のワークフローに置く（許可 author email を要するコミット identity の検査は `identity-guard.yml` が持っています）。(2) fork からの PR を受け付けないリポジトリなら、ワークフロー内にコメントアウトで置いてある `if:` の 1 行を有効にする。
 
 > **この開発リポジトリ自身には `verify.yml` を置きません。** 既に `.github/workflows/ci.yml` が同じ役割を持ち、`scripts/acceptance.sh` がその 6 ジョブ + `identity-guard.yml` を完全ミラーしているため、`verify.yml` を置くと役割が重複し、`tests/test-ci-mirror.sh` のミラー対象が 2 本になります。**雛形を配りながら自分では使わない状態を、無自覚ではなく明示の判断として残します。**
+
+### 配るワークフローの実行先（`ACTIONS_RUNS_ON`）
+
+DCB が配置するワークフロー 5 本（`identity-guard.yml` / `verify.yml` / `second-opinion-gate.yml` / `copilot-review.yml` / `review-gate.yml`）は、実行先を次の形で書きます。
+
+```yaml
+runs-on: ${{ vars.ACTIONS_RUNS_ON || 'ubuntu-latest' }}
+```
+
+| 項目 | 内容 |
+|---|---|
+| 変数名 | `ACTIONS_RUNS_ON`（利用側リポジトリの Settings > Secrets and variables > Actions > Variables） |
+| 既定値 | 未設定または空文字なら `ubuntu-latest`。設定しなければ従来と同じ挙動です |
+| 値 | ラベル 1 つ（例: 自前のランナーに付けたラベル）。複数ラベルの配列は受け付けません。**値に空白を含めないでください** |
+| 使いどころ | private リポジトリで、GitHub のランナーが使う Actions の課金枠を避けたいとき。public リポジトリは何もしなくてかまいません |
+
+**空白だけの値や、末尾に空白のある値は、既定値へ落ちず、そのままラベルになります。** `||` が既定値へ落とすのは空文字のときだけだからです。そのラベルを持つランナーは存在しないので、ジョブは `queued` のまま進みません。変数を設定したのにジョブが始まらないときは、まず値の前後の空白を疑ってください。
+
+**5 本すべてを変数の形にするには、この変更を含む ai-playbook と組み合わせてください。** `identity-guard.yml` / `verify.yml` は `bootstrap.sh` が書きますが、残り 3 本は規範の雛形から写します。`--playbook-version` に古い版を指定すると、前者 2 本だけが変数の形になり、後者 3 本は `ubuntu-latest` のまま残ります。版の検査は機構では行いません。
+
+手でワークフローの `runs-on` を書き換えると、`.devcontainer/ORIGIN` の記録とずれて、`--upgrade` が手を入れたファイルとして扱います。変数で切り替えれば、ワークフローには手を入れずに済みます。
+
+> **自前のランナーでは、PR 側のコードがそのマシンで動きます。外部からの PR を受け付けるリポジトリでは、使わないでください。**
+>
+> 外部からの PR だけの話ではありません。同じリポジトリの PR では、`identity-guard.yml` / `verify.yml` / `review-gate.yml` / `second-opinion-gate.yml` の `pull_request` 契機は、**PR 側の版のワークフロー定義**で動きます。したがって、書き込み権限を持つ共同作業者なら誰でも、PR でワークフローの `run:` を書き換え、自前のランナーのマシンで任意のコードを動かせます（フォークからの PR は `copilot-review.yml` / `review-gate.yml` / `second-opinion-gate.yml` の対象外ですが、`identity-guard.yml` と `verify.yml` は動きます）。
+>
+> - ランナーは、使い捨てのコンテナで動かしてください（devhost が用意する自前のランナーを使えます）。実行のたびに捨てれば、書き換えられたコードが残す状態を次の実行へ持ち越しません。
+> - ホストの資格情報（ホームのトークン、SSH 鍵、Docker ソケットなど）やネットワーク（社内の別のサービス）に届く場所で、ランナーを動かさないでください。
+
+#### 自前のランナーに要る道具
+
+`ubuntu-latest` には最初から入っているが、最小の Linux には無いものです。5 本のワークフローと、そこから呼ばれる `scripts/*.sh`、`actions/checkout` が実際に使うコマンドから洗い出しました。ランナー本体（actions/runner）の導入に要るもの（.NET の実行時依存など）は、ランナーの導入手順の側の話なので含めません。
+
+| 道具 | 使う箇所 |
+|---|---|
+| bash | 全ワークフローの `run:`、全スクリプト（`#!/usr/bin/env bash`） |
+| git | `actions/checkout`（無いと REST 経由の取得に落ち、`.git` が無い木になる）、`scripts/verify-commit-identity.sh`（`git log` / `git rev-parse`）、`scripts/verify-commit-identity-selftest.sh`（`git init` / `git commit`）、`scripts/check-no-secrets.sh`（`git status` / `git ls-files`。`verify.yml` が `verify.sh` 経由で呼ぶ） |
+| gh（GitHub CLI） | `copilot-review.yml` / `review-gate.yml` / `second-opinion-gate.yml` の `run:`（`gh api`）。`--jq` は gh に内蔵されているので、jq は要りません |
+| GNU coreutils 相当 | `date -u -d`（`review-gate.yml` / `second-opinion-gate.yml` の掃き寄せ。GNU の `-d` を使う）、`base64 -d`（`review-gate.yml` の判定スクリプトのフォールバック取得）、`tr`（`copilot-review.yml` / `review-gate.yml` の `is_copilot`）、`mktemp`・`sort`・`comm`・`cp`・`rm`・`mkdir`・`sleep`・`dirname`・`cat`・`env`（`verify-commit-identity-selftest.sh` / `check-no-secrets.sh` / 各ワークフロー） |
+| sed・grep | `verify-commit-identity-selftest.sh`（`sed`）、`check-no-secrets.sh`（`sed` / `grep`） |
+
+- `curl` / `jq` / `python3` / `awk` は、この 5 本と呼ばれるスクリプトからは使いません。要りません。
+- Node.js は、`actions/checkout`（JavaScript のアクション）の実行にランナー自身の同梱版が使われるため、別に入れる必要はありません。
+- `verify.yml` が呼ぶ `scripts/acceptance.sh` は**プロジェクトが所有する**ので、その検査が使うもの（言語ランタイム・`npm` など。配布版の `acceptance.sh` は `package.json` があると `npm` を使います）は、この一覧に含みません。プロジェクトの実態に合わせて足してください。
+- `ubuntu-latest` 相当の GNU 版が入った Linux（Debian / Ubuntu 系）を前提にします。BusyBox の `date` は GNU の `-d` と同じ書式を受け付けない場合があります。
 
 ## 言語サポート
 対応ランタイム（任意の組み合わせ）:
@@ -681,9 +726,11 @@ gh の OAuth App には「ユーザー × アプリ × scope あたり 10 トー
   | PR の作成・コメント・マージ | Pull requests: Read and write |
   | issue の起票・コメント | Issues: Read and write |
   | `.github/workflows/` を含む push | Workflows: Read and write |
-  | CI の実行の確認（`gh run list` / `actions/runs`） | Actions: Read |
+  | CI の実行の確認（`gh run list` / `actions/runs`）、ゲートの手動実行（`gh workflow run`。`second-opinion-record.sh post` と `/land` のマージ直前の再判定） | Actions: Read and write |
   | commit status（`second-opinion-gate` など）の確認 | Commit statuses: Read |
   | （必須・自動付与） | Metadata: Read |
+
+  **手動実行の権限（Actions: Read and write）は、GitHub の公式ドキュメント（「Permissions required for fine-grained personal access tokens」の Actions の節。`POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` は write）に基づく記載で、実測ではありません。** 初回の発行時に `gh workflow run <ワークフロー> --ref <既定ブランチ>` が通るか確かめてください。
 
   **Checks は fine-grained PAT では選べません。** そのため、**非公開リポジトリでは** `commits/<sha>/check-runs` と `gh pr checks` が 403 になります（公開リポジトリでは読めます）。`/land` の雛形はこの 2 つを使わず、Actions と Commit statuses の権限だけで CI を待ちます。プロジェクト側でスクリプトを足すときも、この 2 つに頼らないでください。
 - **`GH_TOKEN` が空の環境は従来どおり**保存済み認証で動きます（`GITHUB_TOKEN` も未設定である場合。下記）。PAT を持たない利用者を壊しません。
@@ -920,7 +967,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.19.2
+version=v0.20.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1109,7 +1156,7 @@ squash 本文の組み立て方（PR の説明文だけを使うか、各コミ�
 
 要求側は、フォークからの PR をスキップします。既定の `GITHUB_TOKEN` で要求できない構成では、リポジトリ Secrets に `COPILOT_REVIEW_TOKEN`（`pull-requests` 書き込み権限を持つ PAT）を設定すると自動で切り替わります。**要求は間欠的に空レスポンスで失敗することがあり**、同じジョブの中で 5→10→20 秒の指数バックオフにより計 4 回まで再試行します（再試行はこの 1 ジョブの中で閉じており、別のイベントから要求し直す形にはしません。「1 回だけ要求する」の対象は要求が別の契機から重ねて出ることです）。再試行を尽くしても失敗した場合は、切り分け手順を `::error::` で出力して実行を落とします（握り潰してスキップにはしません。リモート最終ゲートが実行されていないのに緑を出すと、偽の緑と通過の区別が付かなくなるためです）。
 
-確認側を別に置くのは、**要求側の契機が届かないことがある**ためです。届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑なので、最終ゲートだけが黙って抜けます。同じ契機を見る 2 本目では塞げないため、確認側は `opened` / `synchronize` / `reopened` / `ready_for_review` に加えて**20 分ごとの定期実行**を張ります。判定は head SHA への commit status（`review-gate`）として出します。定期実行から見た PR にはジョブの成否が紐づかず、status でなければ PR 上に何も現れないためです。`opened` の契機だけは、要求が届くまで 120 秒待ってから判定します（要求側と同時に走るため）。
+確認側を別に置くのは、**要求側の契機が届かないことがある**ためです。届かなければ要求側は起動せず、エラーも出ず、他のチェックは緑なので、最終ゲートだけが黙って抜けます。同じ契機を見る 2 本目では塞げないため、確認側は `opened` / `synchronize` / `reopened` / `ready_for_review` に加えて**手動実行（`workflow_dispatch`）**を持ち、`/land` がマージの直前に既定ブランチで起こして再判定します（定期実行は置きません。PR が無いあいだも走り続け、private リポジトリの課金枠を減らし続けるため）。判定は head SHA への commit status（`review-gate`）として出します。手動実行から見た PR にはジョブの成否が紐づかず、status でなければ PR 上に何も現れないためです。`opened` の契機だけは、要求が届くまで 120 秒待ってから判定します（要求側と同時に走るため）。
 
 **「要求されたか」と「読まれたか」は別です。** GitHub は 1 ファイルの差分が大きすぎると、レビュー対象の差分（`patch`）を API から落とします。この状態でも Copilot は要求どおりレビューを投稿しますが、中身は「1 行も読めなかった」という定型文だけになり、要求も投稿も記録として残るため、「要求されたか」しか見ない判定は緑を出し続けます。確認側はこれを塞ぐため、変更ファイルに読める差分があるか（原因そのもの）と、投稿されたレビューが定型文だけでないか（最後の砦）の 2 段で見ます。この判定は `review-gate.yml` へ埋め込まず `scripts/review-usable.sh` へ切り出してあります。確認側は `actions/checkout@v7` で**既定ブランチ**（PR の変更ブランチではありません）からこのスクリプトを取得してから呼び出します。PR 側から取得すると、PR の投稿者がスクリプトを書き換えるだけでゲートを常に緑にできてしまうためです。
 
