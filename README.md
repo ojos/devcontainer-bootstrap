@@ -62,7 +62,7 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 | `curl` | 常時 | github/gitignore テンプレートの取得、規範アーカイブのダウンロード |
 | `tar` | 規範の取得元に **URL** を指定した場合のみ（`--playbook-version` / URL 形式の `--playbook-from`） | アーカイブの展開 |
 
-`doctor.sh` は `jq` を使います（`devcontainer.json` の JSON 妥当性検査と `dockerComposeFile` の読み取り）。
+`doctor.sh` は `jq` と `perl` を使います（`devcontainer.json` の JSON 妥当性検査と `dockerComposeFile` の読み取り）。`--with-codex` の `devcontainer.json` は説明のコメント（`//`）を持つので、`doctor.sh` はコメントを除いてから `jq` へ渡します（JSONC として読みます。文字列の中の `//` は残します）。
 
 `docker` は**任意**です。あればベースイメージの `os/arch` 適合を実際のマニフェストで判定し、無ければ既定の `mcr.microsoft.com/devcontainers/base:noble` へフォールバックします（警告のみで停止しません）。候補は版の名前（コードネーム）で固定しており、`ubuntu` / `debian` のような浮動タグは使いません（上流が指す版を無告知で進め、features の導入が壊れることがあるため）。
 
@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.20.0`
+- `v0.21.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.20.0
+TAG=v0.21.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,12 +120,12 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.10.0
+  --languages node,go --with-claude --playbook-version v0.11.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。新しく生成するときと `--upgrade` では v0.10.0 を勧めます。
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.11.0 を勧めます。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.20.0
+TAG=v0.21.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.20.0
+TAG=v0.21.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -280,7 +280,7 @@ fi
 - **AI ツールは明示 opt-in のみ**: `--with-<ai>` を指定したときだけ、CLI 導入・VS Code 拡張・設定ディレクトリの永続化（compose named volume）を行います。トークン有無による自動導入は行いません。
 - **`--with-gemini` と `--with-antigravity` は永続 volume を共有**: `agy` は資格情報を `~/.gemini/antigravity-cli/` に置くため、両者は同じ `~/.gemini` を使います。**どちらか一方でも指定すれば `gemini-storage` が 1 つだけ**作られ、両方指定しても重複しません。認証手段が違う（API キー / OAuth）ので、フラグは束ねず独立にしてあります。片方だけ使う構成をそのまま表現できます。
 - **`--with-codex` は専用の永続 volume**: Codex CLI は資格情報を `~/.codex/auth.json` に置くため、`gemini` / `antigravity` とは別の `codex-storage` を使います。認証手段（ChatGPT アカウントの OAuth または API キー）も設定ディレクトリも他の AI CLI と独立なので、既存のどの装備とも共有しません。
-- **`--with-codex` はコンテナの AppArmor と seccomp の既定の制限を外します**: codex のサンドボックスがコンテナの中で動くように、生成物の `compose.yaml` へ `security_opt: [apparmor=unconfined, seccomp=unconfined]` を入れます。`--with-codex` を選ばない構成には入りません（下記「[コンテナの中での codex のサンドボックス](#コンテナの中での-codex-のサンドボックス)」）。
+- **`--with-codex` はコンテナの AppArmor と seccomp の既定の制限を外します**: codex のサンドボックスがコンテナの中で動くように、生成物の `devcontainer.json` へ `"securityOpt": ["apparmor=unconfined", "seccomp=unconfined"]` を入れます（`compose.yaml` の `security_opt` ではありません。理由は下記）。`--with-codex` を選ばない構成には入りません（下記「[コンテナの中での codex のサンドボックス](#コンテナの中での-codex-のサンドボックス)」）。
 - **資格情報はホストから注入しません**: `remoteEnv` が運ぶのは作業ディレクトリのパス（`LOCAL_WORKSPACE_FOLDER`）だけです。認証はコンテナ内で行い、その状態を named volume に残します。唯一の例外は GitHub CLI で、PAT を `.env` の `GH_TOKEN` へ置けます（下記「[資格情報の扱い](#資格情報の扱い)」）。
 
 ### オプション入力
@@ -289,6 +289,7 @@ fi
 - `--dry-run`（既定: 無効。生成予定のパスを `plan:` 行として並べるだけで、**ファイルを 1 つも書きません**）
 - `--force`（既定: 無効。既存ファイルの上書きを許可します。下記「再実行したときの挙動」参照）
 - `--upgrade`（既定: 無効。記録した入力で生成し直し、手を入れていないファイルだけを新しい版へ更新します。振り分け・終了コード・`--dry-run`・注意は下記「再実行したときの挙動」参照。`--force` とは同時に指定できません）
+- `--baseline-from <dir>`（既定: なし。`--upgrade` と一緒のときだけ指定できます。旧い版の `bootstrap.sh` で生成した結果のディレクトリを渡し、ORIGIN に `hash:` の記録が無いファイルを、`<dir>` の同じ相対パスの内容と照合します。一致した現物は手を入れていないものとして新しい版へ更新します。`<dir>` は読むだけで書き込まず、`<dir>` 側のリンクはたどりません（`<dir>` 自体がシンボリックリンクなら止まるので実体のパスを渡します。中のリンクは一致しない扱い）。出力先そのもの、空の文字列も止まります。`--upgrade` 以外と一緒に指定するか、`<dir>` が存在するディレクトリでなければ、何も書かずに止まります。ORIGIN には記録しません。下記「`--upgrade` の注意」の ORIGIN が無い出力先の項目参照）
 - `--accept <path>...`（既定: 無効。手を入れて取り込みを済ませたファイルを、ORIGIN へ「取り込み済み」として記録します。生成・`--upgrade` とは別の 3 つ目の動作で、生成の引数や `--upgrade` とは同時に指定できません。`--output-dir`（既定: カレントディレクトリ）と `--dry-run` とは併用できます。下記「`--accept`: 手を入れたファイルを取り込み済みとして記録する」参照）
 - `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
@@ -328,20 +329,25 @@ fi
 
 #### `--upgrade` の振り分け
 
-`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 6 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
+`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 7 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
 
 | 状態 | 動作 | 出力 |
 |---|---|---|
 | 手を入れていない（現物 = 記録したハッシュ） | 新しい版で更新する | `write: <path> (upgraded)` |
-| 手を入れて取り込み済みにした（現物 = `accepted:`）うえで、新しい版 = 記録（雛形が変わっていない） | 取り込むべき差分が無いので、現物を温存して報告するだけ。`.dcb-new` は置かず、残っている古い `.dcb-new` も消さない | `keep (modified, template unchanged)` |
-| 手を入れた（現物 ≠ 記録）が取り込み済みではない、または雛形が変わった、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える | `keep (modified)` / `keep (no record)` |
+| 記録が無い（`hash:` が無い）が、`--baseline-from <dir>` の同じ相対パスが通常ファイルで、現物と一致する | 記録 = 現物として扱い、手を入れていないものとして新しい版で更新する（`hash:` の記録があるファイルには使わない） | `write: <path> (upgraded, baseline match)` |
+| 手を入れた（現物 ≠ 記録）が、雛形は変わっていない（新しい版 = 記録）。取り込み待ち（`pending:` や残っている `.dcb-new`）が無い | 取り込むべき差分が無いので、現物を温存して報告するだけ。`.dcb-new` は置かない。表示は現物の由来で分ける: 取り込み済み（現物 = `accepted:`）、プロジェクト所有（`owned:`）、それ以外 | `accepted (template unchanged)` / `owned (template unchanged)` / `modified (template unchanged)` |
+| 手を入れた（現物 ≠ 記録）うえで、雛形が変わった、または取り込み待ち（`pending:` や残っている `.dcb-new`）がある、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き（取り込む前に失った分も同じ版の `--upgrade` で置き直す）、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える。ORIGIN へ `pending:` を記録する | `keep (modified)` / `keep (no record)` |
 | 新しい版で増えた（現物が無い） | 生成する | `write: <path> (new)` |
 | 手を入れたが新しい版と同じ内容 | 更新済みとして扱い、古い `.dcb-new` があれば消す | `up-to-date` |
 | 新しい版で生成されなくなった | **報告するだけで削除しない**。記録からは外す | `no longer generated (not deleted)` |
 
+- **`keep` で始まる行は、取り込み待ち（`.dcb-new` を置いた）か、手を入れたため残したファイル**です。`(template unchanged)` が付く行は雛形が変わっていないので `.dcb-new` を置いておらず、取り込む差分はありません。
 - 現物がシンボリックリンクなら、たどらず手を入れた扱いにして `.dcb-new` を置きます。親ディレクトリが出力先の外を指すリンクなら、何も書かずに止めます（終了コード 1）。
 - 手を入れたファイルにも、ORIGIN には**新しい版のハッシュ**を記録します。次回の `--upgrade` で、その `.dcb-new` を取り込まないまま現物が新しい版と同じになれば、更新済みとして扱います。
 - ORIGIN の `accepted:` 行（下記 `--accept`）は、`--upgrade` が引き継ぎます。ただし、その回に `.dcb-new` を置いた（雛形が変わった）ファイル、または新しい版で更新したファイルの分は落とします。雛形が変わったあとの現物は、取り込み済みの記録と照らす前提が変わっているためです（`doctor.sh` は FAIL を出します）。
+- ORIGIN の `owned:` 行（プロジェクトが所有・編集するファイルの印）は、`--upgrade` が今回の生成対象から作り直します。`pending:` 行（`.dcb-new` の取り込み待ちの印）は、その回に `.dcb-new` を置いた（置き直した）ファイルだけに書きます。現物が新しい版と同じになった（`up-to-date` / `upgraded`）ファイルや、`--without-*` で生成対象から外れたファイルの分は残りません。`owned:` / `pending:` の無い既存の ORIGIN も読めます。次の `--upgrade` で `owned:` が書き足され、既に `.dcb-new` が残っているファイルには `pending:` が書き足されます。
+- `pending:` が無いのに `.dcb-new` が残っているファイル（`pending:` を導入する前の版が置いたもの）は、雛形が変わっていなければ `.dcb-new` を置き直さず、`keep (modified, .dcb-new left)` と報告して `pending:` を書き足します。
+- この版へ上げる前に、取り込まずに `.dcb-new` を失っていたファイルは、`pending:` が無いので作り直されません。
 - 手を入れたファイルは**自動では混ぜません**（3 方向マージはしません）。`.dcb-new` と現物を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消してください。`.dcb-new` の残りは `doctor.sh` が WARN で報告します（[Doctor 自己診断](#doctor-自己診断)）。
 
 終了コード:
@@ -372,8 +378,10 @@ bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run 
 - 現物が `hash:` と一致するパスは、`accepted:` を外して「変更なし」（`unchanged:`）と報告します。同じパスを再度渡すと、行を差し替えます（行は 1 行のまま）。
 - 生成の引数（`--project-name` / `--languages` / `--with-*` / `--without-*` / `--base-image` / `--force` / `--no-gitignore` / `--gitignore-targets` / 規範の取得元など）や `--upgrade` と一緒に渡すと、何も書かずに止まります。`--output-dir` と `--dry-run` は併用できます（`--dry-run` は `plan:` 行だけを出し、ORIGIN を変えません）。パスは出力先からの相対パスで指定します。
 - 取り込み済みの記録は、**その内容の現物だけ**を許します。記録したあとでさらに手を入れると、`doctor.sh` は再び FAIL を出します（本当の乖離は引き続き検知します）。
-- 雛形が変わっていない版への `--upgrade` では、取り込み済みにしたファイル（現物 = `accepted:`）に `.dcb-new` を置かず、`accepted:` も引き継ぎます。したがって、取り込みを済ませて `--accept` したファイルは、`--upgrade` を繰り返しても `doctor.sh --strict` が 0 で終わる状態を保てます。
-- 手を入れても `--accept` していないファイルには、雛形が変わっていなくても `.dcb-new` を置きます。`.dcb-new` を取り込む前に失った場合も、同じ版で `--upgrade` をやり直せば作り直されます（`.dcb-new` を置いた時点で `accepted:` は外れるため）。
+- `--accept` は `pending:`（取り込み待ちの印）も外します。`.dcb-new` が残っているパスは受け付けないので、先に差分を取り込んで `.dcb-new` を消してから渡します。
+- 雛形が変わっていない版への `--upgrade` では、手を入れたファイルに `.dcb-new` を置きません。取り込み済みにしたファイル（現物 = `accepted:`）は `accepted:` も引き継ぎます。したがって、取り込みを済ませて `--accept` したファイルは、`--upgrade` を繰り返しても `doctor.sh --strict` が 0 で終わる状態を保てます。
+- 取り込み待ち（`pending:`）のファイルだけは、`.dcb-new` を取り込む前に失っても、同じ版で `--upgrade` をやり直せば作り直されます。
+- **プロジェクトが所有・編集するファイル**（`scripts/acceptance.sh` と `scripts/acceptance-remote.sh`）には、ORIGIN に `owned:` が記録されます。これらは日常的に編集するものなので、`--accept` しなくても、取り込み待ちが無い限り `doctor.sh` は FAIL にしません（編集した件数は `[OK]` で報告します）。`.dcb-new` を置いた（`pending:` がある）あいだは FAIL で、取り込んで `--accept` すると戻ります。一覧は `bootstrap.sh` の `project_owned_rel_paths` が持ち、`tests/test-owned-list.sh` がこの README の記述との一致を機械照合します。
 
 `--upgrade` の注意:
 
@@ -383,6 +391,11 @@ bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run 
 - **ほかの理由で生成されなくなったファイルは報告するだけで、削除しません。** 不要なら手で消してください（`--without-<名前>` で外したフラグのファイルだけが例外です）。
 - **規範の取得元が `local` の場合は、`--playbook-from` の明示が要ります。** ローカルのパスは記録しないため再現できません（`@` `?` `#` を含む URL も同じです。取得元の種類が `tag` / `adjacent` なら引数なしで再現します）。
 - **記録に入力が無い古い ORIGIN、または ORIGIN が無い出力先では、引数を明示しないと止まります。** `--project-name` / `--languages`（必須）と、使っていた `--with-*` や規範の取得元を明示した初回の `--upgrade` で、記録が書き直されます。
+- **ORIGIN が無い出力先（記録が無いファイル）では、手を入れていない DCB のテンプレートと規範ファイルも、新しい版と違えばすべて `keep (no record)` になり、`.dcb-new` が置かれます。** 由来の分からない現物を上書きしない設計のためです。移行の手順は次のとおりです。
+  1. 生成に使った旧い版の `bootstrap.sh` を、同じ引数（規範も同じ版。版は `.ai-playbook/VERSION` で分かります）で、出力先の外の空の一時ディレクトリ（例: `mktemp -d`）へ生成します。
+  2. 出力先で `bootstrap.sh --upgrade --baseline-from <そのディレクトリ>` を、入力を明示して実行します。一致したファイルは `write: <path> (upgraded, baseline match)` で更新され、`.dcb-new` は置かれません。
+  3. 一致しなかったファイル（`keep (no record)`）は、現物と `.dcb-new` の差分を取り込んで `.dcb-new` を消し、`bootstrap.sh --accept <path>` します。最後に `doctor.sh` で確かめます。
+  - 旧い版が分からないときの手作業の手順: `--upgrade` のあと、現物と `.dcb-new` の差分を 1 件ずつ見て判断し、取り込んで `.dcb-new` を消し `--accept` します。
 - 追従先は、実行した `bootstrap.sh` の版です。ネットワークへ最新版を問い合わせません。
 
 ### AI 共通ルールの配置
@@ -446,6 +459,9 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 | `scripts/acceptance-remote.sh` | **外部層**の受け入れ条件（プロジェクトが所有・編集）。`--with-aws` / `--with-gcp` を選んだときだけ配置する骨格のみの雛形。下記「受け入れ条件の二層」参照 |
 
 - `acceptance.sh` は生成時、選択言語ごとに**ルート直下のマニフェストの実在を確認してから**慣習的コマンド（`node`/`package.json`→`npm test`、`go`/`go.mod`→`go test ./...`、`python`/`pyproject.toml`・`requirements.txt`→`python -m pytest`、`php`/`composer.json`→`composer test`、`rust`/`Cargo.toml`→`cargo test`、`ruby`/`Gemfile`→`bundle exec rake`）を実行します。マニフェストが無い言語は理由を出して**スキップ**し（失敗させない）、マニフェストはあるがツールが無い場合は導入手順を添えて**失敗**させます（スキップと混同しない）。1 つも検証を実行できなければ「受け入れ条件が未定義」として**非 0 で終了**します（全スキップで誤って緑になる事故を防ぐ）。スクリプト位置からルートを解決するため、起動時の作業ディレクトリに依存しません。プロジェクトの実態に合わせて編集してください。受け入れ条件が検証可能であるほど、反復が収束しやすくなります。
+  - **雛形は、言語ごとの検証の後ろ（「検証を 1 つでも実行したか」の判定の手前）で、配布した衛生検査 4 本（`check-control-chars.sh` / `check-table-breaks.sh` / `check-doc-links.sh` / `check-shell-portability.sh`）を呼びます。** この 4 本は「検証を 1 つでも実行したか」に**数えません**（マニフェストの無い構成が、検査だけで合格にならないようにするため。4 本が通っても、マニフェストが無ければ「受け入れ条件が未定義」で失敗します）。
+  - **既存の出力先には、雛形の変更は届き方が違います。** `acceptance.sh` はプロジェクトが所有するため、手を入れていなければ `--upgrade` で新しい版（4 本を呼ぶ版）に置き換わり、4 本が動き始めます（既存のコードで赤になりうる）。手を入れていれば `.dcb-new` が置かれ、`pending:` が付くので、取り込むまで `doctor.sh` は FAIL です。どちらの場合も、`acceptance.sh` が 4 本のファイル名を参照していなければ、`--upgrade` の終わりに配線を促す案内が出ます（終了コードは変わりません）。
+  - **意図して呼ばない検査は、`acceptance.sh` にファイル名と理由をコメントで書いてください。** ファイル名が現れていれば、未配線とは見なしません（`doctor.sh` の WARN も `--upgrade` の案内も出ません）。
   - monorepo など、各言語がルート直下ではなくサブディレクトリ（例 `apps/*`）に配置される構成では、生成直後は対象が見つからず「未定義」で失敗します。これは**意図した既定**であり、実配置のマニフェストを見るよう `acceptance.sh` を編集して受け入れ条件を確定させてください。
 - `verify.sh` の受け入れ定義は `VERIFY_ACCEPTANCE` 環境変数で差し替えできます（既定は `scripts/acceptance.sh`）。層を増やすときも同じランナーを使い、受け入れ定義だけを差し替えます（下記「受け入れ条件の二層」）。
 - `verify.sh` は受け入れ条件の**手前**で `scripts/check-no-secrets.sh` を実行します。`acceptance.sh` 側へ置かないのは、あちらがプロジェクトの所有物で受け入れ条件を書き足すたびに触られ、規範由来の検査が消える経路ができるためです。`check-no-secrets.sh` が不在なら `VERIFY_FAIL` で止まります（検査が成立していないことを合格にしないため）。**この検査は git を前提にします**（下記「[機密混入検査](#機密混入検査)」参照）。
@@ -453,16 +469,21 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
   - **移行時の注意:** `verify-commit-identity.sh` は fail-closed です。環境変数 `ALLOWED_AUTHOR_EMAILS` も `.env` の `GIT_IDENTITY_EMAIL` も設定していないプロジェクトでは、`loop-gate.sh` を再生成した時点で**ローカルゲートが緑から赤に変わります**。これは検査が成立しない状態を合格にしない、意図した挙動です。`bash scripts/setup-git-identity.sh` で `.env` の `GIT_IDENTITY_EMAIL` を適用するか、`ALLOWED_AUTHOR_EMAILS` を設定してください（下記「[利用側の設定手順（許可 author email）](#利用側の設定手順許可-author-email)」参照）。
 - `loop-gate.sh` の第二意見は、`scripts/second-opinion-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
 - 差し替えたコマンド（`LOOP_GATE_REVIEW_CMD`）へは、解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡します（ステージ済み差分があるとき・対象が無いときは空）。範囲を受けない差し替えコマンドは、commit 済みのブランチで空のステージ済み差分を見て「対象なし」で終わるため、`loop-gate.sh` は、レビュー対象が実在するのにその出力（`[second-opinion] no diff to review`）を見たときは `GATE_FAIL` にし、記録も残しません。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過します。**限界として、loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが `[second-opinion] no diff to review` を出力したときだけです。** 範囲を使わず、この文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても `GATE_PASS` と記録が出ます。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、自分で範囲を決めて自分で記録を残してください。同梱の reviewer のエンジンだけを変えるなら `LOOP_GATE_REVIEW_CMD='bash scripts/second-opinion-review.sh --engine <名前> ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}'` と書きます。`SECOND_OPINION_ENGINE` の前置は、`.env` が環境変数を上書きするため使えません。
-- 第二意見へ渡す**差分の範囲**は次の順で決まります。ステージ済み差分があるときはレビュー実行体の既定に委ね（範囲を渡しません）、空のときだけ commit 済み範囲へ切り替えます。切り替え先の既定は `@{upstream}..HEAD` で、下のいずれかに当たる場合は**既定ブランチとの分岐点（merge-base）を起点**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決し、汚染の判定と分岐点の算出は**同じ枝**を見ます（別々に決めると、汚染ありと判定した枝と分岐点を取った枝が別物になりうるため）。**上流以外を起点に採った場合は、その理由を 1 行出力します**（黙って範囲を変えると、なぜその差分が対象なのかを読み手が追えないため）。
-  - **上流との差分が空**（push 済みで上流 == HEAD）。ここで空のまま第二意見を呼ぶと、一度も差分を見ないまま通過する偽の緑になります。
-  - **上流が未設定**。
-  - **`@{upstream}..HEAD` が既定ブランチへ到達可能なコミットを含む**（＝このブランチへ既定ブランチを取り込んだ直後）。`@{upstream}..HEAD` は 2 点間の比較なので、取り込んだ側のコミットがまるごと差分へ入り、既にレビューを通った他ブランチの成果を巻き込みます。判定は「マージコミットを含むか」ではなく到達可能性（`git rev-list --count <up>..HEAD` と `git rev-list --count <up>..HEAD ^<base>` の一致）で行うため、マージコミットを作らない fast-forward や rebase での取り込みも同じく検出します。なお squash / cherry-pick での取り込みは新しいコミットを作るだけで到達可能性を生まないため、どの起点を選んでも差分から外れません（範囲の選び方だけでは解けない制約です）。
-  - 既定ブランチの追跡枝を解決できない環境では汚染を判定できないため、**従来どおり上流を使います**（判定不能を汚染扱いにすると、分岐点も取れないまま範囲を失うため）。
+- 第二意見へ渡す**差分の範囲**は、既定の対象を **PR 全体**にして決めます。第二意見のエンジンは差分をプロンプトへ埋め込み、差分の外を読まない形を基本にします。修正を重ねた後の小さな差分（ステージ済みだけ、上流からだけ）を渡すと、差分に現れない既存のコードについて誤った前提を立てて落ちるためです。起点は**既定ブランチとの分岐点（merge-base）**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決します。
+  - **ステージ済み差分があるとき**: `--base <起点>` を渡し、起点から索引までを対象にします（コミット済みの分とステージ済みの分の両方が入ります）。記録の scope は `base:<起点>+staged` です。
+  - **ステージ済み差分が空のとき**: `--range <起点>..HEAD` を渡します。上流があっても、上流からではなく起点からです。記録の scope は `range:<起点>..HEAD` です。
+  - 分岐点を起点にするのは、`<既定ブランチ>..HEAD` のような 2 点間の比較が、既定ブランチ側に進んだコミットを「打ち消し」として差分へ混ぜるためです。既定ブランチを取り込んでいれば（merge / fast-forward / rebase）分岐点が取り込み地点まで進むので、取り込んだ他ブランチの成果は範囲から外れます。なお squash / cherry-pick での取り込みは履歴上の繋がりを残さないため、どの起点を選んでも差分から外れません（範囲の選び方だけでは解けない制約です）。
+  - 起点と HEAD に差分が無いときは、`no reviewable diff` を出力したうえで `GATE_PASS` とします（空ツリーまで広げて、リポジトリ全体を対象にはしません）。
+  - **起点をどう決めたかは 1 行出力します**（黙って範囲を変えると、なぜその差分が対象なのかを読み手が追えないため）。
+  - **既定ブランチの追跡枝を解決できない環境でだけ、従来の決め方に戻ります。** ステージ済みがあれば範囲を渡さず（レビュー実行体の既定のステージ済み差分に委ねます）、空なら上流と HEAD の分岐点から HEAD まで、上流も無い、または上流との差分が空（push 済み）なら空ツリーからの全体です（対象なしとして通すと、第二意見が一度も差分を見ない偽の緑になるため）。
+  - **入力が大きくなり、トークンの消費が増えます。** 大きな PR では、モデルの文脈の上限に近づきます（上限を超えたときの分割は、実行体が持つ入力の分割に従います）。
+  - **起点は手元の追跡枝から決めます。`loop-gate.sh` は fetch しません。** 追跡枝が古ければ、古い起点になります（例: 新しい既定ブランチを取り込んでも、手元の追跡枝がそこまで進んでいなければ、取り込んだ他ブランチの成果が範囲に残ります）。今の起点の決め方と同じ性質です。気になるときは、先に `git fetch` します。
+  - `second-opinion-review.sh` 自体は、`--base <rev>`（索引と `<rev>` の差）、`--range <A>..<B>`、何も渡さない（ステージ済み差分）の 3 通りを受けます。`--base` と `--range` は併用できません。
 - `loop-gate.sh` は source ガードを持ち、`source`（`.`）で読み込んだだけではゲート本体を実行せず、範囲解決の関数だけを提供します。範囲の決め方を単体で検証できるようにするためで、ルートへの `cd` もゲート本体側に置いてあり、読み込んだ側の作業ディレクトリを動かしません。
 - これらは純粋な機構であり、規範（受け入れ検証の機械ゲート化・収束規則・verify ランナー契約）は ai-playbook の `loop-workflow.md` が正本です。規範を配置した場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、第二意見の `second-opinion-review.sh` も配置され、`loop-gate.sh` が自動で直列化します。
 - 上の 3 本は**手元から起動する入口**で、実行するかどうかは人に委ねられています。**回し忘れれば何も起きません。** `verify.sh` は `verify.yml` が CI で再実行して回し忘れを塞ぎますが（下記「受け入れ検証の CI ワークフロー」参照）、**第二意見は手元でしか走らないため、CI が再実行して確かめることができません。** そのため回したことの記録と、記録が無いことを別の契機（PR 更新・手動実行）から検出する確認側を、規範を配置したときにあわせて配置します。定期実行は置きません（PR が無いあいだも走り続け、private リポジトリの Actions の課金枠を減らし続けるため）。`second-opinion-record.sh post` が投稿の直後に確認側を既定ブランチで手動実行し、`/land` がマージの直前に再判定します。
   - `loop-gate.sh` は第二意見の出力を捕まえ、`scripts/second-opinion-record.sh save` へ渡します。レビュー対象が無い（`REVIEW_NO_TARGET`）、または明示的にスキップした（`LOOP_GATE_REVIEW_CMD=''`）場合は記録しません——回していないものを「回した」と記録すると、確認側が偽の緑を出すためです。
-  - 記録は `git rev-parse --git-path second-opinion` が返す worktree ごとのパスへ置き、レビューした対象（ステージ済み差分のツリー、またはコミット範囲の終端）を HEAD と突き合わせてから PR へ投稿します（`scripts/second-opinion-record.sh post`）。中身が変わっていれば投稿しません。
+  - 記録は `git rev-parse --git-path second-opinion` が返す worktree ごとのパスへ置き、レビューした対象（ステージ済み差分、または起点から索引までの差の場合は索引のツリー、あるいはコミット範囲の終端）を HEAD と突き合わせてから PR へ投稿します（`scripts/second-opinion-record.sh post`）。中身が変わっていれば投稿しません。
   - `.github/workflows/second-opinion-gate.yml` が、投稿された記録の head SHA がいまの head と一致するかを確認します。要求はしません（第二意見を回すかどうかは利用者側の判断のままです）。Dependabot のように回す著者が最初からいない PR は、`scripts/second-opinion-gate-exempt.sh` の判定で対象外にします。
   - これらも第二意見そのものと同じ「外部パッケージの導入を前提にしない」機構です。偽造（記録を作らずレビューを回したことにする）までは防げず、検出できるのは失念だけです。
 - `verify.sh` の回し忘れは、CI でも回す `.github/workflows/verify.yml` を**常に**配置して塞ぎます（下記「受け入れ検証の CI ワークフロー」参照）。
@@ -512,6 +533,16 @@ VERIFY_ACCEPTANCE=scripts/acceptance-remote.sh bash scripts/verify.sh
 > **fork からの PR はスキップしません。** `verify.sh` は Secrets を必要とせず、`permissions: contents: read` は fork からの PR に既に与えられている権限なので、走らせられない理由がありません。スキップすると、最も検証が要る外部からの変更にだけゲートが掛からなくなります。スキップの根拠は「その権限では実行できない」ことに限ります（`copilot-review.yml` が fork をスキップするのは `pull-requests` の書き込み権限を要するためで、こちらとは理由が異なります）。
 >
 > ただし **fork からの PR には Secrets もリポジトリ変数も渡りません。** `acceptance.sh` へリポジトリ変数や Secrets に依存する検査を足すと、その検査は fork からの PR でだけ供給元を失い、fail-closed な検査であれば常に赤くなります。恒常的な赤は「赤を無視する習慣」を生むため、足す側で次のどちらかを選んでください。(1) 供給元を要する検査は `acceptance.sh` へ入れず専用のワークフローに置く（許可 author email を要するコミット identity の検査は `identity-guard.yml` が持っています）。(2) fork からの PR を受け付けないリポジトリなら、ワークフロー内にコメントアウトで置いてある `if:` の 1 行を有効にする。
+
+**`scripts/verify.sh` を回す CI を自前で持っている場合**（前提ツールを入れてから `verify.sh` を回す独自のワークフローなど）は、`verify.yml` を消さずに、自前の CI の中身を `verify.yml` へ移して `--accept` します。
+
+- **`verify.yml` を消すと、`doctor.sh --strict` が「記録にあるのに無い」で FAIL になります。`--accept` でも消せません。** 意図した設計です。`verify.sh` が CI で必ず回ることを保証するため、外す入口を持ちません（`--without-*` でも外せません）。`verify.yml` はプロジェクトが所有するファイル（`owned:`）ではないため、手を入れたら `--accept` で取り込み済みにする、という通常の流れに乗せます。
+- 手順:
+  1. 自前の CI が入れている前提ツール（静的解析器など）の導入を、`verify.yml` の「プロジェクトの前提はここへ足す」の位置へ移します。
+  2. 自前のワークフロー（重複して `verify.sh` を回している側）を消します。
+  3. `bash bootstrap.sh --accept .github/workflows/verify.yml` で、手を入れた現物を取り込み済みにします。
+- **required check の名前が変わる場合**（自前の job 名から `verify.yml` の job 名へ）は、ブランチ保護・ruleset の側も直します。直さないと、存在しない check を待ち続けてマージできなくなります。
+- 雛形が変わった版へ `--upgrade` すると、手を入れた `verify.yml` は上書きされず `verify.yml.dcb-new` が隣に置かれます。差分を `verify.yml` へ取り込んでから、`--accept` し直します。
 
 > **この開発リポジトリ自身には `verify.yml` を置きません。** 既に `.github/workflows/ci.yml` が同じ役割を持ち、`scripts/acceptance.sh` がその 6 ジョブ + `identity-guard.yml` を完全ミラーしているため、`verify.yml` を置くと役割が重複し、`tests/test-ci-mirror.sh` のミラー対象が 2 本になります。**雛形を配りながら自分では使わない状態を、無自覚ではなく明示の判断として残します。**
 
@@ -672,16 +703,19 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 | seccomp（Docker の既定のプロファイル） | ネイティブ Linux の Docker Engine と Docker Desktop（macOS）の両方 | `CAP_SYS_ADMIN` を持たないプロセスの namespace の作成 | `bwrap: No permissions to create new namespace` |
 | AppArmor（`docker-default`） | ネイティブ Linux の Docker Engine（AppArmor が有効なとき） | mount | `bwrap: Failed to make / slave: Permission denied` |
 
-先に止めるのは seccomp なので、**AppArmor だけを外しても動きません。** そのため `--with-codex` の生成物は、`compose.yaml` の `app` に次を入れます。
+先に止めるのは seccomp なので、**AppArmor だけを外しても動きません。** そのため `--with-codex` の生成物は、`devcontainer.json` に次を入れます。
 
-```yaml
-    security_opt:
-      - apparmor=unconfined
-      - seccomp=unconfined
+```jsonc
+  // （理由の説明のコメントが付きます）
+  "securityOpt": ["apparmor=unconfined", "seccomp=unconfined"],
 ```
 
+- **`compose.yaml` の `security_opt` には置きません**（v0.20.0 までは置いていました）。go などの feature は、自分の metadata で `seccomp=unconfined` を足します。`compose.yaml` にも同じ値があると、Compose が `security_opt items ... are equal` で重複を拒否し、コンテナが起動しません。`devcontainer.json` の `securityOpt` は、feature の値と重複が除かれて合成されます。
+- **`devcontainer.json` は JSONC（コメント付きの JSON）になります**。VS Code も devcontainer CLI も、コメントを許します。`jq` など厳密な JSON の読み手に渡すときは、コメントを除いてから渡してください（文字列の中の `//` を壊さないよう、`perl -0777 -pe 's{("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/}{defined $1 ? $1 : ""}gse' .devcontainer/devcontainer.json | jq ...` のように文字列を先に拾う形にします。`sed 's://.*::'` は URL を壊します）。
+- **既存の生成先**は、`--upgrade` で `compose.yaml` と `devcontainer.json` の両方が変わります。手を入れていなければ自動で移ります。手を入れていれば `.dcb-new` が置かれるので、`compose.yaml` の `security_opt`（`apparmor=unconfined` / `seccomp=unconfined`）を消し、`devcontainer.json` へ `securityOpt` を足してください。
+
 - **実測した環境**: Ubuntu 26.04.1（カーネル 7.0.0-38、AppArmor 有効、`kernel.apparmor_restrict_unprivileged_userns = 1`）のネイティブの Docker Engine と、codex 0.160.0。既定と AppArmor だけ外した場合は `codex sandbox -- git status` が上の表の 1 行目で失敗し、2 つとも外すと通りました。ホストの `apparmor_restrict_unprivileged_userns` は、この失敗に関わっていませんでした。Docker Desktop（macOS）でも、既定のままでは同じ 1 行目で失敗し、2 つを外すと user namespace の作成と mount が通ることを確かめています。
-- **代償**: コンテナの中のプロセスが namespace を作り、mount できるようになります。Docker がコンテナに既定で掛けている隔離の 2 層を外すことになるので、`--with-codex` を選んだ構成に限っています。codex を使わなくなったら、`compose.yaml` からこの 3 行を消してください。
+- **代償**: コンテナの中のプロセスが namespace を作り、mount できるようになります。Docker がコンテナに既定で掛けている隔離の 2 層を外すことになるので、`--with-codex` を選んだ構成に限っています。codex を使わなくなったら、`devcontainer.json` から `securityOpt`（とその説明のコメント）を消してください。
 - **`systempaths=unconfined` は入れていません。** bwrap は `/proc` を新しく mount しようとして、Docker が `/proc` の一部を隠していることで拒まれますが、codex はこの失敗を自分で避けて動きます。外す範囲を広げずに済むので入れていません。
 - **Docker Desktop（macOS）** には AppArmor がなく、`apparmor=unconfined` は効き目がないだけで害はありません。止めているのは seccomp なので、Mac でもこの設定が要ります。
 
@@ -730,7 +764,7 @@ gh の OAuth App には「ユーザー × アプリ × scope あたり 10 トー
   | commit status（`second-opinion-gate` など）の確認 | Commit statuses: Read |
   | （必須・自動付与） | Metadata: Read |
 
-  **手動実行の権限（Actions: Read and write）は、GitHub の公式ドキュメント（「Permissions required for fine-grained personal access tokens」の Actions の節。`POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` は write）に基づく記載で、実測ではありません。** 初回の発行時に `gh workflow run <ワークフロー> --ref <既定ブランチ>` が通るか確かめてください。
+  **手動実行の権限（Actions: Read and write）は、実測で確かめています**。この表の権限だけを持つ fine-grained PAT で、Actions を Read and write にすると `gh workflow run` が通り、Read-only に下げると `HTTP 403: Resource not accessible by personal access token` で拒否されました（実行の一覧などの読み取りは、どちらでも通ります）。GitHub の公式ドキュメント（「Permissions required for fine-grained personal access tokens」の Actions の節。`POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` は write）とも一致します。権限が足りないと `second-opinion-record.sh post` は、記録の投稿後に手動実行できなかったとして非 0 で終わり、手で起こすコマンドを示します。
 
   **Checks は fine-grained PAT では選べません。** そのため、**非公開リポジトリでは** `commits/<sha>/check-runs` と `gh pr checks` が 403 になります（公開リポジトリでは読めます）。`/land` の雛形はこの 2 つを使わず、Actions と Commit statuses の権限だけで CI を待ちます。プロジェクト側でスクリプトを足すときも、この 2 つに頼らないでください。
 - **`GH_TOKEN` が空の環境は従来どおり**保存済み認証で動きます（`GITHUB_TOKEN` も未設定である場合。下記）。PAT を持たない利用者を壊しません。
@@ -785,6 +819,7 @@ VS Code は接続のたびにコンテナの `~/.docker/config.json` へ `credsS
 - **CWD 非依存。** スクリプト自身の位置（`scripts/` の 1 階層上）から `.env` を解決するため、サブディレクトリから呼んでも正しく読み込みます。`PROJECT_ENV_FILE` で対象ファイルを明示指定できます。
 - **bash / zsh 双方**で動作し、CRLF・`export KEY=VALUE`・`KEY = VALUE`・クォート囲みの各形式を吸収します。複数回読み込んでも安全（冪等）。`.env` が無ければ何もしません。
 - 対話シェルへは `scripts/on-attach.sh` が `~/.bashrc` / `~/.zshrc` へマーカー付きで**冪等に**注入するため、ターミナルから起動する CLI（`gemini` 等）にも `.env` の値が効きます。非対話実行（`scripts/second-opinion-review.sh` 等）は各スクリプトが冒頭で明示的に読み込みます。
+- **コンテナを作り直した直後は、VS Code の拡張から起動するプロセス（Claude Code など）に `.env` の値が届きません。** VS Code の拡張ホストは、`postAttachCommand` の `scripts/on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入するより前に起動し、注入前のシェルから環境を取り込むためです。拡張から起動するプロセスはこの環境を受け継ぐので、会話を開き直しても直りません（ターミナルで新しく開いたシェルは `~/.bashrc` を読むので、こちらには値が効きます）。作り直した直後に 1 度、コマンドパレットから `Developer: Reload Window` を実行してください。拡張ホストが作り直され、注入後のシェルから環境を取り直します。
 
 ## Git identity ガード
 
@@ -808,7 +843,7 @@ VS Code は接続のたびにコンテナの `~/.docker/config.json` へ `credsS
   - 許可する author email は、環境変数 `ALLOWED_AUTHOR_EMAILS`（カンマ/空白区切り）を最優先し、無ければ `.env` の `GIT_IDENTITY_EMAIL` にフォールバックします。どちらでも解決できなければ fail-closed（exit 1）で止まります。
   - committer には `noreply@github.com`（GitHub の squash merge / web UI）、Co-Authored-By には加えて `noreply@anthropic.com`（AI コーディング規約の trailer）を許可します。
   - 許可エントリには `@example.com` / `*@example.com` の形でドメイン一括指定を書けます。**この 2 形だけ**をドメイン指定として解釈し、それ以外は完全一致です（任意の glob を許すと、設定ミスの `*` 1 文字で全 email が通り検知層が無効化されるため）。`*` 単体は何も許可しません。ローカル部が 1 文字以上あり、かつ `@` を含まないことを要求します（`@example.com` という email そのものや、`attacker@untrusted.com@example.com` の形を通さないため）。
-  - committer が `noreply@github.com` のコミットに限り、author が `<login>@users.noreply.github.com` の形であれば許可します。GitHub 側で「メールアドレスを非公開にする」を有効にしている利用者の PR マージ・web UI 編集に対応するためで、許可を committer に縛ることでローカルで作ったコミットには適用されません（ローカルの identity 適用漏れは従来どおり検知します）。
+  - committer が `noreply@github.com` のコミットに限り、author が `<login>@users.noreply.github.com` の形であれば許可します。GitHub 側で「メールアドレスを非公開にする」を有効にしている利用者の PR マージ・web UI 編集に対応するためで、許可を committer に縛るのは、適用漏れが通る範囲を狭めるためです。committer / author の email はローカルで自由に設定できるため、**この許可は偽装を防ぎません**（ローカルで作ったコミットでも、この 2 つを GitHub の形に設定すれば通ります）。この検査の目的は identity の適用漏れ（別アカウントの email の混入）の検出で、意図的な偽装への対策は書き込み権限の管理と、必要なら署名の検証（GitHub の verified な web-flow の署名）が担います。書き込み権限を持つ人を信頼するという既存のトレードオフと同じ側の判断です。
   - 同じ条件（`is_github_authored`）を `Co-Authored-By` にも適用します。マージした人と PR の作者が違う squash merge では、GitHub がマージの瞬間に作者を `Co-authored-by` として足します。PR の検査（マージ前）では見えず、`push(main)` の全履歴検査で初めて現れる形です。
   - 使い方: 既定は `origin/main..HEAD`、範囲指定可、`--full` で HEAD の全履歴（`git rev-list --all` にはしない）。
 - `scripts/verify-commit-identity-selftest.sh`（判定の自己試験。CI と手元で共用）
@@ -902,7 +937,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 装備の選択によらず常に生成するもの（`--dry-run` を付けると、この一覧が `plan:` 行としてそのまま確認できます）:
 
-- `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `.devcontainer/compose.yaml` の `app` サービスを参照）
+- `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `.devcontainer/compose.yaml` の `app` サービスを参照。`--with-codex` のときだけ、説明のコメント付きで `securityOpt` を持つ JSONC になる）
 - `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置。`init: true` で PID 1 を Docker の組み込みの init にし、孤児になったプロセスを回収させる。PID 1 の `sleep infinity` は子を回収しないため、これが無いとゾンビが溜まり、数日でプロセス数の上限に達して `docker exec` もコンテナ内のセッションも止まる。既存の生成先は `--upgrade` で取り込んだあと、コンテナの作り直し（Rebuild）で効く）
 - `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY` / `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
 - `scripts/fix-mount-owner.sh`（永続 volume のマウント先を remoteUser 所有へ戻す。`postCreateCommand` の先頭で実行）
@@ -915,10 +950,10 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
 - `scripts/session-ledger.sh`（同じホストで並行して動く AI セッションの共有台帳。`claim` / `release` / `list` / `check` / `refresh` を持つ。置き場所は `git rev-parse --git-common-dir` の配下で、セッションごとに別ファイルへ追記する。規範は `.ai-playbook/shared-ai-rules.md`「セッション間の協調」。実行環境に依存しないので、装備フラグに関わらず常に生成する）
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
-- `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。単体で `bash scripts/check-control-chars.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する）
-- `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
-- `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合で行う。単体で `bash scripts/check-doc-links.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
-- `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。`acceptance.sh` からは自動で呼ばれないため、通す契機にしたい場合はプロジェクト側で配線する。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
+- `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。作業ツリーの内容に加え、索引（ステージ済み）と作業ツリーで内容が違うファイルは索引の blob も読み、索引側の検出は `<パス> (staged)` と示す。git の clean フィルターが、作業ツリーに無い禁止バイトを索引へ書き込む場合は見逃す（限界。`git diff` がフィルターを通した後の内容を比べるため）。単体で `bash scripts/check-control-chars.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)））
+- `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
+- `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合で行う。単体で `bash scripts/check-doc-links.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
+- `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
 - `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・生成の入力・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に、`--upgrade` が入力の再現と手を入れたかの判定に使います。下記「生成物の由来の記録」参照）
 - `.gitignore` の managed セクション（言語構成に応じて自動更新。`--no-gitignore` で無効化）
@@ -931,7 +966,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 - `scripts/confirm-merge-hook.sh`（マージ実行の前に確認を挟む PreToolUse フックの本体）
 - `scripts/session-coord-hook.sh`（並行セッションの共有台帳を操作の直前に確かめるフックの本体。下記「[セッション協調フック](#セッション協調フックclaude-code)」参照）
-- `scripts/claude-session-wrapper.sh`（セッションの宛先名に場所と作業ツリーを自動で含める起動ラッパー。`.devcontainer/devcontainer.json` が VS Code の設定 `claudeCode.claudeProcessWrapper` へ、作業ツリーの外の固定パス（`/home/vscode/.local/bin/claude-session-launcher`）で配線します。このラッパーを直接指すと、ファイルが無いブランチへ切り替えただけで Claude Code が起動しなくなるため、極小の起動役（ラッパーが実行可能ならそれを、無ければ引数をそのまま exec する）を挟みます。起動役は、`devcontainer.json` の `onCreateCommand` が `scripts/on-attach.sh` を呼ばずに直接書き出し（一時ファイルへ書いて置き換える冪等な設置。失敗しても作成は止めず警告する）、`scripts/on-attach.sh` も接続のたびに冪等に設置します（既存のコンテナへの後追い）。2 つの経路が置く起動役の中身は同じですが、動きは同じではありません（`onCreateCommand` は無条件に設置し、`on-attach.sh` はラッパーが無ければ設置しません）。配線と設置が同じファイルにあるので、`--upgrade` で `on-attach.sh` だけが古いまま残っても、起動役は置かれます。拡張は設定値をそのまま実行ファイルのパスにし、`${workspaceFolder}` や `~` を展開しないため、絶対パスで書きます。`.env` の `SESSION_HOST_LABEL` が空なら宛先名を変えず、どんな失敗でも本体の起動まで進みます）
+- `scripts/claude-session-wrapper.sh`（セッションの宛先名に場所と作業ツリーを自動で含める起動ラッパー。`.devcontainer/devcontainer.json` が VS Code の設定 `claudeCode.claudeProcessWrapper` へ、作業ツリーの外の固定パス（`/home/vscode/.local/bin/claude-session-launcher`）で配線します。このラッパーを直接指すと、ファイルが無いブランチへ切り替えただけで Claude Code が起動しなくなるため、極小の起動役（ラッパーが実行可能ならそれを、無ければ引数をそのまま exec する）を挟みます。起動役は、`devcontainer.json` の `onCreateCommand` が `scripts/on-attach.sh` を呼ばずに直接書き出し（一時ファイルへ書いて置き換える冪等な設置。失敗しても作成は止めず警告する）、`scripts/on-attach.sh` も接続のたびに冪等に設置します（既存のコンテナへの後追い）。2 つの経路が置く起動役の中身は同じですが、動きは同じではありません（`onCreateCommand` は無条件に設置し、`on-attach.sh` はラッパーが無ければ設置しません）。配線と設置が同じファイルにあるので、`--upgrade` で `on-attach.sh` だけが古いまま残っても、起動役は置かれます。拡張は設定値をそのまま実行ファイルのパスにし、`${workspaceFolder}` や `~` を展開しないため、絶対パスで書きます。`.env` の `SESSION_HOST_LABEL` が空なら宛先名を変えず、どんな失敗でも本体の起動まで進みます。宛先名の末尾は通常、起動ごとに変わる PID の 16 進です。ただし起動の引数に `--resume=<会話の識別子>` または `--resume <会話の識別子>`（UUID の形）があれば、識別子の先頭 8 桁（最初のハイフンの前）を使います。会話を再開しても宛先名が変わらず、ほかのセッションが覚えた宛先名へ再起動の後も送れます。`--resume` の直後が UUID の形でないとき（例: `--resume --verbose`）は PID の 16 進です。新しい会話の最初の起動の引数に識別子が含まれない場合は、その最初の起動だけ PID の名前になり、最初の再開のときに 1 回だけ名前が変わります。識別子の先頭 8 桁は、同じ作業ツリーの別の会話と重なる確率は小さいもののゼロではありません。重なると同じ宛先名のセッションが並び、宛先名だけでは送り分けられません（`/peers` の `resolve` は複数件として候補を出しますが、どれを選んでも宛先名は同じです）。そのときは、片方の会話を開き直して新しい会話にしてください）
 - `scripts/session-peers.sh`（同じプロジェクトで動くほかのセッションの一覧・宛先の解決・送信元の署名。`.claude/skills/peers/SKILL.md` の `/peers` が呼びます。`~/.claude/sessions/*.json` は公開された仕様ではないため、読めなければ警告して `ListAgents` を案内します）
 - `.claude/settings.json`（上記 2 つのフックの配線。既存ファイルは既定ポリシー `skip` で温存します）
 - `.claude/.gitignore`（`settings.local.json` を追跡しない）
@@ -967,7 +1002,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.20.0
+version=v0.21.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -984,6 +1019,8 @@ hash:.devcontainer/devcontainer.json=<sha256>
 hash:.env.example=<sha256>
 ...
 accepted:.devcontainer/devcontainer.json=<sha256>   # 取り込み済みにしたファイルがあるときだけ
+owned:scripts/acceptance.sh=1                        # プロジェクトが所有・編集するファイル
+pending:scripts/verify.sh=1                          # .dcb-new が取り込み待ちのときだけ
 ```
 
 | キー | 意味 |
@@ -994,6 +1031,8 @@ accepted:.devcontainer/devcontainer.json=<sha256>   # 取り込み済みにし�
 | `input:<名前>` | 生成結果を左右する入力（下記）。同じ名前は 1 回だけ。値の `%` `改行` は `%25` `%0A` `%0D` で符号化します |
 | `hash:<相対パス>` | その生成物の sha256（`sha256sum` が無い環境では `shasum -a 256`、それも無ければ `openssl dgst -sha256` を使います） |
 | `accepted:<相対パス>` | `bootstrap.sh --accept` が記録する、取り込み済みの現物の sha256。取り込み済みにしたファイルがあるときだけ書く（無い ORIGIN も有効）。`doctor.sh` は現物がこの値と一致すれば変化として扱わない。`--upgrade` は引き継ぎ、その回に `.dcb-new` を置いたファイルの分は落とす |
+| `owned:<相対パス>` | プロジェクト所有のファイルの印（値は `1`）。生成時と `--upgrade` が、今回の生成対象にあるものへ書く。`doctor.sh` は、`pending:` が無ければ現物が `hash:` と違っても乖離として扱わない |
+| `pending:<相対パス>` | `--upgrade` が `.dcb-new` を置いた（取り込み待ち）ファイルの印（値は `1`）。`--accept` か、現物が新しい版と同じになると外れる。あるあいだ `doctor.sh` は FAIL にする。`--upgrade` は、取り込む前に失った `.dcb-new` をこの印で作り直す |
 
 記録する入力と、記録しない入力:
 
@@ -1195,6 +1234,10 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 
 > **既存プロジェクトへの影響**: 管理セクションは再実行で丸ごと置換されるため、再生成するとこれらの行が入ります。セクション外へ手書きしていた同じ内容の行はそのまま残りますが、`.gitignore` の重複は無害です。**なお `.gitignore` は既に追跡済みのファイルを追跡対象から外しません。** 既にコミットされている場合は `git rm --cached` が別途必要です。
 
+> **セクションの外の行は、位置と順序を保ちます。** 管理セクションがあれば、その場所で中身だけを差し替えます（`--upgrade`・再実行・`--force` のいずれも同じ）。セクションの前にあった行は前に、後ろにあった行は後ろに残ります。`.gitignore` は後勝ちで、否定パターン（`!name`）の効き方は行の位置で変わるためです。セクションが無い `.gitignore` には、空行 1 行を挟んで末尾へ足します。
+>
+> **開始行だけ、または終了行だけが残った `.gitignore` は、書き込みの前に検出して止まります**（終了コード 1。`--dry-run` でも同じで、`.gitignore` もほかの生成物も書きません）。どこまでがセクションか決められず、黙って消すと利用側の行を失うためです。壊れた行を消すか、足りない行を補ってください。セクションに触れないなら `--no-gitignore` を指定します。
+
 ### 生成されるスクリプトの分類（そのまま配布 / 生成時に展開）
 
 `scripts/*.sh` の正本は `bootstrap.sh` の `get_template_content()` 内のヒアドキュメントです。テンプレートは**そのまま書き出されるもの**と、**生成時に構成へ応じて展開されるもの**の 2 種類に分かれます。生成先で内容が食い違って見えたときに、追随漏れなのか設計どおりなのかを判別できるよう、分類を明示します。
@@ -1254,12 +1297,13 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 - `--strict`（既定: 無効。WARN があれば非 0 で終了する）
 - `-h` / `--help`
 
-検査は 4 カテゴリです。
+検査は 5 カテゴリです。
 
 | カテゴリ | 検査内容 |
 |---|---|
-| 静的構造 | `.devcontainer/devcontainer.json` / `.env.example` / `scripts/on-attach.sh` / `scripts/fix-mount-owner.sh` / `scripts/post-rebuild-check.sh` / `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh` / `scripts/check-no-secrets.sh` の実在。`devcontainer.json` が妥当な JSON であること。**`${localEnv:` の混入が無いこと**（下記）。`dockerComposeFile` が参照する compose ファイルが実在すること |
+| 静的構造 | `.devcontainer/devcontainer.json` / `.env.example` / `scripts/on-attach.sh` / `scripts/fix-mount-owner.sh` / `scripts/post-rebuild-check.sh` / `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh` / `scripts/check-no-secrets.sh` の実在。`devcontainer.json` が妥当な JSON であること（コメントは除いて判定します。JSONC として読みます）。**`${localEnv:` の混入が無いこと**（下記）。`dockerComposeFile` が参照する compose ファイルが実在すること |
 | スクリプト検査 | 生成した各スクリプトの `bash -n` 構文検査（NG なら FAIL）と実行ビットの有無（無ければ WARN） |
+| 衛生検査の配線 | 生成先に衛生検査 4 本（`check-control-chars.sh` / `check-table-breaks.sh` / `check-doc-links.sh` / `check-shell-portability.sh`）のいずれかがあり、`scripts/acceptance.sh` がそのファイル名を参照していなければ `[WARN]`（件数と配線の例を添える。`--strict` では非 0）。ファイル名がコメントにあるだけでも参照と見なすので、意図して呼ばない検査はファイル名と理由をコメントで書けば WARN が出ない。`acceptance.sh` が無いときは判定しない。`doctor.sh` は単体で取得されうるため、4 本の一覧は自前で持つ（`bootstrap.sh` と同じ内容。`tests/test-hygiene-wiring.sh` が照合する） |
 | 生成物の由来（下記） | `.devcontainer/ORIGIN`（[生成物の由来の記録](#生成物の由来の記録devcontainerorigin)）と現物を突き合わせ、生成時からの変更・記録した版が古いことを検出する |
 | 実行時コマンドの可用性 | `bash` / `jq` / `perl` / `gh`。`devcontainer.json` の features から検出した言語ランタイム（`rust` は feature 名と実行ファイル名が異なるため `cargo` で判定。`ruby` は一致するため `ruby` で判定）。`--with-aws` / `--with-gcp` で配線した cloud CLI（`aws` / `gcloud` / `terraform`）。`docker-outside-of-docker` を配線していれば `docker`。いずれも不在は WARN |
 
@@ -1272,13 +1316,17 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | 記録が無い | `[WARN]` **診断できません。** この生成先が本機能より前に作られたか、記録が削除された可能性があります。記録の無い生成先への遡及はできません |
 | 記録が壊れている（`version=` 行が読めない等） | `[FAIL]` 診断できません |
 | 記録した生成物が現物と一致しないが、`accepted:` の記録（`bootstrap.sh --accept`）とは一致する | `[OK]` 取り込み済みとして件数を報告 |
-| 記録した生成物が現物と一致せず、`accepted:` の記録とも一致しない | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告し、`bootstrap.sh --accept <path>` の案内を添える |
+| 記録した生成物が現物と一致しないが、`owned:`（プロジェクトが所有・編集）の記録があり、`pending:` が無い | `[OK]` 編集済みの所有ファイルとして件数を報告 |
+| 記録した生成物が現物と一致せず、`accepted:` / `owned:` の記録とも合わない、または `pending:` がある | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告し、`bootstrap.sh --accept <path>` の案内を添える |
+| 記録した生成物が現物と一致するが、`pending:` が残っている | `[WARN]` 件数と対象のパスを出し、`bootstrap.sh --accept <path>` か `--upgrade` で外すよう案内（取り込む差分は無いが記録が古い。`--strict` では落ちる） |
 | 記録した生成物が消えている | `[FAIL]` 該当ファイル名を添えて報告 |
 | 記録の版が `doctor.sh` 自身の版より古い | `[WARN]` 「上流が更新されています」と報告 |
 | 記録の版が一致（または新しい） | `[OK]` |
 | `*.dcb-new` が残っている | `[WARN]` 一覧と取り込み方を出す（下記） |
 
-**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` / `accepted:<パス>=<sha256>` 以外の行、`%` の不正な並び、不正な `hash:` / `accepted:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
+**`doctor.sh` は `bootstrap.sh` と同じ版を使ってください。** 旧い `doctor.sh` は `owned:` / `pending:` を「認識できない行」として `[FAIL]` にします（`accepted:` の導入時と同じ性質）。
+
+**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` / `accepted:<パス>=<sha256>` / `owned:<パス>=<値>` / `pending:<パス>=<値>` 以外の行、`%` の不正な並び、不正な `hash:` / `accepted:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
 
 **残っている `*.dcb-new` の報告**: `bootstrap.sh --upgrade` が、手を入れたファイルの隣へ置いた新しい版（`<path>.dcb-new`）が出力先に残っていれば、`[WARN]` でパスを一覧します（`.git` と `node_modules` は除き、シンボリックリンクはたどりません）。取り込み方は、**元のファイルと `.dcb-new` の中身を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消す**ことです。自動では混ぜません。`--strict` では、これも失格になります。
 

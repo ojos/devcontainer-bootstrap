@@ -6,6 +6,51 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.21.0
+
+### Summary
+- **この版が要求する ai-playbook は v0.11.0 以降**（ai-playbook を配置する構成で）。生成される `scripts/loop-gate.sh` は、ステージ済みの差分があるとき `second-opinion-review.sh --base <起点>` を呼ぶが、`--base` は ai-playbook v0.11.0 の雛形で足したもの（ojos/ai-packages-dev#585）。**古い ai-playbook の `second-opinion-review.sh` と組み合わせると、その経路で第二意見が `error: unknown option: --base` で止まり、loop-gate は「第二意見は判定に到達しませんでした（実行失敗）」を出して記録を残さず、`GATE_FAIL` で終わる**（黙って通ることはない）。ステージ済みの差分が空のとき（`--range` を渡す経路）は古い ai-playbook でも動く。版の検査は機構では行わない。
+- **第二意見の既定の対象を、PR 全体にした**（ojos/ai-packages-dev#585）。`loop-gate.sh` は、`origin/HEAD` → `origin/main` → `origin/master` の順で解決した既定ブランチと HEAD の分岐点を起点にし、ステージ済みの差分があれば `--base <起点>`（起点から索引まで）、空なら `--range <起点>..HEAD` を渡す（上流があっても上流からではない）。差分しか見えないエンジンに修正分だけの小さな差分を渡すと、差分に現れない既存のコードについて誤った前提を立てて落ちやすいため。
+  - 入力が大きくなる。トークンの消費が増え、大きな PR ではモデルの文脈の上限に近づく。
+  - 起点は手元の追跡枝で決まる。`loop-gate.sh` は fetch しないので、追跡枝が古いと起点も古くなる。
+  - 既定ブランチの追跡枝を解決できないときだけ、従来に近い決め方に戻る（ステージ済みがあれば reviewer の既定、空なら上流との分岐点 → HEAD。上流が無い、または上流との差分が空なら空ツリー → HEAD）。
+  - 記録の scope に、使った範囲（`base:<起点>+staged` / `range:<起点>..HEAD`）を残す。`LOOP_GATE_REVIEW_CMD` で差し替えたコマンドへの範囲の渡し方は変えていない。
+- **プロジェクトが所有するファイルを ORIGIN に `owned:` として記録し、`.dcb-new` の取り込み待ちを `pending:` で記録するようにした**（ojos/ai-packages-dev#534 / ojos/ai-packages-dev#566）。対象は `scripts/acceptance.sh` / `scripts/acceptance-remote.sh`。
+  - `owned:` のファイルは、日常的に編集しても `doctor.sh` が FAIL にしない（`pending:` が無ければ、現物が `hash:` と違っても `[OK]`）。雛形が変わっていない版への `--upgrade` では `.dcb-new` を置かない。
+  - `--upgrade` で `.dcb-new` を置いたファイルには `pending:` が付き、取り込むまで `doctor.sh` が FAIL にする。取り込む前に `.dcb-new` を失っても、`pending:` の記録から作り直す。`--accept` で `pending:` も外れる。現物が `hash:` と一致するのに `pending:` が残っていれば `[WARN]`（`--strict` では非 0）。
+  - **`--upgrade` の表示を改名した。`keep (modified, template unchanged)` は無くなり**、`accepted (template unchanged)` / `owned (template unchanged)` / `modified (template unchanged)` のどれかになる（`modified` は doctor が FAIL のまま）。`keep` で始まる行は、取り込み待ち（`.dcb-new`）か、手を入れたため残したものだけになる。
+  - 旧い版が置いた `.dcb-new` が残っているのに `pending:` が無いファイルは、置き直さずに `keep (modified, .dcb-new left)` と表示して `pending:` を書き足し、終了コード 2 で知らせる。
+- **配布する衛生検査 4 本（`check-control-chars.sh` / `check-table-breaks.sh` / `check-doc-links.sh` / `check-shell-portability.sh`）を、`acceptance.sh` の雛形が呼ぶようにした**（ojos/ai-packages-dev#540 / ojos/ai-packages-dev#579）。言語ごとの検証の後ろで呼ぶ。4 本は「検証を実行した」には数えないので、マニフェストの無い構成が検査だけで合格にはならない。
+  - 既存の出力先で `acceptance.sh` が 4 本のファイル名を参照していなければ、`doctor.sh` が `[WARN]`（節「Hygiene checks wiring」）を出し、`--upgrade` が終わりに配線を促す案内を出す（終了コードは変えない）。意図して呼ばない検査は、`acceptance.sh` にファイル名と理由をコメントで書けば WARN も案内も出ない。
+- **`--upgrade` に `--baseline-from <dir>` を足した**（ojos/ai-packages-dev#536 / ojos/ai-packages-dev#583）。ORIGIN の無い出力先（または記録に無いファイル）で、旧い版で生成した結果のディレクトリを渡すと、それと一致する現物を「手を入れていない」とみなして新しい版へ更新し（表示は `write: <path> (upgraded, baseline match)`、dry-run は `plan: update (baseline match) <path>`）、手を入れたものだけに `.dcb-new` を置く。`hash:` の記録があれば記録を優先する。
+  - `--upgrade` と一緒のときだけ受け付ける。`<dir>` が存在するディレクトリでない・空の文字列・シンボリックリンク・出力先そのもののときは、何も書かずに終了コード 1 で止まる。`--baseline-from` は ORIGIN に記録しない。
+  - README に、ORIGIN の無い出力先からの移行の手順（旧い版が分からないときの手作業の手順、baseline は出力先の外に作ること）を書いた。
+- **`--with-codex` の緩和（`apparmor=unconfined` / `seccomp=unconfined`）の置き場所を、`compose.yaml` の `security_opt` から `devcontainer.json` の `securityOpt` へ移した**（ojos/ai-packages-dev#543 / ojos/ai-packages-dev#571）。go などの devcontainer feature も `seccomp=unconfined` を足すため、compose に両方が出ると「security_opt items ... are equal」でコンテナが起動しなかった。`devcontainer.json` の `securityOpt` なら devcontainer CLI が重複を除く。
+  - **`devcontainer.json` はコメント付き（JSONC）になりうる。** 緩和の理由をコメントで残すため。`doctor.sh` はコメントを除いてから読む（文字列の中は残す。末尾のカンマは許さない）。コメントを除く処理に `perl` を使うので、`doctor.sh` が `perl` に頼るようになった。
+- **`.gitignore` の管理セクションを、その場で差し替えるようにした**（ojos/ai-packages-dev#538 / ojos/ai-packages-dev#575）。今までは取り除いてから末尾へ足し直していたため、セクションの後ろにあった利用側の行が前へ移り、否定パターンの効き方が変わりえた。セクションの外の行（空行を含む）は位置も順序も変えない。
+  - 開始と終了の対が複数あるときは、1 つ目を差し替え、2 つ目以降を取り除く。
+  - 開始行だけ・終了行だけがある壊れた区画は、書き込みの前に検出し、何も書かずに終了コード 1 で止まる（`--dry-run` / `--force` でも）。壊れた行を消すか補う、または `--no-gitignore` を付ける。
+- **Claude Code のセッションの宛先名（`CLAUDE_CODE_SESSION_NAME`）の末尾を、会話の識別子の先頭 8 桁にした**（ojos/ai-packages-dev#561 / ojos/ai-packages-dev#577）。起動の引数に `--resume=<id>` / `--resume <id>` があり UUID の形なら使う（小文字にそろえる）。拡張の再読み込みなどでプロセスが起動し直しても、同じ会話なら宛先名が変わらない。
+  - 識別子が無いときは従来どおり PID の 16 進。VS Code の拡張が新しい会話の起動の引数に識別子を含めない場合、最初の起動だけ PID の名前になり、最初の再開のときに 1 回だけ名前が変わる。
+- **`check-control-chars.sh` が、作業ツリーに加えて索引（ステージ済み）の内容も検査するようにした**（ojos/ai-packages-dev#542 / ojos/ai-packages-dev#584）。禁止バイトをステージしたあとで作業ツリーだけを直しても検出し、`<パス> (staged)` と示す。`assume-unchanged` / `skip-worktree` の印が付いたファイルも索引を読む。
+  - 限界: git の clean フィルターが、作業ツリーに無い禁止バイトを索引へ書き込む場合は見逃す。
+- **commit identity の検査が偽装を防がないことを、`verify-commit-identity.sh` のコメントと README に明記した**（ojos/ai-packages-dev#541 / ojos/ai-packages-dev#582）。committer / author の email はローカルで自由に設定できるので、GitHub が作ったコミットの形への許可はローカルで作ったコミットにも通る。この検査の目的は identity の適用漏れの検出で、偽装への対策は書き込み権限の管理と、必要なら署名の検証が担う。判定は変えていない。
+- README の追記:
+  - **コンテナを作り直した直後は、`Developer: Reload Window` を 1 度実行する必要があることを書いた**（ojos/ai-packages-dev#557 / ojos/ai-packages-dev#586）。VS Code の拡張ホストは `postAttachCommand` が `~/.bashrc` に読み込みの行を足す前に起動するため、拡張から起動するプロセス（Claude Code など）に `.env` の値（`GH_TOKEN` など）が届かない。会話を開き直しても直らない。
+  - `verify.sh` を回す CI を自前で持つ利用側向けに、`verify.yml` を消さずに自前の CI の中身を移し、`bootstrap.sh --accept .github/workflows/verify.yml` で取り込み済みにする手順を書いた（ojos/ai-packages-dev#539 / ojos/ai-packages-dev#581）。`verify.yml` を消すと doctor が FAIL になり、`--accept` でも消せない（意図した設計）。required check の名前が変わる場合は、ブランチ保護・ruleset の側も直す。
+  - ゲートの手動実行に要る PAT の権限（Actions: Read and write）を、実測済みの記載に書き換えた（ojos/ai-packages-dev#556）。Read-only では `gh workflow run` が HTTP 403 で拒否される。
+
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** ai-playbook を配置している構成では、**`--playbook-version v0.11.0` を付けて規範もあわせて上げる**（付けないと、ステージ済みの差分があるときの第二意見が `--base` を知らずに失敗し、`loop-gate.sh` が `GATE_FAIL` になる）。ai-playbook を配置していない構成には付けない（付けると、ai-playbook を新たに配置する）。
+- **`doctor.sh` は `bootstrap.sh` と同じ版を使う。** 旧い `doctor.sh` は、この版が ORIGIN に書く `owned:` / `pending:` の行を「認識できない行」として FAIL にする。
+- `--upgrade` の出力を読んでいる利用側の仕組みがあれば、表示の改名（`keep (modified, template unchanged)` が無くなった）に合わせる。
+- この版へ上げる前に、旧い版で `.dcb-new` を取り込まずに失っていたファイルは、`pending:` の記録が無いので作り直されない。
+- **手を入れていない `acceptance.sh` は、`--upgrade` で新しい版になり、衛生検査 4 本が動き始める。既存のコードで赤になりうる。** 手を入れた `acceptance.sh` には `.dcb-new` と `pending:` が付き、取り込むまで doctor が FAIL になる。取り込まずに配線しない場合は、doctor の新しい WARN が `--strict` の結果を変える（4 本を呼ぶか、意図して呼ばない検査をファイル名と理由でコメントに書く）。
+- **`--with-codex` で生成した出力先では、`compose.yaml` と `devcontainer.json` の両方の雛形が変わる。** 手を入れていなければ `--upgrade` で移り、手を入れていれば `.dcb-new` が置かれる。取り込むときは、`compose.yaml` の `security_opt` を消し、`devcontainer.json` に `securityOpt` を置く。
+- **`devcontainer.json` を `jq` で直接読んでいる利用側の検査は、コメントを除いてから渡す必要がある**（`devcontainer.json` が JSONC になりうるため）。
+- `.gitignore` の管理セクションの開始行・終了行の片方だけが残っている出力先では、`bootstrap.sh` が止まる。壊れた行を消すか補ってから実行し直す。
+- ORIGIN の無い出力先では、旧い版で生成した結果を出力先の外に作り、`--upgrade --baseline-from <dir>` で上げられる（手順は README）。
+
 ## v0.20.0
 
 ### Summary

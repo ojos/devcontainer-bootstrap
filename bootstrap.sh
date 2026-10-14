@@ -28,6 +28,10 @@ GITIGNORE_TARGETS=""
 # --upgrade: 記録した入力で生成し直し、手を入れていないファイルだけ新しい版へ更新する。
 # 引数で明示されたものだけを記録の入力より優先するため、明示の有無を別に持つ。
 UPGRADE="false"
+# --upgrade --baseline-from <dir>: 旧い版で生成した結果のディレクトリ。ORIGIN に hash: の記録が無い
+# ファイルを、ここの同じ相対パスの内容と照合する（実行の仕方であり、ORIGIN には記録しない）。
+BASELINE_FROM=""
+BASELINE_FROM_SET="false"
 MANAGE_GITIGNORE_EXPLICIT="false"
 GITIGNORE_TARGETS_EXPLICIT="false"
 # upgrade の結果の集計。UPGRADE_HASHES は「相対パス<TAB>新しい版のハッシュ」の行
@@ -39,6 +43,10 @@ UPGRADE_LEFTOVER=""
 # するのは、更新・新規作成・up-to-date・.dcb-new など、ほかのどの分岐でも古い記録を残さないため
 # （落とす側を列挙すると、分岐を足したときに漏れて古い記録が生き残る）。
 UPGRADE_ACCEPT_KEEP=""
+# --upgrade が今回 .dcb-new を置いた（または置き直した）相対パスの一覧（改行区切り）。ORIGIN の
+# pending: 行（取り込み待ちの記録）はこのパスの分だけを書く。取り込み待ちでなくなったもの
+# （現物 = 新しい版、更新済み、生成対象から外れた）の記録を、列挙せずに落とすため。
+UPGRADE_PENDING=""
 # --accept <path>...: 手を入れたファイルを取り込み済みとして ORIGIN へ記録する（3 つ目の動作）。
 ACCEPT="false"
 ACCEPT_PATHS=()
@@ -70,7 +78,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.20.0"
+DCB_VERSION="v0.21.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -123,6 +131,10 @@ options:
                               override the recorded inputs. Not combinable with --force;
                               --dry-run prints the plan only. Exit: 0 all applied,
                               2 some <path>.dcb-new left, 1 failure.
+  --baseline-from <dir>       With --upgrade only: a directory holding what an older version
+                              generated. A file with no hash: record whose content equals the
+                              same relative path under <dir> is treated as untouched and
+                              updated. <dir> is only read; symlinks under it never match.
   --accept <path>...          Record edited files as accepted in .devcontainer/ORIGIN
                               (output dir defaults to $PWD). Use it after merging the
                               package's changes by hand: doctor.sh then treats the file as
@@ -304,6 +316,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)          DRY_RUN="true"; shift ;;
     --force)            FORCE="true"; shift ;;
     --upgrade)          UPGRADE="true"; shift ;;
+    --baseline-from)    BASELINE_FROM="${2-}"; BASELINE_FROM_SET="true"; shift 2 ;;
     # 取り込み済みの記録。後ろの "-" で始まらない引数をすべてパスとして受ける。
     --accept)
       ACCEPT="true"; shift
@@ -341,6 +354,34 @@ if [[ "$UPGRADE" == "true" && "$FORCE" == "true" ]]; then
   exit 1
 fi
 
+# --baseline-from は --upgrade の判定の入力。それ以外（生成・--accept・--force）と一緒では
+# 使い道が無いので、何も書かずに止める。<dir> は書き込みの前に存在を確かめ、絶対パスへ直す。
+if [[ "$BASELINE_FROM_SET" == "true" ]]; then
+  if [[ "$UPGRADE" != "true" ]]; then
+    echo "error: --baseline-from は --upgrade と一緒のときだけ指定できます。何も書かずに止めます。" >&2
+    exit 1
+  fi
+  if [[ -z "$BASELINE_FROM" ]]; then
+    echo "error: --baseline-from にはディレクトリが必要です（空の文字列は指定できません）。何も書かずに止めます。" >&2
+    exit 1
+  fi
+  if [[ -L "$BASELINE_FROM" ]]; then
+    echo "error: --baseline-from: $BASELINE_FROM はシンボリックリンクです。<dir> 側のリンクはたどらないので、実体のパスを渡してください。何も書かずに止めます。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$BASELINE_FROM" ]]; then
+    echo "error: --baseline-from: $BASELINE_FROM は存在するディレクトリではありません。何も書かずに止めます。" >&2
+    exit 1
+  fi
+  BASELINE_FROM="$(cd -P "$BASELINE_FROM" && pwd)"
+  # 出力先そのものを指すと、記録の無い現物がすべて「一致」になり、手を入れたものも上書きされる。
+  baseline_out="${OUTPUT_DIR:-$PWD}"
+  if [[ -d "$baseline_out" && "$(cd -P "$baseline_out" && pwd)" == "$BASELINE_FROM" ]]; then
+    echo "error: --baseline-from に出力先そのものは指定できません（現物と照合しても意味が無く、手を入れたファイルも上書きされます）。旧い版の生成結果を別のディレクトリへ作って渡してください。何も書かずに止めます。" >&2
+    exit 1
+  fi
+fi
+
 # --accept は 3 つ目の動作（生成・--upgrade とは別）。生成の引数や --upgrade と混ぜると、
 # 何を書くのかが曖昧になるので、ORIGIN を書く前に止める。--output-dir と --dry-run だけは併用できる。
 if [[ "$ACCEPT" == "true" ]]; then
@@ -358,6 +399,7 @@ if [[ "$ACCEPT" == "true" ]]; then
   [[ -z "$PLAYBOOK_FROM" ]] || accept_conflict="$accept_conflict --playbook-from"
   [[ -z "$PLAYBOOK_VERSION" ]] || accept_conflict="$accept_conflict --playbook-version"
   [[ "$PLAYBOOK_CONFLICT_POLICY_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --playbook-conflict-policy"
+  [[ "$BASELINE_FROM_SET" != "true" ]] || accept_conflict="$accept_conflict --baseline-from"
   if [[ -n "$accept_conflict" ]]; then
     echo "error: --accept は生成の引数や --upgrade と同時に指定できません（指定されたもの:$accept_conflict）。" >&2
     echo "       --output-dir と --dry-run だけが併用できます。何も書かずに止めます。" >&2
@@ -469,7 +511,7 @@ EOF2
     return 0
   fi
 
-  # 書き直す。対象パスの既存の accepted: 行を落とし、accept のぶんを末尾へ足す。
+  # 書き直す。対象パスの既存の accepted: 行と pending: 行（取り込み待ちの記録）を落とし、accept のぶんを末尾へ足す。
   # 中身だけを差し替える（cat > で、ORIGIN のモード・所有者を変えない）。
   tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-accept.XXXXXX")"
   # 一覧は改行を含むので -v ではなく環境変数で渡す（macOS の awk は -v の値の改行を拒む）。
@@ -480,6 +522,7 @@ EOF2
         if (a[i] == "") continue
         split(a[i], f, "\t")
         drop["accepted:" f[2] "="] = 1
+        drop["pending:" f[2] "="] = 1
       }
     }
     {
@@ -724,6 +767,48 @@ select_base_image
 
 # ── 組み込みテンプレート（bash 3 互換） ─────────────────────────────────
 
+# プロジェクトが所有・編集するファイルの一覧（単一の定義。ORIGIN の owned: 行の元）。
+# README が「プロジェクトが所有・編集」と書くファイルと一致させる
+# （tests/test-owned-list.sh が機械照合する）。生成対象に無いものは記録しない。
+project_owned_rel_paths() {
+  printf '%s\n' \
+    'scripts/acceptance.sh' \
+    'scripts/acceptance-remote.sh'
+}
+
+# 配布する衛生検査（acceptance.sh の雛形が呼ぶ検査）の相対パス一覧。単一の定義。
+# 同じ一覧を doctor.sh（HYGIENE_CHECKS。単体で取得されうるため自前で持つ）と README が
+# 書き写している。雛形の呼び出しを含めた四者の一致は tests/test-hygiene-wiring.sh が
+# 機械照合する。ここを変えたら雛形（scripts/acceptance.sh）・doctor.sh・README も変えること。
+hygiene_check_rel_paths() {
+  printf '%s\n' \
+    'scripts/check-control-chars.sh' \
+    'scripts/check-table-breaks.sh' \
+    'scripts/check-doc-links.sh' \
+    'scripts/check-shell-portability.sh'
+}
+
+# --upgrade の終わりに、衛生検査が acceptance.sh から参照されているかを見て、未配線なら
+# 配線を促す案内を出す（終了コードは変えない。doctor.sh の WARN と同じ判定）。
+# 判定はファイル名の出現で行う。コメントにファイル名と理由を書けば、意図して呼ばない
+# 検査として扱われ、案内は出ない。acceptance.sh が無いときは判定しない。
+upgrade_report_unwired_checks() {
+  local acceptance="$OUTPUT_DIR/scripts/acceptance.sh" rel name unwired=""
+  [[ -f "$acceptance" ]] || return 0
+  while IFS= read -r rel; do
+    [[ -f "$OUTPUT_DIR/$rel" ]] || continue
+    name="${rel##*/}"
+    if ! command grep -F -- "$name" "$acceptance" >/dev/null 2>&1; then
+      unwired="${unwired}  bash ${rel}"$'\n'
+    fi
+  done < <(hygiene_check_rel_paths)
+  [[ -n "$unwired" ]] || return 0
+  echo "[bootstrap] upgrade: 配布した検査が scripts/acceptance.sh から呼ばれていません（置かれただけで、効いていません）。" >&2
+  echo "[bootstrap] upgrade: acceptance.sh はプロジェクトの所有物なので、自動では配線しません。次の行を、ran_any の判定（受け入れ条件が未定義の失敗）の手前へ足してください:" >&2
+  printf '%s' "$unwired" >&2
+  echo "[bootstrap] upgrade: 意図して呼ばない検査は、acceptance.sh にファイル名と理由をコメントで書くと、この案内は出ません。" >&2
+}
+
 # 生成する相対パス一覧。mode を廃したため単一の集合。
 template_rel_paths() {
   printf '%s\n' \
@@ -859,7 +944,7 @@ TMPL
       # 永続 volume は構成に応じて条件配線する（__VOLUME_MOUNTS__ /
       # __VOLUME_SECTION__ を render_content が置換）。gh は常時、cloud と AI ツールは
       # 選択時のみ。docker socket は常に明示。
-      # security_opt（__SECURITY_OPT__）は --with-codex のときだけ出す（build_security_opt_block）。
+      # codex のサンドボックスの緩和（securityOpt）は compose.yaml に置かず、devcontainer.json 側に置く（#543）。
       cat <<'TMPL'
 services:
   app:
@@ -879,7 +964,6 @@ __VOLUME_MOUNTS__
     # 上限に達する。そうなると docker exec（エディタの接続）もコンテナ内のセッションも
     # 止まる。消さないこと。効かせるにはコンテナの作り直しが要る。
     init: true
-__SECURITY_OPT__
 __VOLUME_SECTION__
 TMPL
       ;;
@@ -899,6 +983,7 @@ TMPL
   "service": "app",
   "workspaceFolder": "/workspaces/__PROJECT_NAME__",
   "shutdownAction": "stopCompose",
+__SECURITY_OPT__
   "features": {
     "ghcr.io/devcontainers/features/common-utils:1": {
       "configureZsh": true
@@ -2131,8 +2216,12 @@ is_allowed() {
 # committer は常に noreply@github.com。ローカルの identity 適用漏れとは発生経路が
 # 別で、許可リストに個別の email を足して回っても、メンバーが増えるたびに同じ穴が開く。
 #
-# 許可は「committer が noreply@github.com であること」に縛る。GitHub 自身が作成した
-# コミットに限定され、ローカルで作ったコミットには適用されない。
+# 許可は「committer が noreply@github.com であること」に縛る。ただし committer / author の
+# email はどちらもローカルで自由に設定できるメタデータなので、この縛りは偽装を
+# 防がない（ローカルで作ったコミットでも、この 2 つを GitHub の形に設定すれば通る）。
+# 縛る目的は、ローカルの identity 適用漏れ（別アカウントの email の混入）が、この許可で
+# 通ってしまう範囲を狭めることに限る。意図的な偽装への対策は、書き込み権限の管理と、
+# 必要なら署名の検証（GitHub の verified な web-flow の署名）が担う。
 #
 # トレードオフ: リポジトリへの書き込み権限を持つアカウントであれば、その GitHub
 # アカウントが Contributors に現れることを許容する。この検知層が塞ぐのはローカルの
@@ -2250,9 +2339,8 @@ main() {
       # GitHub は squash merge で、マージした人と PR の作者が違うと作者を
       # Co-authored-by に足す（マージの瞬間に付くため、PR の検査では見えず、
       # push(main) の全履歴検査だけが拾う）。author と同じ is_github_authored で
-      # 許可し、ローカルで作ったコミットには広げない（is_github_authored は
-      # committer を縛っているため、ここで広がるのは GitHub がサーバ側で作った
-      # コミットに限られる）。
+      # 許可する。committer を縛っても email はローカルで設定できるため、偽装は
+      # 防がない（上の is_github_authored の説明と同じ。適用漏れの検出が目的）。
       if ! is_allowed "$coauthor_email" "${ALLOWED_COAUTHOR_EMAILS_ARR[@]}" \
         && ! is_github_authored "$coauthor_email" "$committer_email"; then
         echo "[identity] NG ${sha:0:8} co-author=<${coauthor_email}> — ${subject}" >&2
@@ -3001,7 +3089,9 @@ TMPL
 # check-control-chars.sh — 追跡ファイルへの「表示されない制御文字」混入の検知ゲート
 #
 # 位置づけ:
-#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。生成時の雛形の
+#   acceptance.sh はこれを呼ぶ。既存の出力先は acceptance.sh がプロジェクトの
+#   所有物なので、プロジェクト側で配線する（doctor.sh が未配線を WARN で知らせる）。
 #   scripts/check-no-secrets.sh / scripts/verify-commit-identity.sh と同じ形にそろえる。
 #
 #   verify.sh から直接呼ばず acceptance.sh へ置く理由: verify.sh が直接呼ぶのは
@@ -3041,10 +3131,25 @@ TMPL
 #   - 行末の流儀（CRLF / 末尾改行）と、既存ファイルの一括修正。
 #
 # 検査対象の決め方:
-#   git ls-files -z を起点にし、作業ツリー上の実体を読む。
+#   git ls-files -z を起点にし、作業ツリー上の実体と、索引（ステージ済み）の blob の両方を読む。
 #   - 追跡対象だけを見る。制御文字が問題になるのは、それが共有される状態に入ってからである。
-#   - 索引に入った時点で対象になるので、コミット前（git add 済み）でも落ちる。
 #   - 作業ツリーの内容を読むため、追跡ファイルを編集して混入させた時点でも落ちる。
+#   - 索引の内容も読む。禁止バイトを含む内容を git add したあとに作業ツリーだけを直すと、
+#     作業ツリーは綺麗でも次のコミットには禁止バイトが入る。これを見逃さないため、
+#     索引と作業ツリーで内容が違うファイル（git diff --name-only -z。作業ツリーで消したものを
+#     含む）は、索引の blob を取り出して同じ規則で検査する。報告には「<パス> (staged)」と
+#     示すので、作業ツリー側の検出と区別できる。
+#   - assume-unchanged / skip-worktree の印が付いたファイルは、git diff が作業ツリーの変更を
+#     列挙しない。git ls-files -v で印を列挙し、差分の一覧に加えて索引の blob を必ず読む。
+#   - 索引側で読むのは通常のファイル（モード 100644 / 100755）の blob だけ。サブモジュール
+#     （160000）とシンボリックリンク（120000）は読まない。リンクの blob はリンク先のパス
+#     文字列で、作業ツリー側でリンクを走査しないのと同じ理由で対象外とする。
+#   - 索引の blob もバイナリ判定は作業ツリーと同じ（下記の 2 段）。git の NUL 判定は使わない。
+#   - 限界: git の clean フィルター（git add のときに内容を変換する設定）が、作業ツリーに無い
+#     禁止バイトを索引へ書き込む場合は見逃す。git diff はフィルターを通した後の内容を比べて
+#     「差分なし」と判断するため、その索引の blob を読まない。確実に塞ぐには追跡している
+#     全ファイルの索引も読む必要があり、検査の量がおよそ倍になる。禁止バイトを足すフィルターを
+#     自分で設定する場面はほぼ無いので、この形を採らない。
 #   - 実体が無いもの（削除済み・サブモジュール）とシンボリックリンクは走査しない。
 #     リンクを開くと git が持つ内容（リンク先のパス文字列）ではなくリンク先の実体を
 #     読んでしまい、判定が別物になるため。リンク先パスに制御文字が入る事態は考えにくい。
@@ -3114,6 +3219,9 @@ trap 'rm -rf "$WORK"' EXIT
 PATTERN="$WORK/forbidden.pattern"
 TRACKED="$WORK/tracked.z"
 TARGETS="$WORK/targets.z"
+STAGED_DIR="$WORK/staged"
+DIFF_NAMES="$WORK/diff-names.z"
+FLAGGED="$WORK/flagged.z"
 SUSPECTS="$WORK/suspects.z"
 GREP_ERR="$WORK/grep.err"
 
@@ -3165,10 +3273,77 @@ while IFS= read -r -d '' path; do
   printf '%s\0' "$path"
 done < "$TRACKED" > "$TARGETS"
 
+# ── 索引側の blob の取り出し ─────────────────────────────────────────────────
+#
+# 索引と作業ツリーで内容が違うファイルだけを対象にする（同じなら作業ツリーの走査で足りる）。
+# 取り出した blob は $STAGED_DIR/<連番> に置き、元のパスは <連番>.label に持つ
+# （パス名に改行があっても崩れないよう、ファイルで持つ）。走査は他の対象と同じ経路に流す。
+# --literal-pathspecs は、パス名の * や : を git にパターンとして解釈させないため。
+staged_count=0
+mkdir -p "$STAGED_DIR"
+
+# stage_index_blob <パス> — 索引のそのパスの blob を取り出して走査対象へ加える。
+stage_index_blob() {
+  local path="$1" entry_file="$WORK/entry.z" entry meta mode rest sha stage staged_file
+  git --literal-pathspecs ls-files -s -z -- "$path" > "$entry_file" \
+    || fail "git ls-files -s に失敗しました（$path）。索引のエントリを読めません。"
+  # 出力は「<モード> <sha> <stage>TAB<パス>」。マージ中の衝突（stage 1-3）は複数行になりうる。
+  while IFS= read -r -d '' entry; do
+    meta="${entry%%$'\t'*}"
+    mode="${meta%% *}"
+    rest="${meta#* }"
+    sha="${rest%% *}"
+    stage="${rest#* }"
+    # 通常のファイルの blob だけを読む（理由は冒頭「検査対象の決め方」）。
+    [[ "$mode" == "100644" || "$mode" == "100755" ]] || continue
+    [[ "$stage" == "0" ]] || continue
+    staged_count=$((staged_count + 1))
+    staged_file="$STAGED_DIR/$staged_count"
+    git cat-file blob "$sha" > "$staged_file" \
+      || fail "git cat-file に失敗しました（$path）。索引の blob を読めません。"
+    printf '%s (staged)' "$path" > "$staged_file.label"
+    printf '%s\0' "$staged_file" >> "$TARGETS"
+  done < "$entry_file"
+}
+
+git diff --name-only -z > "$DIFF_NAMES" || fail "git diff に失敗しました。索引と作業ツリーの差分を列挙できません。"
+while IFS= read -r -d '' path; do
+  stage_index_blob "$path"
+done < "$DIFF_NAMES"
+
+# assume-unchanged / skip-worktree の印が付いたファイルは、git diff が作業ツリーの変更を
+# 列挙しない。だが次のコミットに入る内容は索引の blob なので、差分の有無によらず必ず読む。
+# git ls-files -v の先頭の印は、小文字 = assume-unchanged、S / s = skip-worktree。
+git ls-files -v -z > "$FLAGGED" || fail "git ls-files -v に失敗しました。印の付いたファイルを列挙できません。"
+while IFS= read -r -d '' rec; do
+  tag="${rec%% *}"
+  case "$tag" in
+    [a-zS]) ;;
+    *) continue ;;
+  esac
+  path="${rec#* }"
+  # 差分の一覧に既にあるものは二重に読まない。
+  already=0
+  while IFS= read -r -d '' diffed; do
+    if [[ "$diffed" == "$path" ]]; then already=1; break; fi
+  done < "$DIFF_NAMES"
+  [[ "$already" -eq 0 ]] || continue
+  stage_index_blob "$path"
+done < "$FLAGGED"
+
+# 報告に出す名前。索引から取り出した一時ファイルは、元のパスに「(staged)」を添えて示す。
+display_name() {
+  if [[ "$1" == "$STAGED_DIR/"* && -f "$1.label" ]]; then
+    cat "$1.label"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 [[ "$tracked_count" -gt 0 ]] \
   || fail "追跡ファイルが 1 件もありません。検査していないことと、制御文字が無いことは別なので失敗させます。"
-[[ "$target_count" -gt 0 ]] \
-  || fail "走査できる追跡ファイルが 1 件もありません（全件が実体なし、またはリンク）。検査が成立していないため失敗させます。"
+[[ $((target_count + staged_count)) -gt 0 ]] \
+  || fail "走査できる追跡ファイルが 1 件もありません（全件が実体なし、またはリンク。索引側の blob も 0 件）。検査が成立していないため失敗させます。"
 
 # ── 1 段目: 禁止バイトを含むファイルを 1 回の走査で拾う ──────────────────────
 #
@@ -3230,7 +3405,7 @@ if [[ -s "$SUSPECTS" ]]; then
 
     violations=$((violations + 1))
     hit_lines="$(grep -c -a -f "$PATTERN" -- "$path" || true)"
-    printf '[control-chars]   %s（該当 %s 行）\n' "$path" "$hit_lines" >&2
+    printf '[control-chars]   %s（該当 %s 行）\n' "$(display_name "$path")" "$hit_lines" >&2
     # 該当行は cat -v で可視化してから出す。生のまま出すと、端末では**やはり見えない**。
     # 先頭 5 行に絞り、1 行 200 バイトで切る（長い行で対処が画面から流れないように）。
     grep -n -a -f "$PATTERN" -- "$path" 2>/dev/null \
@@ -3240,8 +3415,8 @@ fi
 
 # ── 結果 ─────────────────────────────────────────────────────────────────────
 
-printf '[control-chars] 検査したパス: 追跡 %s 件 / 走査 %s 件（実体なし・リンク %s 件、バイナリ %s 件）\n' \
-  "$tracked_count" "$target_count" "$skipped_count" "$binary_count"
+printf '[control-chars] 検査したパス: 追跡 %s 件 / 走査 %s 件（実体なし・リンク %s 件、バイナリ %s 件）、索引側 %s 件\n' \
+  "$tracked_count" "$target_count" "$skipped_count" "$binary_count" "$staged_count"
 
 if [[ "$violations" -gt 0 ]]; then
   printf '[control-chars] 表示されない制御文字を含むファイルを %s 件検出しました。\n' "$violations" >&2
@@ -3478,7 +3653,9 @@ TMPL
 # することを機械で検査する
 #
 # 位置づけ:
-#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。生成時の雛形の
+#   acceptance.sh はこれを呼ぶ。既存の出力先は acceptance.sh がプロジェクトの
+#   所有物なので、プロジェクト側で配線する（doctor.sh が未配線を WARN で知らせる）。
 #   scripts/check-control-chars.sh / scripts/check-table-breaks.sh と同じ形にそろえる。
 #
 # なぜ機構で押さえるか:
@@ -3955,7 +4132,9 @@ TMPL
 #   実行せずに検出する。
 #
 # 位置づけ:
-#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。
+#   判定はこのスクリプトが持ち、scripts/acceptance.sh は呼ぶだけ。生成時の雛形の
+#   acceptance.sh はこれを呼ぶ。既存の出力先は acceptance.sh がプロジェクトの
+#   所有物なので、プロジェクト側で配線する（doctor.sh が未配線を WARN で知らせる）。
 #   scripts/check-control-chars.sh / scripts/check-table-breaks.sh と同じ形にそろえる。
 #
 # なぜ機構で押さえるか:
@@ -5654,6 +5833,21 @@ ran_any=0
 
 __ACCEPTANCE_CHECK_LINES__
 
+# 衛生検査（言語のマニフェストに依存しない。配布された検査を呼ぶ）。
+# 言語ごとの検証（上）の後ろ、「1 つでも実行したか」の判定（下）の手前に置く。
+# ここは ran_any に数えない。マニフェストの無い構成が、検査だけで合格にならないようにする
+# （検証していないことを合格として報告しないため）。
+# 外したい検査は、行を消さずにファイル名と理由をコメントで残すこと（doctor.sh は、この
+# ファイルが 4 本のファイル名を参照していれば「未配線」の WARN を出さない）。
+echo "[acceptance] (hygiene) check-control-chars"
+bash scripts/check-control-chars.sh
+echo "[acceptance] (hygiene) check-table-breaks"
+bash scripts/check-table-breaks.sh
+echo "[acceptance] (hygiene) check-doc-links"
+bash scripts/check-doc-links.sh
+echo "[acceptance] (hygiene) check-shell-portability"
+bash scripts/check-shell-portability.sh
+
 if [[ "$ran_any" -eq 0 ]]; then
   echo "[acceptance] 受け入れ条件が未定義です。検証対象のマニフェストが 1 つも見つかりません。" >&2
   echo "[acceptance] このプロジェクトの受け入れ条件（テスト等）を scripts/acceptance.sh に定義してください。" >&2
@@ -5808,23 +6002,28 @@ TMPL
 #   差し替えたコマンドへは、解決した範囲を環境変数 LOOP_GATE_REVIEW_RANGE で渡す
 #   （ステージ済みがあるとき・対象が無いときは空）。
 #
-#   second-opinion-review.sh の既定対象はステージ済み差分で、空なら「レビュー対象なし」
-#   として 0 を返す。commit 後（ステージが空）にこのゲートを回すと、第二意見が
-#   実質スキップされたまま GATE_PASS が出ることになる。push 前ゲートとしては
-#   偽の緑なので、ステージが空のときは commit 済み範囲を対象に切り替える。
+#   **既定の対象は PR 全体にする。** 第二意見のエンジンは差分をプロンプトへ埋め込み、
+#   差分の外を読まない形を基本にする。修正を重ねた後の小さな差分（ステージ済みだけ、
+#   上流からだけ）を渡すと、差分に現れない既存のコードについて誤った前提を立てて落ちる。
+#   そこで起点を、既定ブランチ（origin/HEAD → origin/main → origin/master の順）と
+#   HEAD の分岐点にする。
+#     - ステージ済み差分があるとき: --base <起点> で、起点から索引までを渡す
+#       （コミット済みの分とステージ済みの分の両方が入る）。
+#     - ステージ済みが空のとき: --range <起点>..HEAD を渡す。上流があっても、
+#       上流からではなく起点から。
+#   起点に分岐点（merge-base）を使うのは、既定ブランチ側に進んだコミットを
+#   「打ち消し」として差分へ混ぜないため。既定ブランチを取り込んでいれば分岐点が
+#   取り込み地点まで進むので、取り込んだ他ブランチの成果は範囲から外れる。
+#   既定ブランチの追跡枝は fetch しない（手元の追跡枝が古ければ古い起点になる）。
 #
-#   切り替えた先が空になる経路も塞ぐ。push 済みのブランチでは上流と HEAD が
-#   同じコミットを指すため @{upstream}..HEAD の差分が空になり、同じ偽の緑が
-#   復活する。範囲は「解決できたか」ではなく「実際に差分があるか」で選び、
-#   無ければ既定ブランチとの分岐点まで戻してブランチ全体を対象にする。
-#   それでも差分が無いときは、レビュー対象が無いことを明示したうえで通過する
-#   （空を一律 FAIL にすると、差分の無い状態でのゲート実行が落ちるため）。
+#   既定ブランチを解決できないときだけ、従来の決め方に戻る。ステージ済みがあれば
+#   reviewer の既定（ステージ済み差分）に委ね、空なら「上流 → HEAD」、上流も無ければ
+#   空ツリーからのリポジトリ全体を対象にする。
 #
-#   上流との差分が空でなくても、その範囲が他ブランチの成果を巻き込むことがある。
-#   @{upstream}..HEAD は 2 点間の比較なので、既定ブランチを取り込んだ直後は
-#   取り込んだ側のコミットがまるごと差分に入る。それは既にレビューを通った他
-#   ブランチの成果であって、このブランチが加えた変更ではない。範囲が既定ブランチ
-#   へ到達可能なコミットを含むときは分岐点まで戻し、なぜ範囲を変えたかを出力する。
+#   範囲が空（起点と HEAD に差分が無い）のときは、レビュー対象が無いことを明示した
+#   うえで通過する（空を一律 FAIL にすると、差分の無い状態でのゲート実行が落ちるため）。
+#   ステージ済みが空のまま reviewer の既定へ流すと、空の差分を見て「対象なし」で
+#   通る偽の緑になるので、commit 済み範囲を必ず明示して渡す。
 #
 # 第二意見の記録:
 #   第二意見は手元でしか走らず、受け入れ検証のように CI が再実行して確かめられない。
@@ -5843,10 +6042,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 既定の reviewer へ渡す引数を決める。
 #
-# ステージ済み差分があるときは何も渡さない（reviewer 側の既定に委ねる）。
-# 空のときだけ commit 済み範囲へ切り替える。git リポジトリでない場合や範囲を
-# 解決できない場合は、従来どおり引数なしで呼ぶ。範囲を解決できないことは
-# reviewer を呼べない理由にならないため、ここでは落とさない。
+# 既定ブランチとの分岐点が解決できれば、それを起点にする（冒頭「既定の対象は PR 全体」）。
+# ステージ済みがあれば REVIEW_BASE（--base の値）、空なら REVIEW_RANGE（--range の値）。
+# 既定ブランチを解決できないときだけ従来の決め方に戻り、ステージ済みがあれば何も
+# 渡さず（reviewer 側の既定に委ねる）、空なら上流 → 空ツリーの順に範囲を決める。
+# git リポジトリでない場合や範囲を解決できない場合は、従来どおり引数なしで呼ぶ。
+# 範囲を解決できないことは reviewer を呼べない理由にならないため、ここでは落とさない。
 #
 # なお、git 管理外ではこの関数へ到達する前に、先行する段で必ず落ちる。commit
 # identity 検査（step 1）は git log を、verify.sh が呼ぶ機密混入検査（step 2 の中、
@@ -5854,12 +6055,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 合格にしないため。この関数が git 外の経路を持つのは、範囲解決を単体で使える
 # ようにしておくためである。
 REVIEW_RANGE=""
+# ステージ済み差分があるときの起点（reviewer の --base へ渡す）。REVIEW_RANGE とは
+# 排他で、どちらか一方だけが入る。
+REVIEW_BASE=""
 # 範囲は解決できたが差分が空だった（= レビューできる対象が無い）状態を表す。
 # REVIEW_RANGE="" とは区別する。この状態を reviewer の既定へ流すと、空の
 # ステージ済み差分を見せることになり、塞いだはずの素通りへ戻るため。
 REVIEW_NO_TARGET=0
-# 上流以外を起点に採ったときの理由。黙って範囲を変えると、なぜその差分が
-# レビュー対象なのかを読み手が追えないため、採用時に 1 行出力する。
+# 起点をどう決めたかの説明。黙って範囲を変えると、なぜその差分がレビュー対象なのかを
+# 読み手が追えないため、採用時に 1 行出力する。
 REVIEW_RANGE_REASON=""
 
 # 範囲が実際に差分を持つか。git diff --quiet は差分ありで 1 を返す。
@@ -5874,9 +6078,7 @@ range_has_diff() {
 # 既定ブランチの追跡枝を解決し、名前を標準出力へ返す。見つからなければ 1 を返す。
 # 既定ブランチ名は決め打ちせず origin/HEAD → origin/main → origin/master の順で探す。
 #
-# 解決を 1 箇所へ集約するのは、範囲の汚染判定と分岐点の算出とで**同じ枝**を見る
-# 必要があるため。別々に決めると、「汚染ありと判定した枝」と「分岐点を取った枝」が
-# 別物になりうる。
+# 追跡枝は fetch しない。手元の追跡枝が古ければ、起点も古くなる。
 resolve_integration_base() {
   local base
   for base in origin/HEAD origin/main origin/master; do
@@ -5888,110 +6090,29 @@ resolve_integration_base() {
   return 1
 }
 
-# 範囲 <from>..HEAD が、既に既定ブランチ <base> へ到達可能なコミットを含むか。
+# 既定ブランチを解決できないときの決め方（従来の決め方）。ステージ済みが空のときだけ呼ぶ。
 #
-#   all = <from>..HEAD の総数
-#   own = そのうち <base> から到達できないもの（= このブランチが加えた分）
-#   all != own なら、他ブランチの成果を巻き込んでいる
-#
-# 「マージコミットを含むか」では判定しない。取り込み方によって現れる形が違い、
-# 形ごとに書き分けるほど取りこぼす。到達可能性で見れば取り込み方に依らない。
-#
-# <base> が空（既定ブランチの追跡枝が無い）なら判定できない。ここで真を返すと
-# 分岐点も取れないまま範囲を失うため、偽を返して従来どおり上流を使わせる。
-range_includes_base_commits() {
-  local from="$1" base="$2" all own
-  [[ -n "$base" ]] || return 1
-  all="$(git rev-list --count "$from..HEAD" 2>/dev/null || true)"
-  own="$(git rev-list --count "$from..HEAD" "^$base" 2>/dev/null || true)"
-  # どちらかが数えられなければ判定不能。汚染なし扱いにして上流を使わせる。
-  [[ -n "$all" && -n "$own" ]] || return 1
-  [[ "$all" != "$own" ]]
-}
-
-resolve_review_range() {
-  command -v git >/dev/null 2>&1 || return 0
-  git rev-parse --git-dir >/dev/null 2>&1 || return 0
-  # ステージ済みがあるなら reviewer の既定に委ねる。
-  git diff --cached --quiet || return 0
-  # コミットが 1 件も無ければ比較の起点を作れない。
-  git rev-parse --verify --quiet HEAD >/dev/null || return 0
-
-  # 汚染判定と分岐点の算出は、ここで解決した 1 つの枝だけを見る。
-  local base=""
-  base="$(resolve_integration_base || true)"
-
-  # 上流を起点にできない理由。分岐点を採ったときにそのまま出力する。
-  local fallback_reason=""
-
-  # 上流が設定されていればそこからの差分。未 push のコミットがそのまま対象になる。
-  # ただし採用条件は 2 つある。
-  #   1. 差分が空でないこと。push 済みだと上流 == HEAD で空になり、第二意見が
-  #      一度も差分を見ないまま通過する（偽の緑）。
-  #   2. 範囲が既定ブランチへ到達可能なコミットを含まないこと。含むなら、その
-  #      分は他ブランチが加えた既レビュー済みの成果であって、このブランチの
-  #      変更ではない。
-  local upstream
+# 上流が設定されていればそこからの差分。未 push のコミットがそのまま対象になる。
+# push 済みで上流 == HEAD だと差分が空になる。remote があるのに既定ブランチの追跡枝が
+# 無いなら、空ツリー（= リポジトリ全体）へは広げずレビュー対象なしとして扱う。
+resolve_review_range_without_base() {
+  local upstream upstream_empty=0
   upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
   if [[ -n "$upstream" ]]; then
-    if ! range_has_diff "$upstream..HEAD"; then
-      fallback_reason="upstream range $upstream..HEAD has no diff (branch already pushed)"
-    elif range_includes_base_commits "$upstream" "$base"; then
-      fallback_reason="upstream range $upstream..HEAD also contains commits already reachable from $base (default branch integrated into this branch)"
-    else
-      # **起点は上流の先端ではなく、上流と HEAD の分岐点にする。** 第二意見は
-      # `git diff <範囲>` で差分を取り、これは両端のツリーの差である。上流が
-      # 分岐点より先へ進んでいると（ゲートの最中に既定ブランチへ別の PR が入った等）、
-      # 進んだ分が逆向きに差分へ入り、このブランチが触っていないファイルへの指摘で
-      # ゲートが落ちる。上の 2 の判定は `git log` の意味（上流に無いコミット）で見るため、
-      # この混入を検出できない。three-dot（A...B）は diff では分岐点基準になるが、
-      # 第二意見が `git log` にも同じ範囲を渡すと対称差になるので使わない。
-      #
-      # 上流が進んでいなければ分岐点は上流の先端と同じなので、従来どおり上流の名前で
-      # 範囲を書く（出力と記録の範囲の表記を変えない）。
-      local upstream_mb upstream_tip
-      upstream_mb="$(git merge-base "$upstream" HEAD 2>/dev/null || true)"
-      upstream_tip="$(git rev-parse --verify --quiet "$upstream" 2>/dev/null || true)"
-      if [[ -n "$upstream_mb" && -n "$upstream_tip" && "$upstream_mb" != "$upstream_tip" ]]; then
-        REVIEW_RANGE="$upstream_mb..HEAD"
-        REVIEW_RANGE_REASON="$upstream has advanced beyond the merge-base; reviewing from the merge-base ${upstream_mb:0:12} so that changes only on $upstream are not reverted into the diff"
-      else
-        REVIEW_RANGE="$upstream..HEAD"
-      fi
+    # **起点は上流の先端ではなく、上流と HEAD の分岐点にする。** 範囲は両端のツリーの
+    # 差になるので、上流が分岐点より先へ進んでいると、上流側だけの変更を取り消す差分が
+    # 混ざる。
+    local upstream_mb
+    upstream_mb="$(git merge-base "$upstream" HEAD 2>/dev/null || true)"
+    [[ -n "$upstream_mb" ]] || upstream_mb="$upstream"
+    if range_has_diff "$upstream_mb..HEAD"; then
+      REVIEW_RANGE="$upstream_mb..HEAD"
+      REVIEW_RANGE_REASON="no default branch tracking ref was found; reviewing from the merge-base ${upstream_mb:0:12} with the upstream $upstream"
       return 0
     fi
-  else
-    fallback_reason="no upstream is configured for this branch"
-  fi
-
-  # 既定ブランチの追跡枝との分岐点を起点にし、ブランチ全体をレビュー対象にする。
-  #
-  # 分岐点（merge-base）を使うのは、base..HEAD が 2 点間の比較であり、base 側に
-  # 進んだコミットを「打ち消し」として差分へ混ぜるため。ブランチが加えた変更
-  # だけを対象にする。既定ブランチを取り込んでいる場合は分岐点が取り込み地点まで
-  # 進むので、取り込んだ成果は範囲から外れる。
-  if [[ -n "$base" ]]; then
-    local mb
-    mb="$(git merge-base "$base" HEAD 2>/dev/null || true)"
-    # 履歴が繋がっていない（分岐点が無い）場合の受け皿。
-    [[ -n "$mb" ]] || mb="$base"
-    if range_has_diff "$mb..HEAD"; then
-      REVIEW_RANGE="$mb..HEAD"
-      REVIEW_RANGE_REASON="$fallback_reason; reviewing from the merge-base with $base instead"
-      return 0
-    fi
-    # 既定ブランチの追跡枝が見つかった時点で起点は確定する。そこと差分が無いのは
-    # 「レビュー対象が無い」であって、空ツリーまで戻してリポジトリ全体を対象に
-    # すべき状況ではない。
-    REVIEW_NO_TARGET=1
-    return 0
-  fi
-
-  # 上流はあるが既定ブランチの追跡枝が無い場合。remote は存在するので、下の
-  # 空ツリー（= リポジトリ全体）へは広げずレビュー対象なしとして扱う。
-  if [[ -n "$upstream" ]]; then
-    REVIEW_NO_TARGET=1
-    return 0
+    # 上流との差分が空（push 済み）。ここで対象なしとして通すと、第二意見が一度も
+    # 差分を見ないまま通る偽の緑になる。以前と同じく、下の空ツリーからの全体へ戻る。
+    upstream_empty=1
   fi
 
   # remote が無いプロジェクト。起点が無いので空ツリーからの全体を対象にする。
@@ -6008,12 +6129,59 @@ resolve_review_range() {
   empty_tree="$(git hash-object -t tree /dev/null 2>/dev/null || true)"
   if [[ -n "$empty_tree" ]] && range_has_diff "$empty_tree..HEAD"; then
     REVIEW_RANGE="$empty_tree..HEAD"
-    REVIEW_RANGE_REASON="$fallback_reason; no default branch tracking ref either, reviewing the whole history"
+    if [[ "$upstream_empty" -eq 1 ]]; then
+      REVIEW_RANGE_REASON="no default branch tracking ref was found and the upstream range has no diff (branch already pushed); reviewing the whole history"
+    else
+      REVIEW_RANGE_REASON="no default branch tracking ref and no upstream; reviewing the whole history"
+    fi
     return 0
   fi
 
   # 空ツリーとの差分すら無い（実質空のリポジトリ）。
   REVIEW_NO_TARGET=1
+}
+
+resolve_review_range() {
+  command -v git >/dev/null 2>&1 || return 0
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local staged=0
+  git diff --cached --quiet || staged=1
+  # コミットが 1 件も無ければ比較の起点を作れない。
+  git rev-parse --verify --quiet HEAD >/dev/null || return 0
+
+  # 既定ブランチとの分岐点を起点にして、PR 全体を対象にする。
+  local base mb
+  base="$(resolve_integration_base || true)"
+  if [[ -n "$base" ]]; then
+    mb="$(git merge-base "$base" HEAD 2>/dev/null || true)"
+    if [[ -n "$mb" ]]; then
+      REVIEW_RANGE_REASON="reviewing the whole PR from the merge-base ${mb:0:12} with $base"
+      if [[ "$staged" -eq 1 ]]; then
+        if git diff --cached --quiet "$mb" -- 2>/dev/null; then
+          # 起点から索引までの差が空（コミットした変更を索引で取り消した等）。
+          # reviewer を呼ぶと「対象なし」を返し、対象が実在すると見なして落ちる。
+          REVIEW_RANGE_REASON=""
+          REVIEW_NO_TARGET=1
+        else
+          REVIEW_BASE="$mb"
+        fi
+      elif range_has_diff "$mb..HEAD"; then
+        REVIEW_RANGE="$mb..HEAD"
+      else
+        # 既定ブランチの追跡枝が見つかった時点で起点は確定する。そこと差分が無いのは
+        # 「レビュー対象が無い」であって、空ツリーまで戻してリポジトリ全体を対象に
+        # すべき状況ではない。
+        REVIEW_RANGE_REASON=""
+        REVIEW_NO_TARGET=1
+      fi
+      return 0
+    fi
+  fi
+
+  # 既定ブランチを解決できない（または履歴が繋がっていない）。従来の決め方に戻る。
+  # ステージ済みがあれば reviewer の既定（ステージ済み差分）に委ねる。
+  [[ "$staged" -eq 0 ]] || return 0
+  resolve_review_range_without_base
 }
 
 # 第二意見の出力を記録へ残す。
@@ -6121,8 +6289,17 @@ main() {
       # レビュー側の終了コードは `tee` に隠れない。
       local so_capture so_scope=""
       so_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
-      if [[ -n "$REVIEW_RANGE" ]]; then
-        # 上流以外を起点に採ったなら、その理由を先に出す。黙って範囲を変えると、
+      if [[ -n "$REVIEW_BASE" ]]; then
+        # ステージ済みがあるときは、起点から索引までを渡す（コミット済みとステージ済みの両方）。
+        if [[ -n "$REVIEW_RANGE_REASON" ]]; then
+          echo "[loop-gate] $REVIEW_RANGE_REASON"
+        fi
+        echo "[loop-gate] staged diff exists; reviewing from $REVIEW_BASE to the index"
+        bash "$HERE/second-opinion-review.sh" --base "$REVIEW_BASE" 2>&1 \
+          | tee "$so_capture" || review_ok=1
+        so_scope="base:$REVIEW_BASE+staged"
+      elif [[ -n "$REVIEW_RANGE" ]]; then
+        # どう起点を決めたかを先に出す。黙って範囲を変えると、
         # なぜその差分がレビュー対象なのかを読み手が追えない。
         if [[ -n "$REVIEW_RANGE_REASON" ]]; then
           echo "[loop-gate] $REVIEW_RANGE_REASON"
@@ -8859,6 +9036,9 @@ TMPL
 #   CLAUDE_CODE_SESSION_NAME を <ラベル>-<作業ツリー名>-<PID の 16 進> にして exec する。
 #   この値が SendMessage の宛先名になり、ListAgents にも出る。PID の 16 進は起動ごとに変わる
 #   （同じ作業ツリーで複数のセッションを動かしても、同時に起動しても宛先名が重ならないようにするため）。
+#   ただし起動の引数に --resume=<会話の識別子> / --resume <会話の識別子>（UUID の形）があれば、
+#   末尾を PID ではなくその識別子の先頭 8 桁（最初のハイフンの前）にする。会話を再開しても宛先名が変わらず、
+#   ほかのセッションが一度覚えた宛先名へ再起動の後も送れる。識別子の形に合わないときは PID を使う。
 #
 # 何も変えずに exec "$@" するとき（起動を妨げないことが最優先）:
 #   - ラベルが無い
@@ -8922,10 +9102,46 @@ read_host_label() { # スクリプトのあるディレクトリ
   [ -n "$HOST_LABEL" ] || HOST_LABEL="${SESSION_HOST_LABEL:-}"
 }
 
+# 引数から会話の識別子（UUID の形）を取り出し、先頭 8 桁（最初のハイフンの前）を変数 SESSION_ID へ入れる。
+# 見つからなければ空にする。bash の組み込みだけで動き、失敗しても止まらない。
+#   --resume=<id> と --resume <id>（空白区切り）を読む。--resume の直後が UUID の形でなければ無視する。
+extract_session_id() { # 起動の引数…
+  local re='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+  local prev="" a id lower c i
+  SESSION_ID=""
+  for a in "$@"; do
+    id=""
+    case "$a" in
+      --resume=*) id="${a#--resume=}" ;;
+      *) [ "$prev" = "--resume" ] && id="$a" ;;
+    esac
+    prev="$a"
+    if [ -n "$id" ] && [[ "$id" =~ $re ]]; then
+      # 大文字小文字で名前が変わらないよう、先頭 8 桁を小文字にそろえる。
+      # 変数名に ,, を付ける小文字化は bash 4 以降の書き方なので使わない（bash 3.2 で止まらないよう case で 1 文字ずつ置き換える）。
+      id="${id:0:8}"
+      lower=""
+      i=0
+      while [ "$i" -lt 8 ]; do
+        c="${id:$i:1}"
+        case "$c" in
+          A) c=a ;; B) c=b ;; C) c=c ;; D) c=d ;; E) c=e ;; F) c=f ;;
+        esac
+        lower="$lower$c"
+        i=$((i + 1))
+      done
+      SESSION_ID="$lower"
+      return 0
+    fi
+  done
+  return 0
+}
+
 # 宛先名を変数 SESSION_NAME へ計算する。失敗したら 1 を返す。git 以外の外部コマンドは使わない。
 # 末尾は、このラッパー自身の PID（$$）の 16 進にする。ラッパーは最後に exec するので、$$ は
 # そのまま Claude Code の PID になる。同時に生きているセッションどうしで PID は重ならないため、
 # 2 つを同時に起動しても宛先名は重ならない（乱数だと、json が書かれる前の同時起動で重なりうる）。
+# 会話の識別子が取れていれば（SESSION_ID）、PID の代わりに識別子の先頭 8 桁（最初のハイフンの前）を使う。
 compute_name() {
   local top wt hex
   SESSION_NAME=""
@@ -8936,7 +9152,11 @@ compute_name() {
   wt="${top##*/}"
   [ -n "$wt" ] || return 1
 
-  printf -v hex '%x' "$$" || return 1
+  if [ -n "${SESSION_ID:-}" ]; then
+    hex="$SESSION_ID"
+  else
+    printf -v hex '%x' "$$" || return 1
+  fi
   [ -n "$hex" ] || return 1
 
   # 宛先名として安全な文字（英数字と ._-）だけにする。
@@ -8945,6 +9165,8 @@ compute_name() {
 
 if [ -z "${CLAUDE_CODE_SESSION_NAME:-}" ]; then
   read_host_label "$SCRIPT_DIR"
+  SESSION_ID=""
+  [ -z "$HOST_LABEL" ] || extract_session_id "$@"
   if [ -n "$HOST_LABEL" ] && compute_name && [ -n "$SESSION_NAME" ]; then
     export CLAUDE_CODE_SESSION_NAME="$SESSION_NAME"
   fi
@@ -10399,7 +10621,7 @@ build_volume_section_block() {
   printf 'volumes:\n%s' "$defs"
 }
 
-# compose の app.security_opt（__SECURITY_OPT__）。--with-codex のときだけ出す。
+# devcontainer.json の securityOpt（__SECURITY_OPT__）。--with-codex のときだけ出す。
 #
 # codex のサンドボックスは bwrap で namespace を作り mount する。Docker の既定の seccomp が
 # namespace の作成を止め（ネイティブ Linux の Docker Engine でも Docker Desktop でも）、
@@ -10408,18 +10630,50 @@ build_volume_section_block() {
 # には AppArmor が無く、apparmor=unconfined は効き目が無いだけで害は無い。
 # systempaths=unconfined は要らない（codex は /proc の mount の失敗を自分で避ける）。
 # 隔離を弱めるので、サンドボックスを使う codex を選んだ構成に限る。
+#
+# 置き場所が compose.yaml の security_opt ではなく devcontainer.json の securityOpt なのは、
+# go などの feature が自分の metadata で seccomp=unconfined を足すため。compose.yaml に
+# 同じ値があると Compose が重複を拒否してコンテナが起動しない（#543）。devcontainer.json の
+# securityOpt は、feature の値と重複が除かれて合成される。
+# 説明のコメントは write_file の整形（jq）で消えるため、ここには値の行だけを置き、
+# コメントは dcb_json_normalize が書き戻す（build_security_opt_comment）。
 build_security_opt_block() {
   has_with codex || { printf ''; return; }
+  printf '%s\n' '  "securityOpt": ["apparmor=unconfined", "seccomp=unconfined"],'
+}
+
+# build_security_opt_block の値の行の直前へ書き戻す、説明のコメント（JSONC）。
+build_security_opt_comment() {
   cat <<'BLK'
-    # codex のサンドボックス（bwrap）のために、AppArmor と seccomp の既定の制限を外す。
-    # Docker の既定の seccomp が namespace の作成を止め（Docker Desktop でも同じ）、
-    # ネイティブ Linux ではさらに AppArmor が mount を止める（片方だけ外しても動かない）。
-    # コンテナの中から namespace の作成や mount ができるようになり、隔離が弱まる。
-    # codex を使わなくなったら消してよい。
-    security_opt:
-      - apparmor=unconfined
-      - seccomp=unconfined
+  // codex のサンドボックス（bwrap）のために、AppArmor と seccomp の既定の制限を外す。
+  // Docker の既定の seccomp が namespace の作成を止め（Docker Desktop でも同じ）、
+  // ネイティブ Linux ではさらに AppArmor が mount を止める（片方だけ外しても動かない）。
+  // コンテナの中から namespace の作成や mount ができるようになり、隔離が弱まる。
+  // codex を使わなくなったら消してよい。
+  // compose.yaml の security_opt に置かないこと。go などの feature が同じ値を足すため、
+  // Compose が重複を拒否してコンテナが起動しなくなる。
 BLK
+}
+
+# 生成する JSON の整形（標準入力 → 標準出力）。引数 1: 出力先の相対パス（write_file の rel）。
+# 条件行が残した末尾カンマを畳み、jq で整形する。devcontainer.json だけは、jq がコメントを
+# 消す（コメント付きは読めもしない）ので、整形のあとで securityOpt の直前へ説明のコメントを
+# 書き戻す。devcontainer.json は JSONC として読める（VS Code も devcontainers も許す）。
+# DCB の doctor.sh と試験は、コメントを除いてから jq へ渡す。
+dcb_json_normalize() {
+  local rel="$1"
+  case "$rel" in
+    .devcontainer/devcontainer.json)
+      perl -0777 -pe 's/,\s*([}\]])/$1/g' | jq . \
+        | CMT="$(build_security_opt_comment)" awk '
+            $0 == "  \"securityOpt\": [" { print ENVIRON["CMT"] }
+            { print }
+          '
+      ;;
+    *)
+      perl -0777 -pe 's/,\s*([}\]])/$1/g' | jq .
+      ;;
+  esac
 }
 
 # post-rebuild-check.sh の __VOLUME_CHECK_LINES__。永続 volume が実際にマウント
@@ -10552,6 +10806,38 @@ build_gitignore_block() {
   fi
 }
 
+# .gitignore に管理区画の行（開始行か終了行）が 1 行でもあるか。
+gitignore_has_section() { # path
+  command grep -qxF -e "$GITIGNORE_BEGIN" -e "$GITIGNORE_END" "$1"
+}
+
+# 管理区画が壊れているか（壊れていれば 0）。開始行と終了行が対で、毎回開始が先に来ていれば
+# 正常（区画なしも正常）。
+gitignore_section_is_broken() { # path
+  [[ -f "$1" ]] || return 1
+  awk -v start="$GITIGNORE_BEGIN" -v end="$GITIGNORE_END" '
+    $0 == start { if (open) bad = 1; open = 1; next }
+    $0 == end { if (!open) bad = 1; open = 0; next }
+    END { exit (bad || open) ? 0 : 1 }
+  ' "$1"
+}
+
+# 書き込みを始める前に、.gitignore の管理区画が壊れていないかを検査する。壊れた区画の
+# どこまでが区画かは決められず、黙って消すと利用側の行を失うため、何も書かずに止める
+# （--dry-run も同じ。#538。#507 と同じく、書いてから止まる形にしない）。
+dcb_precheck_gitignore() {
+  local path="$OUTPUT_DIR/.gitignore"
+  [[ "$MANAGE_GITIGNORE" == "true" ]] || return 0
+  [[ -f "$path" ]] || return 0
+  # --upgrade 以外でシンボリックリンクは温存（--force なら置換）され、中身を読まない。
+  if [[ "$UPGRADE" != "true" && -L "$path" ]]; then return 0; fi
+  if gitignore_section_is_broken "$path"; then
+    echo "error: $path の管理セクションが壊れています（開始行 '$GITIGNORE_BEGIN' と終了行 '$GITIGNORE_END' が対になっていません）。何も書かずに止めます。" >&2
+    echo "  直し方: 壊れた行を消すか、足りない行を補ってください。管理セクションを触らないなら --no-gitignore を指定します。" >&2
+    exit 1
+  fi
+}
+
 upsert_gitignore() {
   local gitignore_path="$OUTPUT_DIR/.gitignore"
   local tmp block prev_mode=""
@@ -10574,27 +10860,44 @@ upsert_gitignore() {
 
   [[ -f "$gitignore_path" ]] && prev_mode="$(file_mode_octal "$gitignore_path")"
 
-  if [[ -f "$gitignore_path" ]]; then
-    # 管理区画を取り除き、末尾の空行も落とす。前回足した区切りの空行は区画の
-    # 外にあるため、落とさないと実行のたびに 1 行ずつ累積する（#460）。
-    # 空行は直後に空でない行が来たときだけ出力する。
-    awk -v start="$GITIGNORE_BEGIN" -v end="$GITIGNORE_END" '
-      $0 == start {skip=1; next}
-      $0 == end {skip=0; next}
-      skip {next}
-      /^[[:space:]]*$/ {pending = pending $0 "\n"; next}
-      {printf "%s", pending; pending=""; print}
-    ' "$gitignore_path" > "$tmp"
-    if [[ -s "$tmp" ]]; then
-      printf '\n' >> "$tmp"
-    fi
-  fi
-
+  local newsec
+  newsec="$(mktemp "${TMPDIR:-/tmp}/dcb-gitignore-sec.XXXXXX")"
   {
     printf '%s\n' "$GITIGNORE_BEGIN"
     printf '%s\n' "$block"
     printf '%s\n' "$GITIGNORE_END"
-  } >> "$tmp"
+  } > "$newsec"
+
+  if [[ -f "$gitignore_path" ]] && gitignore_has_section "$gitignore_path"; then
+    # 管理区画がある: その場所で中身だけを差し替える。区画の前後の行は位置も順序も保つ
+    # （.gitignore は後勝ちで、利用側の否定パターンの効き方が位置で変わるため。#538）。
+    # 区画の外の行は、空行も空白だけの行も含めて一切変えない。空行を足さないので累積もしない
+    # （#460）。開始行〜終了行の対が複数あれば、最初の対だけを差し替え、2 つ目以降の対は取り除く。
+    # 壊れた区画は dcb_precheck_gitignore が書き込み前に止めている。
+    awk -v start="$GITIGNORE_BEGIN" -v end="$GITIGNORE_END" -v secfile="$newsec" '
+      state == 0 && $0 == start {
+        while ((getline line < secfile) > 0) print line
+        close(secfile)
+        state = 1; next
+      }
+      state == 2 && $0 == start { state = 3; next }
+      state == 1 || state == 3 { if ($0 == end) state = 2; next }
+      { print }
+    ' "$gitignore_path" > "$tmp"
+  else
+    if [[ -f "$gitignore_path" ]]; then
+      # 区画が無い: 末尾の空行を落として、区切りの空行 1 行を挟んで末尾へ足す。
+      awk '
+        /^[[:space:]]*$/ {pending = pending $0 "\n"; next}
+        {printf "%s", pending; pending=""; print}
+      ' "$gitignore_path" > "$tmp"
+      if [[ -s "$tmp" ]]; then
+        printf '\n' >> "$tmp"
+      fi
+    fi
+    cat "$newsec" >> "$tmp"
+  fi
+  rm -f "$newsec"
 
   # mktemp は 0600 で作成し mv がそれを維持するため、既存 .gitignore のモードを
   # 潰してしまう。元のモードを復元し、644 は新規作成したファイルにのみ使う。
@@ -11259,8 +11562,25 @@ upgrade_write_new() {
   ( set -C; cat "$1" > "$2" )
 }
 
+# --baseline-from <dir> の同じ相対パスが、通常ファイルとして存在し、$2（現物のハッシュ）と
+# 一致するかを返す。<dir> 側のリンク（途中のディレクトリを含む）はたどらず、一致しない扱い。
+# <dir> は読むだけで書き込まない。
+upgrade_baseline_matches() {
+  local rel="$1" curh="$2" cur="$BASELINE_FROM" part rest
+  [[ -n "$BASELINE_FROM" ]] || return 1
+  rest="$rel"
+  while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    cur="$cur/$part"
+    [[ ! -L "$cur" ]] || return 1
+  done
+  [[ -f "$cur" ]] || return 1
+  [[ "$(dcb_file_sha256 "$cur")" == "$curh" ]]
+}
+
 upgrade_apply_file() {
-  local dest="$1" src="$2" rel newh curh rec acc mode verb
+  local dest="$1" src="$2" rel newh curh rec acc mode verb baseline_match="false"
   rel="${dest#"$OUTPUT_DIR"/}"
   if ! upgrade_parent_inside_output "$dest"; then
     echo "error: $dest の親ディレクトリが出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
@@ -11279,6 +11599,7 @@ upgrade_apply_file() {
   # シンボリックリンク（切れたものを含む）と通常ファイル以外は、たどらず比較もせず、
   # 手を入れた扱いにして新しい版を .dcb-new として置く（リンク先を書き換えない）。
   if [[ -L "$dest" || ( -e "$dest" && ! -f "$dest" ) ]]; then
+    UPGRADE_PENDING="${UPGRADE_PENDING}${rel}"$'\n'
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "plan: keep (symlink or not a regular file) $dest -> $dest.dcb-new"
     else
@@ -11312,34 +11633,70 @@ upgrade_apply_file() {
     return 0
   fi
 
+  # 記録（hash:）が無いときだけ、--baseline-from の現物と照合する（記録があれば記録を優先）。
+  # 一致したら「記録 = 現物」として扱い、手を入れていないものとして更新する。
+  if [[ -z "$rec" ]] && upgrade_baseline_matches "$rel" "$curh"; then
+    rec="$curh"
+    baseline_match="true"
+  fi
+
   if [[ -n "$rec" && "$curh" == "$rec" ]]; then
+    local note=""
+    [[ "$baseline_match" != "true" ]] || note=" (baseline match)"
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "plan: update $dest"
+      echo "plan: update$note $dest"
       return 0
     fi
     # cat で中身だけ差し替える（mv / cp だとモード・所有者が変わりうる）。
     cat "$src" > "$dest"
     rm -f "$dest.dcb-new"
-    echo "write: $dest (upgraded)"
-    return 0
-  fi
-
-  # 雛形が変わっておらず（新しい版 = 記録）、現物が取り込み済みの記録（accepted:）と一致する。
-  # 取り込むべき差分が無いので .dcb-new は置かない。
-  # accepted と一致しない現物には、雛形が変わっていなくても .dcb-new を置く。.dcb-new を置いた
-  # 時点で hash: は新しい版になり accepted: は外れるので、取り込む前に .dcb-new を失っても、
-  # 同じ版の --upgrade をやり直せば作り直される（hash: だけで判定すると作り直されない）。
-  acc="$(dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "accepted:$rel" 2>/dev/null || true)"
-  if [[ -n "$rec" && "$newh" == "$rec" && -n "$acc" && "$curh" == "$acc" ]]; then
-    UPGRADE_ACCEPT_KEEP="${UPGRADE_ACCEPT_KEEP}${rel}"$'\n'
-    if [[ "$DRY_RUN" == "true" ]]; then
-      echo "plan: keep (modified, template unchanged) $dest"
+    if [[ "$baseline_match" == "true" ]]; then
+      echo "write: $dest (upgraded, baseline match)"
     else
-      echo "keep (modified, template unchanged): $dest"
+      echo "write: $dest (upgraded)"
     fi
     return 0
   fi
 
+  # 雛形が変わっておらず（新しい版 = 記録）、現物が記録と違う（手を入れた）。
+  # 取り込み待ち（pending:、または .dcb-new が現に残っている）なら、取り込む前に .dcb-new を
+  # 失った場合に備えて .dcb-new を置き直す（hash: だけでは取り込み待ちか分からない）。
+  # 取り込み待ちでなければ、取り込むべき差分が無いので .dcb-new を置かずに温存する。
+  # 温存の表示は、取り込み済み（accepted:）・プロジェクト所有（owned:）・それ以外で分ける。
+  # どれも .dcb-new を置かないので keep で始めない（keep は取り込み待ち・手を入れたため残した印）。
+  if [[ -n "$rec" && "$newh" == "$rec" ]]; then
+    # 記録に pending: が無くても .dcb-new が現に残っていれば取り込み待ちとして記録する
+    # （pending: を導入する前の版が置いたもの）。残っている .dcb-new は置き直さない。
+    if ! dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "pending:$rel" >/dev/null 2>&1 \
+      && [[ -e "$dest.dcb-new" || -L "$dest.dcb-new" ]]; then
+      UPGRADE_PENDING="${UPGRADE_PENDING}${rel}"$'\n'
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "plan: keep (modified, .dcb-new left) $dest -> $dest.dcb-new"
+      else
+        echo "keep (modified, .dcb-new left): $dest -> $dest.dcb-new"
+      fi
+      return 0
+    fi
+    if ! dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "pending:$rel" >/dev/null 2>&1; then
+      acc="$(dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "accepted:$rel" 2>/dev/null || true)"
+      if [[ -n "$acc" && "$curh" == "$acc" ]]; then
+        verb="accepted"
+        UPGRADE_ACCEPT_KEEP="${UPGRADE_ACCEPT_KEEP}${rel}"$'\n'
+      elif project_owned_rel_paths | grep -Fx -- "$rel" >/dev/null; then
+        verb="owned"
+      else
+        verb="modified"
+      fi
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "plan: $verb (template unchanged) $dest"
+      else
+        echo "$verb (template unchanged): $dest"
+      fi
+      return 0
+    fi
+  fi
+
+  UPGRADE_PENDING="${UPGRADE_PENDING}${rel}"$'\n'
   if [[ -n "$rec" ]]; then verb="modified"; else verb="no record"; fi
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "plan: keep ($verb) $dest -> $dest.dcb-new"
@@ -11467,7 +11824,7 @@ write_file() {
     # 何も書かない: 一時ファイルを作らず、中身をパイプでハッシュへ流して判定する。
     local h
     if [[ "$out" == *.json ]]; then
-      h="$(render_content "$content" | perl -0777 -pe 's/,\s*([}\]])/$1/g' | jq . | dcb_file_sha256 /dev/stdin)"
+      h="$(render_content "$content" | dcb_json_normalize "$rel" | dcb_file_sha256 /dev/stdin)"
     else
       h="$(render_content "$content" | dcb_file_sha256 /dev/stdin)"
     fi
@@ -11478,9 +11835,8 @@ write_file() {
     tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
     render_content "$content" > "$tmp"
     if [[ "$out" == *.json ]]; then
-      perl -0777 -i -pe 's/,\s*([}\]])/$1/g' "$tmp"
       tmp2="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
-      jq . "$tmp" > "$tmp2"
+      dcb_json_normalize "$rel" < "$tmp" > "$tmp2"
       mv "$tmp2" "$tmp"
     fi
     upgrade_apply_file "$out" "$tmp"
@@ -11499,10 +11855,9 @@ write_file() {
   tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-render.XXXXXX")"
   render_content "$content" > "$tmp"
   if [[ "$out" == *.json ]]; then
-    perl -0777 -i -pe 's/,\s*([}\]])/$1/g' "$tmp"
     # 従来どおりその場に書く。シンボリックリンクのときだけ、リンク自体を消してから書く。
     [[ -L "$out" ]] && rm -f "$out"
-    jq . "$tmp" > "$out"
+    dcb_json_normalize "$rel" < "$tmp" > "$out"
     rm -f "$tmp"
   else
     dcb_place_file "$tmp" "$out"
@@ -11676,6 +12031,22 @@ EOF
     done <<EOF
 $origin_rels
 EOF
+    # プロジェクト所有のファイルの印（owned:）。毎回、一覧と今回の生成対象の積から作る
+    # （生成対象から外れたパスの記録は残らない）。
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      case $'\n'"$origin_rels"$'\n' in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
+      echo "owned:$rel=1"
+    done < <(project_owned_rel_paths)
+    # 取り込み待ち（.dcb-new を置いた）の印（pending:）。--upgrade が今回置いたパスだけを、
+    # 今回の生成対象に残るものに限って書く。--accept か、現物 = 新しい版になれば外れる。
+    if [[ "$UPGRADE" == "true" ]]; then
+      while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        case $'\n'"$origin_rels"$'\n' in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
+        echo "pending:$rel=1"
+      done < <(printf '%s' "$UPGRADE_PENDING" | sort -u)
+    fi
     # --upgrade は取り込み済みの記録（accepted:）のうち、今回「雛形が変わっておらず、現物 =
     # accepted:」として温存したパスの分だけを引き継ぐ（UPGRADE_ACCEPT_KEEP。それ以外は落とす）。
     if [[ "$UPGRADE" == "true" && -f "$dest" ]]; then
@@ -11737,6 +12108,7 @@ sorted_rels="$( { template_rel_paths; conditional_template_rel_paths; } | sort)"
 # 書き込みを始める前に、すべての生成先の親ディレクトリを検査する（--dry-run と
 # --upgrade も同じ。1 つでも出力先の外を指していれば、何も書かずに止まる）。
 dcb_precheck_destinations
+dcb_precheck_gitignore
 
 if [[ "$DRY_RUN" == "true" && "$UPGRADE" != "true" ]]; then
   echo "[bootstrap] dry-run: no files will be written"
@@ -11812,6 +12184,10 @@ fi
 # より先に書くと、この票の動機だったファイル（review-gate.yml /
 # second-opinion-review.sh 等）が記録に載らない（実測）。
 write_origin_record
+
+if [[ "$UPGRADE" == "true" ]]; then
+  upgrade_report_unwired_checks
+fi
 
 if [[ "$UPGRADE" == "true" && -n "$UPGRADE_LEFTOVER" ]]; then
   echo "[bootstrap] upgrade: 取り込み待ちの .dcb-new が残っています（手を入れたファイルの隣の新しい版、または以前の実行の残り）:" >&2

@@ -12,7 +12,7 @@ set -euo pipefail
 # この比較には限界がある。doctor.sh は公開リリースごとに取得し直す前提であり、
 # 古い doctor.sh をそのまま使い続けると、上流がその後さらに新しくなっていても
 # 「上流が更新されています」を報告できない。診断結果にもこの限界を明示する。
-DCB_VERSION="v0.20.0"
+DCB_VERSION="v0.21.0"
 ORIGIN_REL_PATH=".devcontainer/ORIGIN"
 
 TARGET_DIR="$PWD"
@@ -101,7 +101,8 @@ dcb_version_lt() {
 #
 # 行の文法: 空行・# 行のほかは version= / flags= / inputs-format= / input:<名前>= /
 # hash:<パス>=<sha256 の 64 桁> / accepted:<パス>=<sha256 の 64 桁>（bootstrap.sh --accept が
-# 書く取り込み済みの記録）のどれかであること。読み飛ばして黙って通さない。
+# 書く取り込み済みの記録）/ owned:<パス>=<値> / pending:<パス>=<値>（bootstrap.sh が書く、
+# プロジェクト所有の印と、.dcb-new の取り込み待ちの印。値は読まない）のどれかであること。読み飛ばして黙って通さない。
 check_origin_format() {
   local origin_file="$1" line bad="" v val mode playbook source lang l_rest
   # 最終行が改行で終わっていなくても検査する。
@@ -122,6 +123,7 @@ check_origin_format() {
         val="${line##*=}"
         if ! [[ "$val" =~ ^[0-9a-f]{64}$ ]] || [[ -z "${line#accepted:}" || "${line#accepted:}" == "=$val" ]]; then bad="$bad [accepted の行が不正: ${line%=*}]"; fi
         ;;
+      owned:?*=*|pending:?*=*) ;;
       *) bad="$bad [認識できない行: $line]" ;;
     esac
     # 値の中の % は %25 / %0A / %0D だけを許す（書き手の符号化と対）。
@@ -270,7 +272,7 @@ check_origin_record() {
 
   check_origin_format "$origin_file" || return 0
 
-  local hash_count=0 unchanged_count=0 accepted_count=0 changed="" missing="" line rel recorded_hash actual_hash accepted_hash
+  local hash_count=0 unchanged_count=0 accepted_count=0 owned_count=0 stale_pending="" stale_pending_count=0 changed="" missing="" line rel recorded_hash actual_hash accepted_hash
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     rel="${line#hash:}"
@@ -285,12 +287,23 @@ check_origin_record() {
     actual_hash="$(dcb_file_sha256 "$TARGET_DIR/$rel")"
     if [[ "$actual_hash" == "$recorded_hash" ]]; then
       unchanged_count=$((unchanged_count + 1))
+      # 現物が記録と一致するのに pending: が残っている: 取り込む差分は無いが記録が古い。
+      if awk -v k="pending:$rel=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"; then
+        stale_pending="$stale_pending $rel"
+        stale_pending_count=$((stale_pending_count + 1))
+      fi
     else
       # 手を入れた現物でも、取り込み済みとして記録した（accepted:）内容と一致すれば乖離としない。
       # その後さらに手を入れれば accepted とも一致せず、changed に戻る。
+      # プロジェクト所有（owned:）のファイルは、日常的に編集するものなので、手を入れただけでは
+      # 乖離としない。ただし .dcb-new の取り込み待ち（pending:）があれば乖離のまま。
       accepted_hash="$(awk -v k="accepted:$rel=" 'index($0, k) == 1 { print substr($0, length(k) + 1); exit }' "$origin_file")"
-      if [[ -n "$accepted_hash" && "$actual_hash" == "$accepted_hash" ]]; then
+      if awk -v k="pending:$rel=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"; then
+        changed="$changed $rel"
+      elif [[ -n "$accepted_hash" && "$actual_hash" == "$accepted_hash" ]]; then
         accepted_count=$((accepted_count + 1))
+      elif awk -v k="owned:$rel=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"; then
+        owned_count=$((owned_count + 1))
       else
         changed="$changed $rel"
       fi
@@ -310,6 +323,12 @@ check_origin_record() {
   fi
   if [[ "$accepted_count" -gt 0 ]]; then
     ok "accepted as merged ($accepted_count file(s)): 取り込み済みとして記録した内容と一致しています"
+  fi
+  if [[ "$stale_pending_count" -gt 0 ]]; then
+    warn "stale pending record ($stale_pending_count file(s)):$stale_pending（取り込み待ちの記録（pending:）が残っていますが、現物は新しい版と一致しています。bootstrap.sh --accept <path> か --upgrade で外してください）"
+  fi
+  if [[ "$owned_count" -gt 0 ]]; then
+    ok "edited project-owned file(s) ($owned_count file(s)): プロジェクトが所有・編集するファイルなので、生成時からの変化を乖離として扱いません"
   fi
   if [[ -z "$changed" && -z "$missing" ]]; then
     ok "unchanged since generation ($unchanged_count file(s))"
@@ -371,8 +390,16 @@ require_file "scripts/loop-gate.sh"
 # だと分かるのが verify を回した後になる。
 require_file "scripts/check-no-secrets.sh"
 
+# JSONC（コメント付きの JSON）から、コメント（// と /* */）を除いて標準出力へ出す。
+# 文字列リテラルの中の // や /* は残す（例: "https://example.com"）。--with-codex の
+# devcontainer.json は説明のコメントを持つ。doctor.sh は単体で取得されうるため、
+# この関数は他のファイルを参照せずここに持つ。GNU 拡張に頼らない（perl を使う）。
+jsonc_strip() {
+  perl -0777 -pe 's{("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/}{defined $1 ? $1 : ""}gse' "$1"
+}
+
 if [[ -f "$TARGET_DIR/.devcontainer/devcontainer.json" ]]; then
-  if jq . "$TARGET_DIR/.devcontainer/devcontainer.json" >/dev/null 2>&1; then
+  if jsonc_strip "$TARGET_DIR/.devcontainer/devcontainer.json" 2>/dev/null | jq . >/dev/null 2>&1; then
     ok "devcontainer.json valid JSON"
   else
     ng "devcontainer.json invalid JSON"
@@ -389,8 +416,8 @@ if [[ -f "$TARGET_DIR/.devcontainer/devcontainer.json" ]]; then
   fi
 
   # compose 配線の検査。dockerComposeFile が無い旧 image ベース構成は検査しない（後方互換）。
-  compose_files="$(jq -r '.dockerComposeFile // empty | if type == "array" then .[] else . end' \
-    "$TARGET_DIR/.devcontainer/devcontainer.json" 2>/dev/null || true)"
+  compose_files="$(jsonc_strip "$TARGET_DIR/.devcontainer/devcontainer.json" 2>/dev/null \
+    | jq -r '.dockerComposeFile // empty | if type == "array" then .[] else . end' 2>/dev/null || true)"
   if [[ -n "$compose_files" ]]; then
     while IFS= read -r compose_file; do
       [[ -n "$compose_file" ]] || continue
@@ -452,6 +479,44 @@ for loop_script in verify.sh acceptance.sh loop-gate.sh check-no-secrets.sh acce
     require_exec "scripts/$loop_script"
   fi
 done
+
+# 配布された検査 4 本（衛生検査）が、acceptance.sh から参照されているかを見る。
+# 置かれただけで呼ばれない検査は効かない。acceptance.sh はプロジェクトの所有物なので
+# --upgrade は配線を書き換えられない。そのため WARN で知らせる（FAIL にはしない）。
+# 参照の判定はファイル名の出現で行う。コメントに書いたファイル名も参照に数えるので、
+# 意図して呼ばない検査は、ファイル名と理由をコメントで書けば WARN が出ない。
+# doctor.sh は単体で取得されうるため、この 4 本の一覧は bootstrap.sh を参照せずここに持つ
+# （bootstrap.sh の hygiene_check_rel_paths と同じ内容。一致は tests/test-hygiene-wiring.sh が
+# 機械照合する）。
+HYGIENE_CHECKS="check-control-chars.sh check-table-breaks.sh check-doc-links.sh check-shell-portability.sh"
+
+check_hygiene_wiring() {
+  local acceptance="$TARGET_DIR/scripts/acceptance.sh" name present=0 unwired="" unwired_count=0
+  # acceptance.sh が無いときは判定しない（実在は静的構造の検査が FAIL にする）。
+  [[ -f "$acceptance" ]] || return 0
+  for name in $HYGIENE_CHECKS; do
+    [[ -f "$TARGET_DIR/scripts/$name" ]] || continue
+    present=$((present + 1))
+    if ! grep -F -- "$name" "$acceptance" >/dev/null 2>&1; then
+      unwired="$unwired $name"
+      unwired_count=$((unwired_count + 1))
+    fi
+  done
+  [[ "$present" -gt 0 ]] || return 0
+  if [[ "$unwired_count" -eq 0 ]]; then
+    ok "hygiene checks are referenced from scripts/acceptance.sh ($present file(s))"
+    return 0
+  fi
+  warn "hygiene checks not wired into scripts/acceptance.sh ($unwired_count of $present):$unwired（置かれただけで、acceptance.sh から呼ばれていません）"
+  echo "  配線の例（scripts/acceptance.sh の、ran_any の判定の手前）:"
+  for name in $unwired; do
+    echo "    bash scripts/$name"
+  done
+  echo "  意図して呼ばない検査は、acceptance.sh にファイル名と理由をコメントで書くと、この WARN は出ません。"
+}
+
+section "Hygiene checks wiring"
+check_hygiene_wiring
 
 section "Generation origin"
 check_origin_record
