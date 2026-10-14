@@ -78,7 +78,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.21.0"
+DCB_VERSION="v0.22.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -10323,16 +10323,31 @@ LBLTMPL
 # トークン分岐は行わない。未選択なら空。
 # .env.example の __SECOND_OPINION_ENGINE_LINES__。第二意見のエンジン選択。
 #
-# 既定は gemini で、指定しなければ挙動は変わらない。したがってこの記入欄が要るのは
-# antigravity / codex を選べる構成だけで、どちらかを --with-* で選んだときだけ出す。
-# 常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
+# 空なら gemini で、gemini だけの構成では指定しなくても挙動は変わらない。したがってこの
+# 記入欄が要るのは antigravity / codex を選べる構成だけで、どちらかを --with-* で選んだ
+# ときだけ出す。常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
+# 値は、選んだエンジンから一意に決まるときだけ記入済みにする（下記）。
 build_second_opinion_engine_block() {
   has_with antigravity || has_with codex || { printf ''; return; }
 
-  if has_with antigravity && has_with codex; then
-    cat <<'ENGTMPL'
+  # 値は、選んだエンジンから一意に決まるときだけ記入済みにする。
+  # - gemini を選んだ構成（ほかと併用）では gemini。明示しておけば、.env を持つ作業ツリーでは
+  #   reviewer の通知（既定へ落ちた知らせ）が出ず、.env を写し忘れた作業ツリーでだけ出る。
+  # - gemini を選ばず、代わりのエンジンを 1 つだけ選んだ構成では、そのエンジン。空のままだと
+  #   既定の gemini（CLI もキーも無い）で回り、設定するまで使えないため。
+  # - gemini を選ばず antigravity と codex の両方を選んだときは、一意に決まらないので空のまま
+  #   （既定の gemini へ落ちたことは reviewer の通知が知らせる）。
+  local engine_default=""
+  if has_with gemini; then engine_default="gemini"
+  elif has_with codex && ! has_with antigravity; then engine_default="codex"
+  elif has_with antigravity && ! has_with codex; then engine_default="antigravity"
+  fi
 
-# 第二意見レビューのエンジン（gemini | antigravity | codex）。既定は gemini。
+  if has_with antigravity && has_with codex; then
+    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
+
+# 第二意見レビューのエンジン（gemini | antigravity | codex）。空なら gemini。
+# gemini も選んで生成した構成では gemini を記入済みで出す。
 #
 # antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
 # 対応しない。初回は対話で `agy` を起動してログインすること。
@@ -10340,8 +10355,8 @@ build_second_opinion_engine_block() {
 # codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
 # 対話で `codex login` を通すこと。
 #
-# いずれも GEMINI_API_KEY は使わないため、gemini 以外へ寄せる場合は空のままでよい。
-SECOND_OPINION_ENGINE=
+# いずれも GEMINI_API_KEY は使わない。
+SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 
 # 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
 # （scripts/second-opinion-review.sh が持つ）。gemini / antigravity は空のままで
@@ -10349,28 +10364,29 @@ SECOND_OPINION_ENGINE=
 SECOND_OPINION_MODEL=
 ENGTMPL
   elif has_with codex; then
-    cat <<'ENGTMPL'
+    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
 
-# 第二意見レビューのエンジン（gemini | codex）。既定は gemini。
+# 第二意見レビューのエンジン（gemini | codex）。空なら gemini。
+# 生成時に選んだエンジン（gemini を選んでいれば gemini、codex だけなら codex）を記入済みで出す。
 #
 # codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
-# 対話で `codex login` を通すこと。GEMINI_API_KEY は使わないため、codex へ寄せる
-# 場合は空のままでよい。
-SECOND_OPINION_ENGINE=
+# 対話で `codex login` を通すこと。GEMINI_API_KEY は使わない。
+SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 
 # 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
 # （scripts/second-opinion-review.sh が持つ）。gemini は空のままで CLI の既定。
 SECOND_OPINION_MODEL=
 ENGTMPL
   else
-    cat <<'ENGTMPL'
+    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
 
-# 第二意見レビューのエンジン（gemini | antigravity）。既定は gemini。
+# 第二意見レビューのエンジン（gemini | antigravity）。空なら gemini。
+# 生成時に選んだエンジン（gemini を選んでいれば gemini、antigravity だけなら antigravity）を記入済みで出す。
 #
 # antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
 # 対応しない。初回は対話で `agy` を起動してログインすること。GEMINI_API_KEY は
-# 使わないため、こちらへ寄せる場合は空のままでよい。
-SECOND_OPINION_ENGINE=
+# 使わない。
+SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 ENGTMPL
   fi
 }

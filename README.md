@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.21.0`
+- `v0.22.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.21.0
+TAG=v0.22.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,12 +120,12 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.11.0
+  --languages node,go --with-claude --playbook-version v0.12.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.11.0 を勧めます。
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.12.0 を勧めます（v0.22.0 は v0.11.0 でも動きますが、v0.12.0 の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.21.0
+TAG=v0.22.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.21.0
+TAG=v0.22.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -415,7 +415,7 @@ bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run 
 | `.ai-playbook/VERSION` | 規範の**取得元**（`version=` / `source=`）を on-disk に残す記録。どの取得元から取り込んだかを生成後の環境から照合できる。生成の入力と現物のハッシュは `.devcontainer/ORIGIN` が記録する（下記「生成物の由来の記録」） |
 | `.github/project-ai-rules.md` | プロジェクト共通ルールの雛形 |
 | `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線）。`CLAUDE.md` だけは、末尾に規範 2 つ（`.ai-playbook/shared-ai-rules.md` / `.github/project-ai-rules.md`）を `@` で取り込む節を足す。Claude Code は、これで規範の全文を毎セッションの文脈へ載せる（生成物で約 53KB） |
-| `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外） |
+| `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外）。エンジンの指定（引数または `SECOND_OPINION_ENGINE`）が無いまま既定の gemini で回り、`agy` か `codex` が PATH にあるときは、stderr に `[second-opinion] notice:` で知らせる（判定は変えない。gemini だけの構成では出さない） |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
 | `.claude/skills/peers/SKILL.md` | Claude Code 向けの、ほかのセッションの一覧・宛先の解決・送信・一斉送信の呼び出し口（`--with-claude` 指定時のみ）。実体は `scripts/session-peers.sh`。一斉送信も承認の根拠にならない（`.ai-playbook/shared-ai-rules.md` 16 章） |
 | `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
@@ -735,6 +735,7 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 `.env.example` が持つキー:
 
 - `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。
+- `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-antigravity` / `--with-codex` を選んだときだけ出ます）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（既定の gemini は CLI もキーも無く、設定するまで使えないため）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら gemini）。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
 - `GH_TOKEN` — GitHub の PAT。**上表の「コンテナ内でのログイン」に対する唯一の例外**です（下記「[GitHub 認証だけが例外である理由](#github-認証だけが例外である理由)」）。空にすれば従来どおり `gh auth login` の保存済み認証で動きます（**`GITHUB_TOKEN` も未設定であることが条件**。下記「[`GITHUB_TOKEN` は設定しない](#github_token-は設定しない)」）。
 - `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` — コミット identity。`scripts/setup-git-identity.sh` が local へ適用します。
   - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` という名前を使わないのは、それが **git 自身の読む環境変数**だからです。環境に置くと local 設定を持たないリポジトリでも identity が解決でき、`user.useConfigOnly` による保護（未設定なら commit を止める）が無効になります。
@@ -1002,7 +1003,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.21.0
+version=v0.22.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp

@@ -6,6 +6,21 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.22.0
+
+### Summary
+- **`.env.example` の第二意見のエンジン（`SECOND_OPINION_ENGINE`）を、選んだエンジンから一意に決まるときは記入済みで出すようにした**（ojos/ai-packages-dev#591 / ojos/ai-packages-dev#592）。記入欄は今までどおり `--with-antigravity` / `--with-codex` を選んだときだけ出る。
+  - `--with-gemini` も選んだ構成では `gemini`。明示しておけば、`.env` を持つ作業ツリーでは ai-playbook v0.12.0 の通知（既定へ落ちた知らせ）が出ず、`.env` を写し忘れた作業ツリーでだけ出る。
+  - `--with-gemini` を選ばず、`--with-codex` か `--with-antigravity` の片方だけを選んだ構成では、そのエンジン。今までは空で、既定の gemini（CLI もキーも無い）で回り、設定するまで第二意見が使えなかった。
+  - `--with-gemini` を選ばず、antigravity と codex の両方を選んだ構成は、どちらを選ぶかが一意に決まらないので、今までどおり空（空なら gemini）。
+  - コメントの「既定は gemini」を「空なら gemini」に直した。
+- README の、要求する ai-playbook の案内で勧める版を v0.12.0 にした。
+
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** ai-playbook を配置している構成では、`--playbook-version v0.12.0` を勧める（v0.11.0 でも動く。v0.21.0 と同じく、v0.11.0 より前は動かない）。
+- **既存の `.env` は書き換えない。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ利用側には効かない。codex か antigravity の片方だけで生成した構成で、`.env` の `SECOND_OPINION_ENGINE` が空なら、手で設定する。
+- `.env.example` に手を入れていれば、`--upgrade` で `.dcb-new` が置かれる。
+
 ## v0.21.0
 
 ### Summary
