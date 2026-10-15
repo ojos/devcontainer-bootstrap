@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.22.0`
+- `v0.22.1`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.22.0
+TAG=v0.22.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,12 +120,12 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.12.0
+  --languages node,go --with-claude --playbook-version v0.12.1
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.12.0 を勧めます（v0.22.0 は v0.11.0 でも動きますが、v0.12.0 の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます）。
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.12.1 を勧めます（v0.22.1 は v0.11.0 でも動きますが、v0.12.0 以降の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます。v0.12.1 は、第二意見が issue 本文のコード例の中の `acceptance:` を本物として採る不具合を直しています）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.22.0
+TAG=v0.22.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.22.0
+TAG=v0.22.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -953,7 +953,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
 - `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。作業ツリーの内容に加え、索引（ステージ済み）と作業ツリーで内容が違うファイルは索引の blob も読み、索引側の検出は `<パス> (staged)` と示す。git の clean フィルターが、作業ツリーに無い禁止バイトを索引へ書き込む場合は見逃す（限界。`git diff` がフィルターを通した後の内容を比べるため）。単体で `bash scripts/check-control-chars.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)））
 - `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
-- `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合で行う。単体で `bash scripts/check-doc-links.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
+- `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合から `git ls-files --deleted`（作業ツリーで消してまだステージしていないもの）を除いたもので行う（除いたものは走査からもリンク先の集合からも外し、件数を報告する。sparse-checkout / skip-worktree で置いていないだけのファイルは追跡対象として実在する扱いのまま。追跡していないファイルは数えない）。単体で `bash scripts/check-doc-links.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
 - `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
 - `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・生成の入力・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に、`--upgrade` が入力の再現と手を入れたかの判定に使います。下記「生成物の由来の記録」参照）
@@ -1003,7 +1003,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.22.0
+version=v0.22.1
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp

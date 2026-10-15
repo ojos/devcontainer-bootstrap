@@ -6,6 +6,21 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.22.1
+
+### Summary
+- **`check-doc-links.sh` が、作業ツリーで消した（まだステージしていない）追跡済みの Markdown で止まらないようにした**（ojos/ai-packages-dev#599 / ojos/ai-packages-dev#600）。今までは `git ls-files` が消したファイルも列挙するため、`awk` が開けずに「抽出が異常終了」で `DOC_LINKS_FAIL` になり、Markdown を消す作業の途中で `verify.sh` / `loop-gate.sh` が止まっていた。
+  - 消したファイル（`git ls-files --deleted` の集合）は、走査の対象からもリンク先の集合からも外す。**消した文書へのリンクは壊れたリンクになり**、診断は「（作業ツリーで消した追跡ファイル。git rm するかリンクを直す）」と出す。
+  - sparse-checkout / skip-worktree で作業ツリーに置いていないだけの追跡ファイルは、リンク先として残す（そこへのリンクは通る）。置いていない追跡 Markdown は読めないので走査だけ飛ばし、件数を報告する。壊れたシンボリックリンクは今までどおり失敗させる。
+  - 集計の行に「作業ツリーに置いていない N 件」と「実体なし N 件（追跡全体。作業ツリーで消したもの）」を出す。
+  - 実在の判定に作業ツリーの有無（`test -e`）は使わない、という方針は変えていない。README の説明を新しい判定（`git ls-files` の集合から `--deleted` を除いたもの）に合わせた。
+- README で勧める ai-playbook を v0.12.1 にした。
+
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** ai-playbook を配置している構成では、`--playbook-version v0.12.1` を勧める（v0.11.0 以降なら動く）。
+- `check-doc-links.sh` に手を入れていれば、`--upgrade` で `.dcb-new` が置かれる。
+- `check-doc-links.sh` の出力を読んでいる仕組みがあれば、集計の行の形が変わったことに注意する。
+
 ## v0.22.0
 
 ### Summary
