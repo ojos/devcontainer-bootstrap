@@ -6,6 +6,11 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.23.2
+
+### Summary
+- **`scripts/update-check.sh` で、そのコマンドで明示した `UPDATE_CHECK` が、親のシェルが退避した値に負けていたのを直した**（ojos/ai-packages-dev#640 / ojos/ai-packages-dev#641）。v0.23.1 の修正（ojos/ai-packages-dev#635）で、対話シェルでは `.env` を読む前の値を `DCB_ENV_UPDATE_CHECK` に退避して優先するようにしたが、退避した値が空でなければ、今の `UPDATE_CHECK` を見ていなかった。そのため、環境で止めたシェルから、そのコマンドだけ `UPDATE_CHECK=on` と明示しても止まったままだった（逆向きも同じ）。今の値が、ローダーが `.env` を読んだ直後の値（`DCB_ENV_UPDATE_CHECK_LOADED`）と違えば、明示したものとして今の値を採る（ローダーが退避し直す条件と同じ考え方）。`bootstrap.sh --upgrade` で追従すれば効く（手で行う移行の作業は無い）。
+
 ## v0.23.1
 
 ### Summary
