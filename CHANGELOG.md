@@ -6,6 +6,14 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.23.4
+
+### Summary
+- **`.env.example` から消えたキーが `.env` に値の空のまま残っていると、`scripts/check-no-secrets.sh` がゲートを止めていたのを直した**（ojos/ai-packages-dev#652）。v0.23.3 で、第二意見のエンジンが codex / antigravity に決まっていて、かつ `--with-gemini` を選んでいない構成の `.env.example` から `GEMINI_API_KEY` の欄を消したため（ojos/ai-packages-dev#646）、以前 gemini を使っていて `.env` に `GEMINI_API_KEY=` が残っている生成先では、v0.23.3 へ追従した直後に「.env にあるキーが .env.example に無い」で `SECRETS_FAIL` になっていた。`.env` にだけある**値の空の**キーは、NOTICE（使っていなければ `.env` から消してよい）に留めて通す。値のあるキーは今のとおり失敗にする。
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** 変わる生成物は `scripts/check-no-secrets.sh` だけ。
+- v0.23.3 へ追従してゲートが止まっていた生成先は、この版へ追従すれば通る。`.env` の `GEMINI_API_KEY=` の行は、`.env.example` から欄が消えた構成（エンジンが codex / antigravity に決まっていて、`--with-gemini` を選んでいない）なら消してよい（使われない）。
+
 ## v0.23.3
 
 ### Summary
