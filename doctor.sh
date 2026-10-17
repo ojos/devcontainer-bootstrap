@@ -12,7 +12,7 @@ set -euo pipefail
 # この比較には限界がある。doctor.sh は公開リリースごとに取得し直す前提であり、
 # 古い doctor.sh をそのまま使い続けると、上流がその後さらに新しくなっていても
 # 「上流が更新されています」を報告できない。診断結果にもこの限界を明示する。
-DCB_VERSION="v0.22.1"
+DCB_VERSION="v0.23.0"
 ORIGIN_REL_PATH=".devcontainer/ORIGIN"
 
 TARGET_DIR="$PWD"
@@ -95,6 +95,41 @@ dcb_version_lt() {
   return 1
 }
 
+# 意図して置かない生成物の記録（absent:）のうち、外せないファイルの一覧。
+# bootstrap.sh の absent_forbidden_rel_paths と同じ一覧を持つ（doctor.sh は単体で取得されうる
+# ため自前で持つ）。README と bootstrap.sh との一致は tests/test-absent.sh が機械照合する。
+ABSENT_FORBIDDEN_PATHS=(
+  .github/workflows/verify.yml
+  .github/workflows/identity-guard.yml
+  scripts/verify.sh
+  scripts/acceptance.sh
+  scripts/loop-gate.sh
+  scripts/verify-commit-identity.sh
+  scripts/verify-commit-identity-selftest.sh
+  scripts/confirm-merge-hook.sh
+  .claude/settings.json
+  .github/workflows/second-opinion-gate.yml
+  .devcontainer/devcontainer.json
+)
+
+# 外せないファイルの一覧に入っているか。
+absent_forbidden() {
+  local p
+  for p in "${ABSENT_FORBIDDEN_PATHS[@]}"; do
+    [[ "$p" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# ORIGIN に、そのパスの absent:（意図して置かない記録）があり、外せないファイルでもないか。
+# 静的な構造の検査（require_file）が使う。ORIGIN が読めなければ偽。
+absent_recorded() {
+  local origin_file="$TARGET_DIR/$ORIGIN_REL_PATH"
+  absent_forbidden "$1" && return 1
+  [[ -r "$origin_file" ]] || return 1
+  awk -v k="absent:$1=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"
+}
+
 # ORIGIN の書式を検査する（行の文法と、入力の記録 input: 行）。壊れていれば ng を出して
 # 1 を返す。入力の記録が無い古い ORIGIN（inputs-format 行が無い）は、行の文法だけを
 # 見て通す（後方互換。診断は version= とハッシュで従来どおり成立する）。
@@ -102,16 +137,18 @@ dcb_version_lt() {
 # 行の文法: 空行・# 行のほかは version= / flags= / inputs-format= / input:<名前>= /
 # hash:<パス>=<sha256 の 64 桁> / accepted:<パス>=<sha256 の 64 桁>（bootstrap.sh --accept が
 # 書く取り込み済みの記録）/ owned:<パス>=<値> / pending:<パス>=<値>（bootstrap.sh が書く、
-# プロジェクト所有の印と、.dcb-new の取り込み待ちの印。値は読まない）のどれかであること。読み飛ばして黙って通さない。
+# プロジェクト所有の印と、.dcb-new の取り込み待ちの印。値は読まない）/ absent:<パス>=<値>
+# （bootstrap.sh --absent が書く、意図して置かない生成物の記録。値は読まない）のどれかであること。
+# 読み飛ばして黙って通さない。
 check_origin_format() {
-  local origin_file="$1" line bad="" v val mode playbook source lang l_rest
+  local origin_file="$1" line bad="" flags_v v val mode playbook source lang l_rest
   # 最終行が改行で終わっていなくても検査する。
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] || continue
     case "$line" in
       '#'*) ;;
       version=*|flags=*|inputs-format=*) ;;
-      input:project-name=*|input:languages=*|input:base-image-mode=*|input:base-image=*|input:manage-gitignore=*|input:gitignore-targets=*|input:playbook=*|input:playbook-source=*|input:playbook-ref=*) ;;
+      input:project-name=*|input:languages=*|input:base-image-mode=*|input:base-image=*|input:manage-gitignore=*|input:gitignore-targets=*|input:second-opinion-engine=*|input:claude-remote-control=*|input:update-check=*|input:playbook=*|input:playbook-source=*|input:playbook-ref=*) ;;
       input:*) bad="$bad [認識できない入力の行: ${line%%=*}]" ;;
       hash:?*=*)
         # sha256 に = は入らないが、パスには入りうる。最後の = で区切る。
@@ -123,7 +160,7 @@ check_origin_format() {
         val="${line##*=}"
         if ! [[ "$val" =~ ^[0-9a-f]{64}$ ]] || [[ -z "${line#accepted:}" || "${line#accepted:}" == "=$val" ]]; then bad="$bad [accepted の行が不正: ${line%=*}]"; fi
         ;;
-      owned:?*=*|pending:?*=*) ;;
+      owned:?*=*|pending:?*=*|absent:?*=*) ;;
       *) bad="$bad [認識できない行: $line]" ;;
     esac
     # 値の中の % は %25 / %0A / %0D だけを許す（書き手の符号化と対）。
@@ -187,6 +224,20 @@ check_origin_format() {
       esac
       v="$(origin_get "$origin_file" input:manage-gitignore)" || v=""
       case "$v" in true|false) ;; *) bad="$bad [input:manage-gitignore が true / false ではない]" ;; esac
+      # 任意の入力。行があるときだけ、値が既知のエンジンであることを確かめる。
+      if v="$(origin_get "$origin_file" input:second-opinion-engine)"; then
+        case "$v" in gemini|antigravity|codex) ;; *) bad="$bad [input:second-opinion-engine が gemini / antigravity / codex ではない]" ;; esac
+      fi
+      if v="$(origin_get "$origin_file" input:claude-remote-control)"; then
+        [[ "$v" == "true" ]] || bad="$bad [input:claude-remote-control が true ではない]"
+        # 設定を書く行き先は Claude Code を導入する構成だけ。flags= に claude が無ければ不整合。
+        flags_v="$(origin_get "$origin_file" flags)" || flags_v=""
+        [[ ",$flags_v," == *,claude,* ]] || bad="$bad [input:claude-remote-control があるのに flags= に claude が無い]"
+      fi
+      # 任意の入力。off を記録したときだけ行がある。
+      if v="$(origin_get "$origin_file" input:update-check)"; then
+        [[ "$v" == "off" ]] || bad="$bad [input:update-check が off ではない]"
+      fi
       origin_get "$origin_file" input:gitignore-targets >/dev/null || bad="$bad [input:gitignore-targets が無い]"
       playbook="$(origin_get "$origin_file" input:playbook)" || playbook=""
       case "$playbook" in
@@ -209,6 +260,18 @@ check_origin_format() {
       esac
     fi
   fi
+
+  # absent: の行は、値が 1 で、対応する hash: を持つこと（hash: が無いのは生成物でないパスの記録）。
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    v="${line#absent:}"
+    val="${v##*=}"
+    v="${v%=*}"
+    if [[ "$val" != "1" ]]; then bad="$bad [absent の値が 1 でない: $v]"; fi
+    if ! awk -v k="hash:$v=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"; then
+      bad="$bad [absent の対象に hash: の記録が無い（生成物でない）: $v]"
+    fi
+  done < <(grep '^absent:' "$origin_file" || true)
 
   if [[ -n "$bad" ]]; then
     ng "origin record malformed ($ORIGIN_REL_PATH):$bad。乖離を診断できません"
@@ -273,6 +336,21 @@ check_origin_record() {
   check_origin_format "$origin_file" || return 0
 
   local hash_count=0 unchanged_count=0 accepted_count=0 owned_count=0 stale_pending="" stale_pending_count=0 changed="" missing="" line rel recorded_hash actual_hash accepted_hash
+  local absent_count=0 absent_bad="" absent_forbidden_bad=""
+  # absent:（意図して置かない）の記録を先に検査する。外せない一覧のパス、または現物があるものは不正。
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    rel="${line#absent:}"
+    rel="${rel%=*}"
+    [[ -n "$rel" ]] || continue
+    if absent_forbidden "$rel"; then
+      absent_forbidden_bad="$absent_forbidden_bad $rel"
+    elif [[ -e "$TARGET_DIR/$rel" || -L "$TARGET_DIR/$rel" ]]; then
+      absent_bad="$absent_bad $rel"
+    else
+      absent_count=$((absent_count + 1))
+    fi
+  done < <(grep '^absent:' "$origin_file" || true)
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     rel="${line#hash:}"
@@ -281,6 +359,12 @@ check_origin_record() {
     [[ -n "$rel" && -n "$recorded_hash" ]] || continue
     hash_count=$((hash_count + 1))
     if [[ ! -f "$TARGET_DIR/$rel" ]]; then
+      # 意図して置かない記録（absent:）があり、外せないファイルでもなければ、欠けていても乖離としない
+      # （件数は上の検査で数えた）。
+      if ! absent_forbidden "$rel" \
+        && awk -v k="absent:$rel=" 'index($0, k) == 1 { f = 1 } END { exit !f }' "$origin_file"; then
+        continue
+      fi
       missing="$missing $rel"
       continue
     fi
@@ -321,6 +405,15 @@ check_origin_record() {
   if [[ -n "$missing" ]]; then
     ng "recorded in origin but missing:$missing"
   fi
+  if [[ -n "$absent_forbidden_bad" ]]; then
+    ng "ORIGIN corrupted: absent record on a gate/verification file:$absent_forbidden_bad（ゲート・検証・承認の機構を担うファイルは absent: にできません。記録を消し、bootstrap.sh --upgrade で生成し直してください）"
+  fi
+  if [[ -n "$absent_bad" ]]; then
+    ng "absent record but file exists:$absent_bad（意図して置かない記録があるのに現物があります。置くなら bootstrap.sh --no-absent <path> で記録を外し、置かないなら現物を消してください）"
+  fi
+  if [[ "$absent_count" -gt 0 ]]; then
+    ok "intentionally absent ($absent_count file(s)): 意図して置かない記録（absent:）どおり、現物がありません"
+  fi
   if [[ "$accepted_count" -gt 0 ]]; then
     ok "accepted as merged ($accepted_count file(s)): 取り込み済みとして記録した内容と一致しています"
   fi
@@ -330,7 +423,7 @@ check_origin_record() {
   if [[ "$owned_count" -gt 0 ]]; then
     ok "edited project-owned file(s) ($owned_count file(s)): プロジェクトが所有・編集するファイルなので、生成時からの変化を乖離として扱いません"
   fi
-  if [[ -z "$changed" && -z "$missing" ]]; then
+  if [[ -z "$changed" && -z "$missing" && -z "$absent_bad" && -z "$absent_forbidden_bad" ]]; then
     ok "unchanged since generation ($unchanged_count file(s))"
   fi
 }
@@ -358,12 +451,26 @@ check_dcb_new_leftover() {
   echo "  取り込み方: 元のファイルと .dcb-new の中身を見比べ、必要な差分を手で混ぜてから、.dcb-new を消してください（自動では混ぜません）。"
 }
 
+# 生成物の存在の確認。ORIGIN に absent:（意図して置かない記録）があり、外せないファイルでなければ、
+# 無くても FAIL にしない。devcontainer.json が参照するファイルの確認は require_ref_file を使う。
 require_file() {
   local f="$1"
   if [[ -f "$TARGET_DIR/$f" ]]; then
     ok "$f exists"
+  elif absent_recorded "$f"; then
+    ok "$f intentionally absent (absent: の記録どおり、置かない)"
   else
     ng "$f missing"
+  fi
+}
+
+# devcontainer.json の参照先の確認。参照先が無ければ実際に壊れているので、absent: があっても FAIL にする。
+require_ref_file() {
+  local f="$1"
+  if [[ -f "$TARGET_DIR/$f" ]]; then
+    ok "$f exists"
+  else
+    ng "$f missing（devcontainer.json の参照先です。置かない記録（absent:）があっても、参照が壊れています）"
   fi
 }
 
@@ -430,7 +537,7 @@ if [[ -f "$TARGET_DIR/.devcontainer/devcontainer.json" ]]; then
             ng "dockerComposeFile missing: $compose_file"
           fi
           ;;
-        *) require_file ".devcontainer/$compose_file" ;;
+        *) require_ref_file ".devcontainer/$compose_file" ;;
       esac
     done <<< "$compose_files"
   fi

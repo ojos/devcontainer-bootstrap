@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.22.1`
+- `v0.23.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.22.1
+TAG=v0.23.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.22.1
+TAG=v0.23.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.22.1
+TAG=v0.23.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -293,6 +293,18 @@ fi
 - `--accept <path>...`（既定: 無効。手を入れて取り込みを済ませたファイルを、ORIGIN へ「取り込み済み」として記録します。生成・`--upgrade` とは別の 3 つ目の動作で、生成の引数や `--upgrade` とは同時に指定できません。`--output-dir`（既定: カレントディレクトリ）と `--dry-run` とは併用できます。下記「`--accept`: 手を入れたファイルを取り込み済みとして記録する」参照）
 - `--no-gitignore`（既定: 無効＝`.gitignore` の managed セクションを更新する。指定すると `.gitignore` に一切触れません）
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
+- `--absent <path>...`（既定: 無効。生成先が意図して置かない生成物を、ORIGIN へ `absent:` として記録します。`--upgrade` はそのファイルを作り直さず、`doctor.sh` は欠けていても FAIL にしません。`--accept` と並ぶ動作で、生成の引数や `--upgrade` とは同時に指定できません。`--output-dir`（既定: カレントディレクトリ）と `--dry-run` とは併用できます。下記「`--absent`: 生成物を意図して置かないと記録する」参照）
+- `--no-absent <path>...`（既定: 無効。`absent:` の記録を外します。次の `--upgrade` でそのファイルが生成されます。`--absent` と同じく、生成の引数や `--upgrade` とは同時に指定できません）
+- `--second-opinion-engine <gemini|antigravity|codex>`（既定: 指定なし。`.env.example` の `SECOND_OPINION_ENGINE` へ記入するエンジンを明示します。指定が無いときの決め方は変わりません。ORIGIN に `input:second-opinion-engine` として記録し、`--upgrade` が引き継ぎます。**生成の前に、次の場合は何も書かずに非 0 で止まります**: 未知の値、空の値、`--with-<そのエンジン>` で選んでいないエンジン、`--with-antigravity` も `--with-codex` も選んでいない構成。最後の構成は `.env.example` に `SECOND_OPINION_ENGINE` の記入欄を出さず、指定の行き先が無いためです。値が無いまま最後の引数になっている場合も、エラーで止まります。`--accept` とは同時に指定できません。**`--upgrade` の引き継ぎ**: 記録した値は、渡さなければそのまま使われ、渡せば上書きされます。引き継いだ値が、`--without-<エンジン>` で外した、または選んだ構成から消えたために使えなくなったときは、止めずに警告を出し、ORIGIN の記録を外して指定が無いときの決め方に戻します（明示した値の場合は止まります）。引き継いだ値が未知の値なら、ORIGIN の破損として止まります。下記「`SECOND_OPINION_ENGINE`」参照）
+- `--claude-remote-control`（既定: 無効。オプトインです。コンテナを作るとき、生成される `scripts/install-ai-tools.sh` が `~/.claude/settings.json` に `remoteControlAtStartup: true` を足し、Claude Code の Remote Control を常に有効にします。**`--with-claude` が要ります**（無い構成では、生成の前に何も書かずに非 0 で止まります）。`--accept` とは同時に指定できません。ORIGIN に `input:claude-remote-control=true` として記録し、`--upgrade` が引き継ぎます（`--without-claude` で行き先が無くなったときは、止めずに警告を出して記録を外します。`--upgrade --dry-run` では書き込まず、「外すことになります」と警告します）。記録の値が `true` 以外のときは、ORIGIN の破損として止まります。**効く範囲と注意**:
+  - この設定がユーザー設定（`~/.claude/settings.json`）に置かれるのは、拡張の判定が `true` を読むのをユーザー設定と管理ポリシーに限るためです（プロジェクトの `.claude/settings.json` の `true` は読まれず、`false` で止めるときにしか効きません）。コミットする形では有効にできません。
+  - `~/.claude` は named volume なので、**同じ volume を使うすべてのワークスペースに効きます**。新しく起動するセッションから効き、すでに動いているセッションは変わりません。
+  - Remote Control は、**外部からセッションを操作できる入口を開く**機能です。そのため既定にしていません。
+  - マージは、キーが無いときだけ `true` を足します。既存のキーは保ち、利用者が書いた `false` は覆しません（冪等です）。ファイルが無ければ作ります。`jq` が無い、JSON として読めない、シンボリックリンクである、書き込めない、といったときは、警告を出して飛ばします（コンテナの作成は止めません）。既存のファイルを書き換えるときは元の権限を保ち、新規に作るときだけ 600 にします。
+  - **オプションを外しても、足したキーは消えません。** `--upgrade --no-claude-remote-control` で ORIGIN の記録を外し、`install-ai-tools.sh` から処理を取り除きますが、すでに書いた `remoteControlAtStartup` は残ります。無効にするには `~/.claude/settings.json` を手で直します。）
+- `--no-claude-remote-control`（既定: 無効。`--upgrade` と併用して、ORIGIN に記録した `--claude-remote-control` を引き継がず、外して生成します。生成時に単独で使っても、未指定と同じです。`--claude-remote-control` と同時に指定すると止まります。`--accept` とは同時に指定できません）
+- `--no-update-check`（既定: 無効＝確認する。生成物の `scripts/update-check.sh`（新しい版の確認と追従。[新しい版の確認と追従](#新しい版の確認と追従update-check)）を動かさない記録を、ORIGIN に `input:update-check=off` として残します。`--upgrade` は引き継ぎます。`.env` の `UPDATE_CHECK=off` でも止められます。`--update-check` と同時に指定すると止まります。`--accept` とは同時に指定できません）
+- `--update-check`（`--upgrade` と併用して、ORIGIN に記録した `--no-update-check` を外し、確認を有効に戻します。生成時に単独で使っても、未指定と同じです。ORIGIN の `input:update-check` の値が `off` 以外のときは破損として止まり、この指定で直せます）
 - `--with-playbook` / `--without-playbook`（AI 共通ルールの配置。既定: 配置しない）
 - `--without-aws` / `--without-gcp` / `--without-claude` / `--without-gemini` / `--without-antigravity` / `--without-codex` / `--without-copilot` / `--without-copilot-review`（`--with-<名前>` のそれぞれと対になる打ち消し。`--upgrade` では、記録した集合から外し、外したフラグでだけ生成していたファイルのうち手を入れていないものを削除します。`--upgrade` 以外では「付けない」と同じなので受け付けるだけで、既存のファイルには触れません。同じ名前の `--with-<名前>` と同時に指定するとエラーで止まり、何も書きません。下記「`--upgrade` の注意」参照）
 - `--playbook-version <tag>`（既定: 空。既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.4`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
@@ -329,7 +341,7 @@ fi
 
 #### `--upgrade` の振り分け
 
-`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 7 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
+`--upgrade` はファイルごとに、現物・記録したハッシュ（ORIGIN の `hash:`）・新しい版の生成結果を比べて次の 8 通りに振り分けます。対象は DCB 自身のテンプレートと、規範経由で置くファイル（規範本体・入口ファイル・`.ai-playbook/VERSION`・第二意見のスクリプトなど）の両方です。
 
 | 状態 | 動作 | 出力 |
 |---|---|---|
@@ -338,6 +350,7 @@ fi
 | 手を入れた（現物 ≠ 記録）が、雛形は変わっていない（新しい版 = 記録）。取り込み待ち（`pending:` や残っている `.dcb-new`）が無い | 取り込むべき差分が無いので、現物を温存して報告するだけ。`.dcb-new` は置かない。表示は現物の由来で分ける: 取り込み済み（現物 = `accepted:`）、プロジェクト所有（`owned:`）、それ以外 | `accepted (template unchanged)` / `owned (template unchanged)` / `modified (template unchanged)` |
 | 手を入れた（現物 ≠ 記録）うえで、雛形が変わった、または取り込み待ち（`pending:` や残っている `.dcb-new`）がある、または記録が無く新しい版と違う | 上書きせず `<path>.dcb-new` を隣へ置き（取り込む前に失った分も同じ版の `--upgrade` で置き直す）、差分の要約を出す。`.dcb-new` のモードは元のファイルに揃える。ORIGIN へ `pending:` を記録する | `keep (modified)` / `keep (no record)` |
 | 新しい版で増えた（現物が無い） | 生成する | `write: <path> (new)` |
+| 現物が無く、ORIGIN に `absent:` の記録がある（外せない一覧のパスを除く） | 生成しない。`absent:` の記録と `hash:` の値を引き継ぐ（`--no-absent` で記録を外すと、次の `--upgrade` で上の行になる） | `absent (recorded as intentionally absent)` |
 | 手を入れたが新しい版と同じ内容 | 更新済みとして扱い、古い `.dcb-new` があれば消す | `up-to-date` |
 | 新しい版で生成されなくなった | **報告するだけで削除しない**。記録からは外す | `no longer generated (not deleted)` |
 
@@ -383,8 +396,45 @@ bash bootstrap.sh --accept scripts/verify.sh --output-dir <生成先> --dry-run 
 - 取り込み待ち（`pending:`）のファイルだけは、`.dcb-new` を取り込む前に失っても、同じ版で `--upgrade` をやり直せば作り直されます。
 - **プロジェクトが所有・編集するファイル**（`scripts/acceptance.sh` と `scripts/acceptance-remote.sh`）には、ORIGIN に `owned:` が記録されます。これらは日常的に編集するものなので、`--accept` しなくても、取り込み待ちが無い限り `doctor.sh` は FAIL にしません（編集した件数は `[OK]` で報告します）。`.dcb-new` を置いた（`pending:` がある）あいだは FAIL で、取り込んで `--accept` すると戻ります。一覧は `bootstrap.sh` の `project_owned_rel_paths` が持ち、`tests/test-owned-list.sh` がこの README の記述との一致を機械照合します。
 
+#### `--absent`: 生成物を意図して置かないと記録する
+
+プロジェクトが、ある生成物を意図して置かない場合（たとえば compose をプロジェクト独自のファイル名にしている生成先の `.devcontainer/compose.yaml`）、そのファイルを消すだけでは、`--upgrade` が「新しい版で増えた」として作り直し、`doctor.sh --strict` は「記録にあるのに無い」で FAIL にします。別名で置くなら改名して `--accept` する手もありますが、改名できない生成先のために、`--absent` は「このファイルは意図して置かない」を ORIGIN の `absent:<path>=1` として記録します。
+
+```bash
+rm .devcontainer/compose.yaml   # devcontainer.json がプロジェクト独自の compose を指し、--accept 済みであることが前提
+bash bootstrap.sh --absent .devcontainer/compose.yaml
+bash bootstrap.sh --no-absent .devcontainer/compose.yaml   # 記録を外す（次の --upgrade で生成される）
+```
+
+- **次のどれかに当てはまるパスがあると、何も書かずに終了コード 1 で止まります**（`--accept` と同じく、全件を検査してから書きます）。(1) ORIGIN に `hash:` の記録が無い（今回の構成の生成物ではない。生成物かどうかは、記録済みの `hash:` で判定します）。(2) 下の外せない一覧に入っている。(3) 現物がまだある（先に消してから記録します。記録と現物を食い違わせないためです）。
+- **上の例は、`devcontainer.json` の `dockerComposeFile` がプロジェクト独自の compose ファイルを指していて、その手直しを `--accept` 済みであることが前提です。** `dockerComposeFile` が `compose.yaml` を指したまま消すのは、`absent:` の記録があっても本当の壊れなので、`doctor.sh` は `dockerComposeFile missing` 相当で `[FAIL]` にします（参照の検査は `absent:` を見ません）。
+- `--no-absent` は、`absent:` の記録が無いパスを渡すと止まります（書き間違いに気づくためです）。
+- `--absent` / `--no-absent` は、`--accept` と同じ流儀で、生成の引数・`--upgrade`・`--accept`・互いのいずれとも同時に指定できません。`--output-dir` と `--dry-run` は併用できます。
+- `--absent` は同じパスの `accepted:` / `pending:` も外します。`hash:` は書き換えず、記録した値のまま残します。`<path>.dcb-new` が残っていても止まりませんが、`--upgrade` の取り込み待ちの報告に残り続けるので、不要なら消します。
+- **`--force` の生成し直しは `absent:` を引き継ぎません。** `absent:` のファイルも作り直され、ORIGIN が書き直されたときは `absent:` は残りません（規範の既存ファイルを温存して ORIGIN を書き直さない構成では `absent:` が残り、現物があるので `doctor.sh` が `--no-absent` を案内して `[FAIL]` にします）。置かない状態を保ちたいときは、`--force` ではなく `--upgrade` を使います。
+- `--upgrade` は、`absent:` があって現物が無いファイルを作らず、`absent:` を引き継ぎます。新しい版で生成されなくなったファイルの `absent:` は外れます。対応する `hash:` が無い `absent:`（生成物でないパスの記録）は、警告を出して引き継がずに捨てます。`absent:` があるのに現物があれば、記録は食い違いなので引き継がず、通常どおり扱います。
+- `doctor.sh` は、`absent:` があって現物が無いファイルを FAIL にせず、件数を `[OK]` で報告します。`absent:` があるのに現物があれば `[FAIL]`（`--no-absent` を案内）、外せない一覧のパスに `absent:` があれば ORIGIN の破損として `[FAIL]` です。`absent:` の無い ORIGIN の結果は変わりません。
+- **外せない一覧**は、ゲート・検証・承認の機構を担うファイルです。`verify.yml` を消せないのと同じ理由で、外す入口を持ちません。一覧は `bootstrap.sh` の `absent_forbidden_rel_paths` が持ち、`doctor.sh` も同じ一覧を持ちます。`tests/test-absent.sh` がこの表との一致を機械照合します。
+
+| パス | 外せない一覧の理由 |
+|---|---|
+| `.github/workflows/verify.yml` | 外せない一覧: `verify.sh` を CI で必ず回すための入口 |
+| `.github/workflows/identity-guard.yml` | 外せない一覧: コミット identity の検証を CI で必ず回すための入口 |
+| `scripts/verify.sh` | 外せない一覧: 受け入れ検証の単一入口 |
+| `scripts/acceptance.sh` | 外せない一覧: 受け入れ条件の実体（無いと `verify.sh` が未定義で落ちる） |
+| `scripts/loop-gate.sh` | 外せない一覧: push 前のローカルゲートの単一入口 |
+| `scripts/verify-commit-identity.sh` | 外せない一覧: コミット identity の判定そのもの |
+| `scripts/verify-commit-identity-selftest.sh` | 外せない一覧: 上の判定の自己試験 |
+| `scripts/confirm-merge-hook.sh` | 外せない一覧: マージ直前の承認を機構で保証するフック |
+| `.claude/settings.json` | 外せない一覧: `confirm-merge-hook.sh` を PreToolUse フックとして配線する設定（`--with-claude` の構成にだけある） |
+| `.github/workflows/second-opinion-gate.yml` | 外せない一覧: 第二意見の記録を確認するワークフロー（規範を置く構成にだけある） |
+| `.devcontainer/devcontainer.json` | 外せない一覧: 開発コンテナの定義そのもの |
+
 `--upgrade` の注意:
 
+- **`--second-opinion-engine` の記録は引き継がれます。** 規則（止まる条件、引き継ぎ、使えなくなったときに警告して記録を外すこと）は、上のオプション一覧の項が正本です。これにより `.env.example` を手で直して `--accept` する回避を、`--upgrade` のたびに繰り返す必要がなくなります。既存の `.env` は書き換えません。
+- **`--claude-remote-control` の記録は引き継がれます。** 規則は、上のオプション一覧の項が正本です。
+- **`--no-update-check` の記録（`input:update-check=off`）は引き継がれます。** 規則は、上のオプション一覧の項が正本です。
 - **`--with-*` は足せます。外すには `--without-<名前>` を使います。** 引数で渡した `--with-*` は記録した集合へ足されます。`--upgrade --without-<名前>` は記録した集合から外し、ORIGIN の `flags=` からも消えます。生成し直す必要はありません。同じ名前の `--with-` と `--without-` を同時に渡すとエラーで止まります。
 - **外すときは、外したフラグでだけ生成していたファイルを、手を入れていないものに限って削除します。** ORIGIN に記録したハッシュと現物が一致するものを削除し（`remove: <path> (flag removed, unmodified)`）、手を入れたものは残して `keep (modified, no longer generated): <path>` と報告します。`--dry-run` では `plan: remove <path>` と出すだけで、何も消しません。ORIGIN は外した結果で書き直すため、残したファイルは記録から外れ、次の `--upgrade` の対象にも出ません（不要なら手で消してください）。外していないフラグで生成されるファイルは対象外です。`--upgrade` 以外で `--without-<名前>` を渡した場合は、新規生成なら付けないのと同じで、既存のファイルは削除しません。
 - **リモート最終ゲート（`--without-copilot-review`）を外すときは、生成物以外の作業が残ります。** DCB は次を変えません。(1) `.github/project-ai-rules.md` の「リモート最終ゲート」の記述を、置かない構成に合わせて直す。(2) リポジトリの required check（ブランチ保護・ruleset）に `review-gate` を入れていれば外す（ワークフローが無くなると、その check は永久に待ち状態になりマージが止まります）。(3) GitHub 側の Copilot の自動レビュー（ruleset の「Automatically request Copilot code review」など）の設定を止める。
@@ -735,7 +785,7 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 `.env.example` が持つキー:
 
 - `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。
-- `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-antigravity` / `--with-codex` を選んだときだけ出ます）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（既定の gemini は CLI もキーも無く、設定するまで使えないため）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら gemini）。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
+- `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-antigravity` / `--with-codex` を選んだときだけ出ます）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（既定の gemini は CLI もキーも無く、設定するまで使えないため）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら gemini）。**実際に使うエンジンが、これらの決め方と違うとき（例: gemini の CLI を入れたまま第二意見を codex で回す）は、`--second-opinion-engine <gemini|antigravity|codex>` で明示します。** 指定した値が最優先で記入されます。止まる条件と `--upgrade` の引き継ぎは、オプション一覧の `--second-opinion-engine` の項に従います。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
 - `GH_TOKEN` — GitHub の PAT。**上表の「コンテナ内でのログイン」に対する唯一の例外**です（下記「[GitHub 認証だけが例外である理由](#github-認証だけが例外である理由)」）。空にすれば従来どおり `gh auth login` の保存済み認証で動きます（**`GITHUB_TOKEN` も未設定であることが条件**。下記「[`GITHUB_TOKEN` は設定しない](#github_token-は設定しない)」）。
 - `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` — コミット identity。`scripts/setup-git-identity.sh` が local へ適用します。
   - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` という名前を使わないのは、それが **git 自身の読む環境変数**だからです。環境に置くと local 設定を持たないリポジトリでも identity が解決でき、`user.useConfigOnly` による保護（未設定なら commit を止める）が無効になります。
@@ -949,6 +999,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/setup-git-identity.sh` / `scripts/verify-commit-identity.sh` / `scripts/verify-commit-identity-selftest.sh`（git identity ガード。下記参照）
 - `.github/workflows/identity-guard.yml`（コミット identity の検証 CI。下記参照）
 - `scripts/verify.sh` / `scripts/acceptance.sh` / `scripts/loop-gate.sh`（ループコーディング支援。下記参照）
+- `scripts/update-check.sh`（DCB と ai-playbook の新しい安定版の確認と追従。`on-attach.sh` が通知を、対話のシェルの rc が問いかけを呼ぶ。[新しい版の確認と追従](#新しい版の確認と追従update-check)）
 - `scripts/session-ledger.sh`（同じホストで並行して動く AI セッションの共有台帳。`claim` / `release` / `list` / `check` / `refresh` を持つ。置き場所は `git rev-parse --git-common-dir` の配下で、セッションごとに別ファイルへ追記する。規範は `.ai-playbook/shared-ai-rules.md`「セッション間の協調」。実行環境に依存しないので、装備フラグに関わらず常に生成する）
 - `scripts/check-no-secrets.sh`（機密混入の検知ゲート。`verify.sh` が受け入れ条件の手前で呼ぶ。下記参照）
 - `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。作業ツリーの内容に加え、索引（ステージ済み）と作業ツリーで内容が違うファイルは索引の blob も読み、索引側の検出は `<パス> (staged)` と示す。git の clean フィルターが、作業ツリーに無い禁止バイトを索引へ書き込む場合は見逃す（限界。`git diff` がフィルターを通した後の内容を比べるため）。単体で `bash scripts/check-control-chars.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)））
@@ -1003,7 +1054,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.22.1
+version=v0.23.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1022,6 +1073,7 @@ hash:.env.example=<sha256>
 accepted:.devcontainer/devcontainer.json=<sha256>   # 取り込み済みにしたファイルがあるときだけ
 owned:scripts/acceptance.sh=1                        # プロジェクトが所有・編集するファイル
 pending:scripts/verify.sh=1                          # .dcb-new が取り込み待ちのときだけ
+absent:.devcontainer/compose.yaml=1                  # --absent で意図して置かないと記録したときだけ
 ```
 
 | キー | 意味 |
@@ -1033,6 +1085,7 @@ pending:scripts/verify.sh=1                          # .dcb-new が取り込み�
 | `hash:<相対パス>` | その生成物の sha256（`sha256sum` が無い環境では `shasum -a 256`、それも無ければ `openssl dgst -sha256` を使います） |
 | `accepted:<相対パス>` | `bootstrap.sh --accept` が記録する、取り込み済みの現物の sha256。取り込み済みにしたファイルがあるときだけ書く（無い ORIGIN も有効）。`doctor.sh` は現物がこの値と一致すれば変化として扱わない。`--upgrade` は引き継ぎ、その回に `.dcb-new` を置いたファイルの分は落とす |
 | `owned:<相対パス>` | プロジェクト所有のファイルの印（値は `1`）。生成時と `--upgrade` が、今回の生成対象にあるものへ書く。`doctor.sh` は、`pending:` が無ければ現物が `hash:` と違っても乖離として扱わない |
+| `absent:<相対パス>` | `bootstrap.sh --absent` が記録する、意図して置かない生成物の印（値は `1`）。あるときだけ書く（無い ORIGIN も有効）。`--upgrade` は、現物が無く作らなかったパスの分を引き継ぐ。`doctor.sh` は、現物が無ければ欠けていても FAIL にせず、現物があれば FAIL にする。外せない一覧のパスに書かれていれば破損として FAIL にする。この行のパスにも `hash:` は残す |
 | `pending:<相対パス>` | `--upgrade` が `.dcb-new` を置いた（取り込み待ち）ファイルの印（値は `1`）。`--accept` か、現物が新しい版と同じになると外れる。あるあいだ `doctor.sh` は FAIL にする。`--upgrade` は、取り込む前に失った `.dcb-new` をこの印で作り直す |
 
 記録する入力と、記録しない入力:
@@ -1043,6 +1096,9 @@ pending:scripts/verify.sh=1                          # .dcb-new が取り込み�
 | `--with-*` | `flags=` に記録する | 同上。`--upgrade` は記録した集合へ、引数で渡した分を足し、`--without-<名前>` で渡した分を外す |
 | `--base-image` | 指定の有無（`input:base-image-mode=override` / `auto`）と、そのとき使った値（`input:base-image`）を記録する | `auto` のときの値は、生成時の環境（docker の有無・アーキテクチャ・レジストリの応答）で決まった観測記録で、再現すべき入力ではない。`override` のときだけ `--upgrade` が再現する |
 | `--no-gitignore` / `--gitignore-targets` | 記録する（`input:manage-gitignore` / `input:gitignore-targets`） | 生成結果（`.gitignore`）を決める |
+| `--second-opinion-engine` | 指定したときだけ記録する（`input:second-opinion-engine`） | 生成結果（`.env.example`）を決める。未指定の ORIGIN には行を足さず、古い ORIGIN にこの行が無くても `--upgrade` は止まらない。値は gemini / antigravity / codex のいずれか（`doctor.sh` が検査する） |
+| `--claude-remote-control` | 指定したときだけ `input:claude-remote-control=true` を記録する | 生成結果（`install-ai-tools.sh`）を決める。未指定の ORIGIN には行を足さず、古い ORIGIN にこの行が無くても `--upgrade` は止まらない。値は `true` だけ（`doctor.sh` が検査する） |
+| `--no-update-check` | 指定したとき（`--upgrade` で引き継いだときを含む）だけ `input:update-check=off` を記録する | 生成物 `scripts/update-check.sh` が実行時に読む。未指定の ORIGIN には行を足さず、古い ORIGIN にこの行が無くても `--upgrade` は止まらない。値は `off` だけを認め、それ以外は破損として止まる（`--update-check` で外せる） |
 | 規範の取得元（`--playbook-version` / `--playbook-from` / `--with-playbook`） | 種類（`input:playbook-source` = `tag` / `url` / `local` / `adjacent`）と、記録できる場合の値（`input:playbook-ref`）を記録する。配置しないときは `input:playbook=none` | `tag` と、`@` `?` `#` を含まない URL だけ値を記録する。ローカルのパスは、絶対パスがコミットされると困り、相対パスは実行した場所で意味が変わるため記録しない。`@` `?` `#` を含む URL は資格情報や署名を含みうるため記録しない（これらは `--upgrade` で `--playbook-from` の明示が要る） |
 | `--playbook-conflict-policy` | 記録しない | 既存ファイルへの対処であって、生成結果を決める入力ではない（`--upgrade` は自分の振り分けで決める） |
 | `--force` / `--dry-run` / `--upgrade` / `--output-dir` | 記録しない | 実行の仕方であって生成結果を決める入力ではない。出力先の絶対パスも残さない |
@@ -1257,6 +1313,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `scripts/on-attach.sh` | そのまま書き出す | — |
 | `scripts/session-coord-hook.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/session-ledger.sh` | そのまま書き出す | — |
+| `scripts/update-check.sh` | そのまま書き出す | — |
 | `scripts/session-peers.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/claude-session-wrapper.sh` | そのまま書き出す | —（`--with-claude` のときだけ生成） |
 | `scripts/setup-git-identity.sh` | そのまま書き出す | — |
@@ -1279,6 +1336,20 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 `scripts/confirm-merge-hook.sh` を一致必須の対象へ加えた経緯は、後から写しを足す判断がどう起きるかの一例です。かつてこの開発リポジトリは `.claude/settings.json` を追跡せず、フックを配線できないため写しも置いていませんでした（写しだけを置くと、誰も起動しないスクリプトが `scripts/` とカタログに並ぶためです）。**その後、許可リストを `.claude/settings.local.json` へ分離し、`settings.json` をフックの配線だけにして追跡へ切り替えたため、配線できない理由は成立しなくなりました。** 同テストのコメントが「配線を入れる判断をしたときは写しを置いて一致必須へ移すこと」を要求しており、その手順どおりに移しています。`scripts/check-control-chars.sh` / `scripts/check-table-breaks.sh` / `scripts/check-shell-portability.sh` は、判定がプレースホルダを持たず生成条件に依らず全構成で同一であるため、最初から一致必須の対象として加えています。**移植性の検査はさらに、自分自身を走査対象に含めます**——正本と写しがずれると、同じツリーに対して片方だけが赤くなる形で矛盾するため、一致必須である必要が他の 2 本より強くあります。
 
 この開発リポジトリは `.claude/` 配下の写し（スキル定義・サブエージェント定義）も持ちます。こちらは `tests/test-claude-mirror.sh` が雛形とのバイト一致を照合します。**`scripts/` に照合があって `.claude/` に無かったあいだ、実際に 3 件がドリフトしていました。**
+
+## 新しい版の確認と追従（update-check）
+
+生成した環境が、DCB と ai-playbook の古い版のまま気づかずに使われ続けないようにする仕組みです。生成物の `scripts/update-check.sh` が担い、**既定で有効**です（既存の利用者は次の `--upgrade` から）。
+
+- **確認:** 接続時（`postAttachCommand` の `scripts/on-attach.sh`）に、ORIGIN の版を GitHub の最新の安定版（`releases/latest`。プレリリースを除く。認証なし）と比べ、新しければ通知を 1 行だけ出します。聞きません。`on-attach.sh` は端末の入力を受けられないためです。
+- **聞く:** 対話のシェル（`on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入します。端末が付いている対話のシェルで、今いるディレクトリがそのプロジェクトの中のときだけ。差し込みの印はプロジェクトごとです）で「追従しますか？ [y/N]」と聞きます。今の版と最新の版を示し、**「移行」の節がある版を 2 つ以上飛び越えるときは `[注意]` で目立たせます**（最新のタグの配布先の `CHANGELOG.md`（`raw.githubusercontent.com`）を読み、(今の版, 最新] の「## vX.Y.Z」の節のうち「### 移行」を持つ版を数えます。リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないためです。読めなければ、リリースノートを読む案内に留めます）。複数の端末が同時に開いても、聞く・追従するのは 1 つの端末だけです（`flock`。無い環境ではロックのディレクトリ）。
+- **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方（`git restore .` と `git clean -fd`）を案内します。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 未コミットの変更があるときは、差分が混ざるので追従せずに止めます。照合に通らないときは何も実行しません。
+- **N のとき:** その版のあいだは聞きません（通知も出しません）。さらに新しい版が出れば、また聞きます。
+- **手で追従する:** `bash scripts/update-check.sh upgrade`（最新を問い合わせて、y と同じ処理をします）。
+- **間引きと失敗:** 問い合わせは 1 日 1 回です。失敗した日も数えます。オフライン・API の失敗・制限は黙って通し（短いタイムアウト）、起動を止めません。端末が付いていないシェル（AI エージェント・CI・スクリプト）では何も聞かず、何も出しません。
+- **キャッシュ:** `${XDG_CACHE_HOME:-~/.cache}/dcb-update-check/<プロジェクトごとの鍵>/`。コミットしません。
+- **確認の対象:** ORIGIN の `version=` が `vX.Y.Z` のときの DCB（取得元は `ojos/devcontainer-bootstrap`）。ai-playbook は、取得元が `tag`、またはリリースのタグの tarball の URL（`https://github.com/<owner>/ai-playbook/archive/refs/tags/<版>.tar.gz`）のときだけで、ほかの取得元（`adjacent` / `local` など）は確認しません。ORIGIN が無い、`version=` がリリースの版でない環境（この開発リポジトリを含む）では何もしません。
+- **止め方:** 生成時の `--no-update-check`（ORIGIN に記録し、`--upgrade` で引き継ぎます。戻すのは `--upgrade --update-check`）、または `UPDATE_CHECK=off`（`0` / `false` / `no` / `disabled` も同じ）。環境変数で設定すれば止まります（`.env` が読み込まれても環境の値が優先されます）。`.env` に書くときは、`.env.example` のコメントの行の `#` を外します。
 
 ## Doctor 自己診断
 
@@ -1320,14 +1391,19 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | 記録した生成物が現物と一致しないが、`owned:`（プロジェクトが所有・編集）の記録があり、`pending:` が無い | `[OK]` 編集済みの所有ファイルとして件数を報告 |
 | 記録した生成物が現物と一致せず、`accepted:` / `owned:` の記録とも合わない、または `pending:` がある | `[FAIL]` 該当ファイル名を添えて「生成時から変化しています」と報告し、`bootstrap.sh --accept <path>` の案内を添える |
 | 記録した生成物が現物と一致するが、`pending:` が残っている | `[WARN]` 件数と対象のパスを出し、`bootstrap.sh --accept <path>` か `--upgrade` で外すよう案内（取り込む差分は無いが記録が古い。`--strict` では落ちる） |
-| 記録した生成物が消えている | `[FAIL]` 該当ファイル名を添えて報告 |
+| 記録した生成物が消えている（`absent:` の記録が無い） | `[FAIL]` 該当ファイル名を添えて報告 |
+| 記録した生成物が消えているが、`absent:` の記録がある（外せない一覧のパスを除く） | `[OK]` 意図して置かないファイルとして件数を報告 |
+| `absent:` の記録があるのに、現物がある | `[FAIL]` 該当ファイル名を添え、`bootstrap.sh --no-absent <path>` の案内を添える |
+| 外せない一覧のパスに `absent:` の記録がある | `[FAIL]` ORIGIN の破損として報告（そのパスが消えていても同じ） |
+| `absent:` の対象に `hash:` が無い（生成物でない）、または値が `1` でない | `[FAIL]` 記録が壊れている |
+| 静的な構造の検査（`.env.example`・各スクリプトなどの存在）で、無いファイルに `absent:` の記録がある（外せない一覧のパスを除く） | `[OK]` 置かない記録どおりとして報告（`devcontainer.json` が参照する compose ファイルの存在は、`absent:` があっても `[FAIL]` のまま） |
 | 記録の版が `doctor.sh` 自身の版より古い | `[WARN]` 「上流が更新されています」と報告 |
 | 記録の版が一致（または新しい） | `[OK]` |
 | `*.dcb-new` が残っている | `[WARN]` 一覧と取り込み方を出す（下記） |
 
-**`doctor.sh` は `bootstrap.sh` と同じ版を使ってください。** 旧い `doctor.sh` は `owned:` / `pending:` を「認識できない行」として `[FAIL]` にします（`accepted:` の導入時と同じ性質）。
+**`doctor.sh` は `bootstrap.sh` と同じ版を使ってください。** 旧い `doctor.sh` は `owned:` / `pending:` / `absent:` を「認識できない行」として `[FAIL]` にします（`accepted:` の導入時と同じ性質）。
 
-**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` / `accepted:<パス>=<sha256>` / `owned:<パス>=<値>` / `pending:<パス>=<値>` 以外の行、`%` の不正な並び、不正な `hash:` / `accepted:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
+**書式の検査**: `version=` / `flags=` / `inputs-format=` / `input:<名前>=` / `hash:<パス>=<sha256>` / `accepted:<パス>=<sha256>` / `owned:<パス>=<値>` / `pending:<パス>=<値>` / `absent:<パス>=<値>` 以外の行、`%` の不正な並び、不正な `hash:` / `accepted:` の行は `[FAIL]`（記録が壊れている）です。新しい形式（`inputs-format=1`）では `version=` と `flags=`（空の値は可）が必須で、無ければ `[FAIL]` です。同じ `input:` の名前が重複していても `[FAIL]` です。`inputs-format` が `1` でなければ、知らない書式なので入力の検査を省いて `[WARN]` にします。`inputs-format` の無い古い形式は、行の文法だけを見て通します。
 
 **残っている `*.dcb-new` の報告**: `bootstrap.sh --upgrade` が、手を入れたファイルの隣へ置いた新しい版（`<path>.dcb-new`）が出力先に残っていれば、`[WARN]` でパスを一覧します（`.git` と `node_modules` は除き、シンボリックリンクはたどりません）。取り込み方は、**元のファイルと `.dcb-new` の中身を見比べ、必要な差分を手で混ぜてから `.dcb-new` を消す**ことです。自動では混ぜません。`--strict` では、これも失格になります。
 

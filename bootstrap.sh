@@ -25,6 +25,21 @@ FORCE="false"
 DRY_RUN="false"
 MANAGE_GITIGNORE="true"
 GITIGNORE_TARGETS=""
+# .env.example の SECOND_OPINION_ENGINE に記入するエンジン（空なら選んだエンジンから決める）。
+SECOND_OPINION_ENGINE_OPT=""
+SECOND_OPINION_ENGINE_EXPLICIT="false"
+# --claude-remote-control: ~/.claude/settings.json へ remoteControlAtStartup=true をマージする
+# 処理を install-ai-tools.sh に生成する（オプトイン。既定は生成しない）。
+CLAUDE_REMOTE_CONTROL="false"
+CLAUDE_REMOTE_CONTROL_EXPLICIT="false"
+# --no-claude-remote-control: --upgrade で ORIGIN の記録を引き継がず、外して生成する。
+NO_CLAUDE_REMOTE_CONTROL="false"
+# --no-update-check: 生成物の scripts/update-check.sh（DCB と ai-playbook の新しい版の確認）を、
+# 動かさない記録（ORIGIN の input:update-check=off）にする。既定は有効。--update-check は、
+# --upgrade で記録した off を外して有効に戻す。
+UPDATE_CHECK_OFF="false"
+UPDATE_CHECK_ON_EXPLICIT="false"
+NO_UPDATE_CHECK_EXPLICIT="false"
 # --upgrade: 記録した入力で生成し直し、手を入れていないファイルだけ新しい版へ更新する。
 # 引数で明示されたものだけを記録の入力より優先するため、明示の有無を別に持つ。
 UPGRADE="false"
@@ -50,6 +65,17 @@ UPGRADE_PENDING=""
 # --accept <path>...: 手を入れたファイルを取り込み済みとして ORIGIN へ記録する（3 つ目の動作）。
 ACCEPT="false"
 ACCEPT_PATHS=()
+# --absent <path>... / --no-absent <path>...: 生成物を意図して置かない記録（ORIGIN の absent: 行）を
+# 付ける・外す（--accept と並ぶ動作）。
+ABSENT="false"
+ABSENT_PATHS=()
+NO_ABSENT="false"
+NO_ABSENT_PATHS=()
+# --upgrade が「absent: の記録どおり、現物が無いので生成しなかった」相対パスの一覧（改行区切り）。
+# ORIGIN の absent: 行はこのパスの分だけを引き継ぐ（accepted: と同じ許可の一覧方式）。
+UPGRADE_ABSENT_KEEP=""
+# 旧 ORIGIN の absent: のうち、hash: も持つパスの一覧（改行で囲む。--upgrade の開始時に 1 度だけ読む）。
+UPGRADE_ABSENT_RECORDED=""
 PLAYBOOK_CONFLICT_POLICY_EXPLICIT="false"
 
 BASE_IMAGE_OVERRIDE=""
@@ -78,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.22.1"
+DCB_VERSION="v0.23.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -142,8 +168,41 @@ options:
                               hash: record, an existing file and no <path>.dcb-new beside it;
                               otherwise nothing is written. Not combinable with generation
                               options or --upgrade; --output-dir and --dry-run are allowed.
+  --absent <path>...          Record generated files you intentionally do not keep as
+                              absent in .devcontainer/ORIGIN (output dir defaults to $PWD).
+                              --upgrade then does not create them and doctor.sh does not
+                              report them missing. Each path needs a hash: record, no file
+                              on disk, and must not be a gate/verification file (the paths
+                              listed in the README); otherwise nothing is written. Not
+                              combinable with generation options or --upgrade.
+  --no-absent <path>...       Remove the absent record; the next --upgrade creates the file.
   --no-gitignore              管理対象の .gitignore セクションを更新しない
   --gitignore-targets <csv>   Additional template names to use (e.g. VisualStudioCode,JetBrains)
+  --second-opinion-engine <gemini|antigravity|codex>
+                              Engine written into SECOND_OPINION_ENGINE of .env.example.
+                              Requires --with-<engine> and at least one of --with-antigravity
+                              / --with-codex (otherwise the entry is not generated). Unknown
+                              or unselected values stop before anything is written.
+                              Recorded in ORIGIN and kept by --upgrade.
+  --claude-remote-control     Opt in: generated install-ai-tools.sh merges
+                              remoteControlAtStartup=true into ~/.claude/settings.json
+                              when the key is absent (an existing value, including false,
+                              is kept). Requires --with-claude; otherwise stops before
+                              anything is written. Recorded in ORIGIN and kept by --upgrade.
+  --no-claude-remote-control  With --upgrade: drop the recorded --claude-remote-control and
+                              regenerate without it (the key already written to
+                              ~/.claude/settings.json is not removed). Alone at generation
+                              time it equals leaving the option out. Not combinable with
+                              --claude-remote-control.
+  --no-update-check           Record input:update-check=off in ORIGIN: the generated
+                              scripts/update-check.sh (checks for a newer stable
+                              devcontainer-bootstrap / ai-playbook at attach time and
+                              asks to follow with --upgrade in an interactive shell)
+                              then does nothing. Kept by --upgrade. The check is on by
+                              default; UPDATE_CHECK=off in .env also stops it.
+  --update-check              With --upgrade: drop a recorded --no-update-check (turn the
+                              check back on). Alone it equals leaving the option out.
+                              Not combinable with --no-update-check.
   --with-playbook             Install shared AI rules (ai-playbook) and entry files
   --without-playbook          Do not install shared AI rules
   --playbook-from <path|url>  Playbook source (directory path or archive URL)
@@ -228,7 +287,8 @@ dcb_origin_load_inputs() {
   local file="$1" mode
   ORIGIN_IN_PROJECT_NAME="" ORIGIN_IN_LANGUAGES="" ORIGIN_IN_FLAGS=""
   ORIGIN_IN_BASE_IMAGE_MODE="" ORIGIN_IN_BASE_IMAGE=""
-  ORIGIN_IN_MANAGE_GITIGNORE="" ORIGIN_IN_GITIGNORE_TARGETS=""
+  ORIGIN_IN_MANAGE_GITIGNORE="" ORIGIN_IN_GITIGNORE_TARGETS="" ORIGIN_IN_SECOND_OPINION_ENGINE="" ORIGIN_IN_CLAUDE_REMOTE_CONTROL="" ORIGIN_IN_CLAUDE_REMOTE_CONTROL_SET=""
+  ORIGIN_IN_UPDATE_CHECK="" ORIGIN_IN_UPDATE_CHECK_SET=""
   ORIGIN_IN_PLAYBOOK="" ORIGIN_IN_PLAYBOOK_SOURCE="" ORIGIN_IN_PLAYBOOK_REF=""
   [[ -f "$file" ]] || return 1
   # 値が 1 でなければ、この版が読めない書式として 1 を返す（doctor.sh と揃える）。
@@ -243,6 +303,20 @@ dcb_origin_load_inputs() {
   fi
   ORIGIN_IN_MANAGE_GITIGNORE="$(dcb_origin_get "$file" input:manage-gitignore)" || return 1
   ORIGIN_IN_GITIGNORE_TARGETS="$(dcb_origin_get "$file" input:gitignore-targets)" || return 1
+  # 任意の入力。古い ORIGIN や未指定のときは行が無いので、無いことを失敗にしない。
+  ORIGIN_IN_SECOND_OPINION_ENGINE="$(dcb_origin_get "$file" input:second-opinion-engine)" || ORIGIN_IN_SECOND_OPINION_ENGINE=""
+  # 行が無い（未指定・古い ORIGIN）と、値が空の行（破損）を区別するため、行の有無を別に持つ。
+  if ORIGIN_IN_CLAUDE_REMOTE_CONTROL="$(dcb_origin_get "$file" input:claude-remote-control)"; then
+    ORIGIN_IN_CLAUDE_REMOTE_CONTROL_SET="true"
+  else
+    ORIGIN_IN_CLAUDE_REMOTE_CONTROL=""
+  fi
+  # 同じく、行の有無（off を記録した ORIGIN だけが行を持つ）を別に持つ。
+  if ORIGIN_IN_UPDATE_CHECK="$(dcb_origin_get "$file" input:update-check)"; then
+    ORIGIN_IN_UPDATE_CHECK_SET="true"
+  else
+    ORIGIN_IN_UPDATE_CHECK=""
+  fi
   ORIGIN_IN_PLAYBOOK="$(dcb_origin_get "$file" input:playbook)" || return 1
   if [[ "$ORIGIN_IN_PLAYBOOK" == "installed" ]]; then
     ORIGIN_IN_PLAYBOOK_SOURCE="$(dcb_origin_get "$file" input:playbook-source)" || return 1
@@ -322,8 +396,23 @@ while [[ $# -gt 0 ]]; do
       ACCEPT="true"; shift
       while [[ $# -gt 0 && "$1" != -* ]]; do ACCEPT_PATHS+=("$1"); shift; done
       ;;
+    --absent)
+      ABSENT="true"; shift
+      while [[ $# -gt 0 && "$1" != -* ]]; do ABSENT_PATHS+=("$1"); shift; done
+      ;;
+    --no-absent)
+      NO_ABSENT="true"; shift
+      while [[ $# -gt 0 && "$1" != -* ]]; do NO_ABSENT_PATHS+=("$1"); shift; done
+      ;;
     --no-gitignore)     MANAGE_GITIGNORE="false"; MANAGE_GITIGNORE_EXPLICIT="true"; shift ;;
     --gitignore-targets)   GITIGNORE_TARGETS="$2"; GITIGNORE_TARGETS_EXPLICIT="true"; shift 2 ;;
+    --second-opinion-engine)
+      [[ $# -ge 2 ]] || { echo "error: --second-opinion-engine には値（gemini / antigravity / codex）が必要です。" >&2; exit 1; }
+      SECOND_OPINION_ENGINE_OPT="$2"; SECOND_OPINION_ENGINE_EXPLICIT="true"; shift 2 ;;
+    --claude-remote-control) CLAUDE_REMOTE_CONTROL="true"; CLAUDE_REMOTE_CONTROL_EXPLICIT="true"; shift ;;
+    --no-claude-remote-control) NO_CLAUDE_REMOTE_CONTROL="true"; shift ;;
+    --no-update-check) UPDATE_CHECK_OFF="true"; NO_UPDATE_CHECK_EXPLICIT="true"; shift ;;
+    --update-check) UPDATE_CHECK_ON_EXPLICIT="true"; shift ;;
     --with-playbook)    WITH_PLAYBOOK="true"; shift ;;
     --without-playbook) WITH_PLAYBOOK="false"; shift ;;
     --playbook-from)    PLAYBOOK_FROM="$2"; shift 2 ;;
@@ -382,10 +471,11 @@ if [[ "$BASELINE_FROM_SET" == "true" ]]; then
   fi
 fi
 
-# --accept は 3 つ目の動作（生成・--upgrade とは別）。生成の引数や --upgrade と混ぜると、
-# 何を書くのかが曖昧になるので、ORIGIN を書く前に止める。--output-dir と --dry-run だけは併用できる。
-if [[ "$ACCEPT" == "true" ]]; then
-  accept_conflict=""
+# --accept / --absent / --no-absent は、生成・--upgrade とは別の動作。生成の引数や --upgrade、
+# 互いに混ぜると、何を書くのかが曖昧になるので、ORIGIN を書く前に止める。--output-dir と --dry-run
+# だけは併用できる。
+origin_action_conflict_check() { # <フラグ名>
+  local label="$1" accept_conflict=""
   [[ -z "$PROJECT_NAME" ]] || accept_conflict="$accept_conflict --project-name"
   [[ ${#LANGUAGES[@]} -eq 0 ]] || accept_conflict="$accept_conflict --languages"
   [[ ${#WITH_SET[@]} -eq 0 ]] || accept_conflict="$accept_conflict --with-*"
@@ -395,18 +485,43 @@ if [[ "$ACCEPT" == "true" ]]; then
   [[ "$UPGRADE" != "true" ]] || accept_conflict="$accept_conflict --upgrade"
   [[ "$MANAGE_GITIGNORE_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --no-gitignore"
   [[ "$GITIGNORE_TARGETS_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --gitignore-targets"
+  [[ "$SECOND_OPINION_ENGINE_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --second-opinion-engine"
+  [[ "$CLAUDE_REMOTE_CONTROL_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --claude-remote-control"
+  [[ "$NO_CLAUDE_REMOTE_CONTROL" != "true" ]] || accept_conflict="$accept_conflict --no-claude-remote-control"
+  [[ "$NO_UPDATE_CHECK_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --no-update-check"
+  [[ "$UPDATE_CHECK_ON_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --update-check"
   [[ -z "$WITH_PLAYBOOK" ]] || accept_conflict="$accept_conflict --with-playbook/--without-playbook"
   [[ -z "$PLAYBOOK_FROM" ]] || accept_conflict="$accept_conflict --playbook-from"
   [[ -z "$PLAYBOOK_VERSION" ]] || accept_conflict="$accept_conflict --playbook-version"
   [[ "$PLAYBOOK_CONFLICT_POLICY_EXPLICIT" != "true" ]] || accept_conflict="$accept_conflict --playbook-conflict-policy"
   [[ "$BASELINE_FROM_SET" != "true" ]] || accept_conflict="$accept_conflict --baseline-from"
+  [[ "$label" == "--accept" || "$ACCEPT" != "true" ]] || accept_conflict="$accept_conflict --accept"
+  [[ "$label" == "--absent" || "$ABSENT" != "true" ]] || accept_conflict="$accept_conflict --absent"
+  [[ "$label" == "--no-absent" || "$NO_ABSENT" != "true" ]] || accept_conflict="$accept_conflict --no-absent"
   if [[ -n "$accept_conflict" ]]; then
-    echo "error: --accept は生成の引数や --upgrade と同時に指定できません（指定されたもの:$accept_conflict）。" >&2
+    echo "error: $label は生成の引数や --upgrade と同時に指定できません（指定されたもの:$accept_conflict）。" >&2
     echo "       --output-dir と --dry-run だけが併用できます。何も書かずに止めます。" >&2
     exit 1
   fi
+}
+if [[ "$ACCEPT" == "true" ]]; then
+  origin_action_conflict_check --accept
   if [[ ${#ACCEPT_PATHS[@]} -eq 0 ]]; then
     echo "error: --accept にはパスが 1 つ以上必要です（例: --accept .devcontainer/devcontainer.json）。" >&2
+    exit 1
+  fi
+fi
+if [[ "$ABSENT" == "true" ]]; then
+  origin_action_conflict_check --absent
+  if [[ ${#ABSENT_PATHS[@]} -eq 0 ]]; then
+    echo "error: --absent にはパスが 1 つ以上必要です（例: --absent .devcontainer/compose.yaml）。" >&2
+    exit 1
+  fi
+fi
+if [[ "$NO_ABSENT" == "true" ]]; then
+  origin_action_conflict_check --no-absent
+  if [[ ${#NO_ABSENT_PATHS[@]} -eq 0 ]]; then
+    echo "error: --no-absent にはパスが 1 つ以上必要です（例: --no-absent .devcontainer/compose.yaml）。" >&2
     exit 1
   fi
 fi
@@ -432,26 +547,53 @@ accept_normalize_path() {
   printf '%s' "$p"
 }
 
+# ORIGIN の行を書き換える共通の処理（--accept / --absent / --no-absent が共有する）。
+#   $1 ORIGIN のパス  $2 落とす行の接頭辞（改行区切り。例: accepted:<path>=）  $3 末尾へ足す行（改行区切り）
+# 中身だけを差し替える（cat > で、ORIGIN のモード・所有者を変えない）。
+origin_rewrite() {
+  local origin="$1" drops="$2" appends="$3" tmp line
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-origin-rewrite.XXXXXX")"
+  # 一覧は改行を含むので -v ではなく環境変数で渡す（macOS の awk は -v の値の改行を拒む）。
+  DCB_ORIGIN_DROPS="$drops" awk '
+    BEGIN {
+      n = split(ENVIRON["DCB_ORIGIN_DROPS"], a, "\n")
+      for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1
+    }
+    {
+      for (k in drop) if (index($0, k) == 1) next
+      print
+    }
+  ' "$origin" > "$tmp"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    printf '%s\n' "$line" >> "$tmp"
+  done <<EOF2
+$appends
+EOF2
+  cat "$tmp" > "$origin"
+  rm -f "$tmp"
+}
+
 # 出力先の中に ORIGIN の実体があるかを確かめ、書き込み先の ORIGIN を検査する。
 # 問題があれば何も書かずに止める。
-accept_guard_origin() {
-  local origin="$1" real root
+accept_guard_origin() { # <ORIGIN のパス> <呼び出し元のフラグ名>
+  local origin="$1" label="${2:---accept}" real root
   if [[ ! -f "$origin" ]]; then
-    echo "error: --accept: $origin がありません（このディレクトリは DCB の生成物ではない、または記録が消えています）。" >&2
+    echo "error: $label: $origin がありません（このディレクトリは DCB の生成物ではない、または記録が消えています）。" >&2
     exit 1
   fi
   real="$(cd -P "$(dirname "$origin")" 2>/dev/null && pwd -P)" || real=""
   root="$(cd -P "$OUTPUT_DIR" 2>/dev/null && pwd -P)" || root=""
   if [[ -L "$origin" || -z "$real" || -z "$root" || ( "$real" != "$root" && "$real" != "$root"/* ) ]]; then
-    echo "error: --accept: $origin が出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
+    echo "error: $label: $origin が出力先の外を指しています（シンボリックリンク）。書き込まずに止めます。" >&2
     exit 1
   fi
 }
 
 accept_run() {
-  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" raw rel dest curh rec bad="" tmp kind h real root
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" raw rel dest curh rec bad="" drops appends kind h real root
   local actions="" plan_prefix="" seen=$'\n'
-  accept_guard_origin "$origin"
+  accept_guard_origin "$origin" --accept
   [[ "$DRY_RUN" == "true" ]] && plan_prefix="plan: "
   # 検査（何も書かない）。結果は actions へ「accept|unchanged<TAB>パス<TAB>ハッシュ」で積む。
   for raw in "${ACCEPT_PATHS[@]}"; do
@@ -512,38 +654,144 @@ EOF2
   fi
 
   # 書き直す。対象パスの既存の accepted: 行と pending: 行（取り込み待ちの記録）を落とし、accept のぶんを末尾へ足す。
-  # 中身だけを差し替える（cat > で、ORIGIN のモード・所有者を変えない）。
-  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-accept.XXXXXX")"
-  # 一覧は改行を含むので -v ではなく環境変数で渡す（macOS の awk は -v の値の改行を拒む）。
-  DCB_ACCEPT_ACTIONS="$actions" awk '
-    BEGIN {
-      n = split(ENVIRON["DCB_ACCEPT_ACTIONS"], a, "\n")
-      for (i = 1; i <= n; i++) {
-        if (a[i] == "") continue
-        split(a[i], f, "\t")
-        drop["accepted:" f[2] "="] = 1
-        drop["pending:" f[2] "="] = 1
-      }
-    }
-    {
-      for (k in drop) if (index($0, k) == 1) next
-      print
-    }
-  ' "$origin" > "$tmp"
+  drops="" appends=""
   while IFS=$'\t' read -r kind rel h; do
-    [[ "$kind" == "accept" ]] || continue
-    echo "accepted:$rel=$h" >> "$tmp"
+    [[ -n "$kind" ]] || continue
+    drops="${drops}accepted:${rel}="$'\n'"pending:${rel}="$'\n'
+    [[ "$kind" == "accept" ]] && appends="${appends}accepted:$rel=$h"$'\n'
   done <<EOF2
 $actions
 EOF2
-  cat "$tmp" > "$origin"
-  rm -f "$tmp"
+  origin_rewrite "$origin" "$drops" "$appends"
   echo "write: $origin"
 }
 
 if [[ "$ACCEPT" == "true" ]]; then
   [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
   accept_run
+  exit 0
+fi
+
+# ── --absent / --no-absent: 生成物を意図して置かない記録 ──────────────────────
+#
+# 生成先が意図して置かない生成物を、ORIGIN の absent:<path>=1 として記録する。記録があると、
+# --upgrade は現物が無いそのファイルを「新しい版で増えた」として作り直さず（記録を引き継ぐ）、
+# doctor.sh は recorded in origin but missing にしない。
+# 「生成物である」の判定は、ORIGIN の hash: の記録に基づく（--accept と同じ。生成時に決まる一覧は
+# 構成の選択に依るため、記録済みの hash: が今回の構成の生成対象の写しになる）。hash: は書き換えず、
+# 記録した値のまま残す（--no-absent の後の --upgrade が通常どおり判定できる）。
+# ゲート・検証・承認の機構を担うファイルは外せない（下の一覧。README と tests/test-absent.sh が機械照合する）。
+# 1 つでも条件を満たさなければ何も書かずに止める（全件を検査してから書く）。
+
+# 外せない（absent: にできない）ファイルの一覧（単一の定義）。doctor.sh も同じ一覧を持つ。
+absent_forbidden_rel_paths() {
+  printf '%s\n' \
+    '.github/workflows/verify.yml' \
+    '.github/workflows/identity-guard.yml' \
+    'scripts/verify.sh' \
+    'scripts/acceptance.sh' \
+    'scripts/loop-gate.sh' \
+    'scripts/verify-commit-identity.sh' \
+    'scripts/verify-commit-identity-selftest.sh' \
+    'scripts/confirm-merge-hook.sh' \
+    '.claude/settings.json' \
+    '.github/workflows/second-opinion-gate.yml' \
+    '.devcontainer/devcontainer.json'
+}
+
+absent_run() {
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" raw rel dest bad="" drops="" appends="" kind seen=$'\n' actions="" plan_prefix="" real root ancestor
+  local paths=() label
+  if [[ "$ABSENT" == "true" ]]; then
+    label="--absent"; paths=("${ABSENT_PATHS[@]}")
+  else
+    label="--no-absent"; paths=("${NO_ABSENT_PATHS[@]}")
+  fi
+  accept_guard_origin "$origin" "$label"
+  [[ "$DRY_RUN" == "true" ]] && plan_prefix="plan: "
+  for raw in "${paths[@]}"; do
+    rel="$(accept_normalize_path "$raw")"
+    dest="$OUTPUT_DIR/$rel"
+    if [[ -z "$rel" ]]; then
+      bad="$bad"$'\n'"  - '$raw': パスが空です"
+      continue
+    fi
+    case "$seen" in *$'\n'"$rel"$'\n'*) continue ;; esac
+    seen="$seen$rel"$'\n'
+    if [[ "$ABSENT" == "true" ]]; then
+      if ! dcb_origin_get "$origin" "hash:$rel" >/dev/null 2>&1; then
+        bad="$bad"$'\n'"  - $rel: ORIGIN に hash: の記録がありません（今回の構成の生成物ではありません）"
+        continue
+      fi
+      if absent_forbidden_rel_paths | grep -Fx -- "$rel" >/dev/null; then
+        bad="$bad"$'\n'"  - $rel: ゲート・検証・承認の機構を担うファイルなので、absent: にできません"
+        continue
+      fi
+      if [[ -e "$dest" || -L "$dest" ]]; then
+        bad="$bad"$'\n'"  - $rel: 現物があります（先に消してから記録してください。記録と現物を食い違わせないためです）"
+        continue
+      fi
+      # 親ディレクトリごと消していることがあるので、実在する最も近い祖先で実体を確かめる。
+      ancestor="$(dirname "$dest")"
+      while [[ ! -d "$ancestor" && "$ancestor" != "/" && "$ancestor" != "." ]]; do ancestor="$(dirname "$ancestor")"; done
+      real="$(cd -P "$ancestor" 2>/dev/null && pwd -P)" || real=""
+      root="$(cd -P "$OUTPUT_DIR" 2>/dev/null && pwd -P)" || root=""
+      if [[ -z "$real" || -z "$root" || ( "$real" != "$root" && "$real" != "$root"/* ) ]]; then
+        bad="$bad"$'\n'"  - $rel: 親ディレクトリが出力先の外を指しているか、解決できません（シンボリックリンクの疑い）"
+        continue
+      fi
+      kind="absent"
+    else
+      if ! dcb_origin_get "$origin" "absent:$rel" >/dev/null 2>&1; then
+        bad="$bad"$'\n'"  - $rel: ORIGIN に absent: の記録がありません"
+        continue
+      fi
+      kind="unabsent"
+    fi
+    actions="${actions}${kind}"$'\t'"${rel}"$'\n'
+  done
+  if [[ -n "$bad" ]]; then
+    echo "error: $label: 記録できないパスがあります。何も書かずに止めます:$bad" >&2
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r kind rel; do
+    [[ -n "$kind" ]] || continue
+    if [[ "$kind" == "absent" ]]; then
+      echo "${plan_prefix}absent: $rel (--upgrade は作り直しません)"
+      if [[ -e "$OUTPUT_DIR/$rel.dcb-new" || -L "$OUTPUT_DIR/$rel.dcb-new" ]]; then
+        echo "note: $rel.dcb-new が残っています。不要なら消してください（--upgrade の取り込み待ちの報告に残り続けます）" >&2
+      fi
+    else
+      echo "${plan_prefix}unabsent: $rel (次の --upgrade で生成します)"
+    fi
+  done <<EOF2
+$actions
+EOF2
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[bootstrap] dry-run: no files were written"
+    return 0
+  fi
+
+  # 書き直す。対象パスの既存の absent: 行を落とし、--absent のときは accepted: / pending: も落として
+  # （置かないファイルに取り込み済み・取り込み待ちの記録は残さない）、absent: を末尾へ足す。
+  while IFS=$'\t' read -r kind rel; do
+    [[ -n "$kind" ]] || continue
+    drops="${drops}absent:${rel}="$'\n'
+    if [[ "$kind" == "absent" ]]; then
+      drops="${drops}accepted:${rel}="$'\n'"pending:${rel}="$'\n'
+      appends="${appends}absent:$rel=1"$'\n'
+    fi
+  done <<EOF2
+$actions
+EOF2
+  origin_rewrite "$origin" "$drops" "$appends"
+  echo "write: $origin"
+}
+
+if [[ "$ABSENT" == "true" || "$NO_ABSENT" == "true" ]]; then
+  [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
+  absent_run
   exit 0
 fi
 
@@ -560,7 +808,8 @@ require_cmd curl
 
 # --upgrade の入力の決定。ORIGIN に記録した入力を読み、引数で明示されたものだけを上書きする。
 # 規則:
-#   project-name / languages / base-image / gitignore-targets  明示があればそれ、無ければ記録
+#   project-name / languages / base-image / gitignore-targets / second-opinion-engine  明示があればそれ、無ければ記録
+#   --claude-remote-control  明示があれば true、無ければ記録（記録が true のときだけ true）
 #   --with-*   記録した集合へ明示分を足す。--without-<名前> は、足したあとの集合から外す
 #   --no-gitignore  明示があれば false、無ければ記録
 #   規範  --playbook-from / --playbook-version の明示は取得元ごと置き換える。
@@ -585,7 +834,7 @@ upgrade_merge_inputs() {
     fi
     echo "       記録から入力を再現できないため、生成時と同じ引数を明示してください:" >&2
     echo "         --project-name <name> --languages <csv>（必須）" >&2
-    echo "         --with-*（使っていたもの） --base-image --no-gitignore --gitignore-targets" >&2
+    echo "         --with-*（使っていたもの） --base-image --no-gitignore --gitignore-targets --second-opinion-engine --claude-remote-control --no-update-check" >&2
     echo "         --with-playbook / --playbook-version <tag> / --playbook-from <path|url>（規範を置いていたもの）" >&2
     echo "       出力先は --output-dir で指定します（既定は現在のディレクトリ）。明示した引数で生成し、記録し直します。" >&2
     exit 1
@@ -609,6 +858,27 @@ upgrade_merge_inputs() {
   fi
   if [[ "$GITIGNORE_TARGETS_EXPLICIT" != "true" ]]; then
     GITIGNORE_TARGETS="$ORIGIN_IN_GITIGNORE_TARGETS"
+  fi
+  if [[ "$SECOND_OPINION_ENGINE_EXPLICIT" != "true" ]]; then
+    SECOND_OPINION_ENGINE_OPT="$ORIGIN_IN_SECOND_OPINION_ENGINE"
+  fi
+  # 引き継ぐのは、明示も --no-claude-remote-control も無いときだけ。記録が true 以外なら
+  # ORIGIN の破損として止める（黙って未指定として扱うと、次の生成で行が消える）。
+  if [[ "$CLAUDE_REMOTE_CONTROL_EXPLICIT" != "true" && "$NO_CLAUDE_REMOTE_CONTROL" != "true" && "$ORIGIN_IN_CLAUDE_REMOTE_CONTROL_SET" == "true" ]]; then
+    if [[ "$ORIGIN_IN_CLAUDE_REMOTE_CONTROL" != "true" ]]; then
+      echo "error: ORIGIN の input:claude-remote-control の値が不正です（$ORIGIN_IN_CLAUDE_REMOTE_CONTROL。true のはず）。ORIGIN の破損の可能性があるため止めます。記録を外すなら --no-claude-remote-control を指定してください。" >&2
+      exit 1
+    fi
+    CLAUDE_REMOTE_CONTROL="true"
+  fi
+  # 引き継ぐのは、--update-check も --no-update-check も無いときだけ。記録は off だけが書かれるので、
+  # off 以外は ORIGIN の破損として止める。
+  if [[ "$UPDATE_CHECK_ON_EXPLICIT" != "true" && "$NO_UPDATE_CHECK_EXPLICIT" != "true" && "$ORIGIN_IN_UPDATE_CHECK_SET" == "true" ]]; then
+    if [[ "$ORIGIN_IN_UPDATE_CHECK" != "off" ]]; then
+      echo "error: ORIGIN の input:update-check の値が不正です（$ORIGIN_IN_UPDATE_CHECK。off のはず）。ORIGIN の破損の可能性があるため止めます。記録を外すなら --update-check を指定してください。" >&2
+      exit 1
+    fi
+    UPDATE_CHECK_OFF="true"
   fi
 
   if [[ "$src_explicit" == "true" || "$WITH_PLAYBOOK" == "false" ]]; then
@@ -634,11 +904,32 @@ upgrade_merge_inputs() {
   return 0
 }
 
+# 旧 ORIGIN の absent: を 1 度だけ読み、UPGRADE_ABSENT_RECORDED へ持つ。hash: の無い absent: は
+# 生成物でないパスの記録（壊れた記録）なので引き継がず、警告して捨てる。
+upgrade_load_absent() {
+  local origin="$OUTPUT_DIR/$ORIGIN_REL_PATH" kind rel
+  UPGRADE_ABSENT_RECORDED=$'\n'
+  [[ -f "$origin" ]] || return 0
+  while IFS=$'\t' read -r kind rel; do
+    [[ -n "$kind" ]] || continue
+    if [[ "$kind" == "ok" ]]; then
+      UPGRADE_ABSENT_RECORDED="${UPGRADE_ABSENT_RECORDED}${rel}"$'\n'
+    else
+      echo "warn: --upgrade: ORIGIN の absent:$rel には対応する hash: が無い（生成物でない）ため、引き継がずに捨てます。" >&2
+    fi
+  done < <(awk '
+    /^hash:/ { l = substr($0, 6); sub(/=[^=]*$/, "", l); h[l] = 1; next }
+    /^absent:/ { l = substr($0, 8); sub(/=[^=]*$/, "", l); a[++n] = l }
+    END { for (i = 1; i <= n; i++) printf "%s\t%s\n", (a[i] in h) ? "ok" : "bad", a[i] }
+  ' "$origin")
+}
+
 if [[ "$UPGRADE" == "true" ]]; then
   # 出力先の既定は現在のディレクトリ（生成先の中で実行する想定）。--project-name から
   # $PWD/<name> を導くと、記録から読む名前と出力先の関係が循環する。
   [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PWD"
   upgrade_merge_inputs
+  upgrade_load_absent
   # 外す前の集合を残してから、--without-<名前> の分を外す（同名の --with- との同時指定は検査で除いてある）。
   UPGRADE_PREV_WITH=(${WITH_SET[@]+"${WITH_SET[@]}"})
   if [[ ${#WITHOUT_SET[@]} -gt 0 ]]; then
@@ -671,6 +962,77 @@ for lang in "${LANGUAGES[@]}"; do
     *) echo "error: unsupported language: $lang (supported: node, go, python, php, rust, ruby)" >&2; exit 1 ;;
   esac
 done
+# --with-* で選択された装備に含まれるか。has_language と対になる述語。
+# --second-opinion-engine の検証（下）が使うため、ここ（引数解析の直後）で定義する。
+# WITH_SET は空になり得るため、未束縛展開を避けて空配列を安全に扱う。
+has_with() {
+  local target="$1" w
+  for w in ${WITH_SET[@]+"${WITH_SET[@]}"}; do [[ "$w" == "$target" ]] && return 0; done
+  return 1
+}
+
+# --second-opinion-engine は、生成の前（何も書く前）に検証する。
+# 利用者が明示した値が不正なら止める。--upgrade で ORIGIN から引き継いだ値は、
+# 未知の値なら ORIGIN の破損として止め、選んでいない・記入欄が出ない構成のために
+# 使えなくなっただけなら、警告して空に戻す（そうしないと --without-<エンジン> のあと
+# どの引数でも --upgrade が通らなくなる）。空文字の明示は値の誤りとして止める。
+if [[ "$SECOND_OPINION_ENGINE_EXPLICIT" == "true" && -z "$SECOND_OPINION_ENGINE_OPT" ]]; then
+  echo "error: --second-opinion-engine には gemini / antigravity / codex のいずれかが必要です。" >&2
+  exit 1
+fi
+if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then
+  if [[ "$SECOND_OPINION_ENGINE_EXPLICIT" == "true" ]]; then
+    soe_label="--second-opinion-engine $SECOND_OPINION_ENGINE_OPT"
+  else
+    soe_label="ORIGIN の input:second-opinion-engine=$SECOND_OPINION_ENGINE_OPT"
+  fi
+  case "$SECOND_OPINION_ENGINE_OPT" in
+    gemini|antigravity|codex) ;;
+    *)
+      if [[ "$SECOND_OPINION_ENGINE_EXPLICIT" == "true" ]]; then
+        echo "error: --second-opinion-engine must be one of: gemini, antigravity, codex（指定: $SECOND_OPINION_ENGINE_OPT）" >&2
+      else
+        echo "error: ORIGIN の input:second-opinion-engine の値が不正です（$SECOND_OPINION_ENGINE_OPT。gemini / antigravity / codex のいずれかのはず）。ORIGIN の破損の可能性があるため止めます。" >&2
+      fi
+      exit 1
+      ;;
+  esac
+  soe_problem=""
+  if ! has_with antigravity && ! has_with codex; then
+    soe_problem="--with-antigravity も --with-codex も選んでいない構成では、.env.example に SECOND_OPINION_ENGINE の記入欄を出さず、指定の行き先がありません"
+  elif ! has_with "$SECOND_OPINION_ENGINE_OPT"; then
+    soe_problem="--with-$SECOND_OPINION_ENGINE_OPT で選んでいないエンジンは指定できません"
+  fi
+  if [[ -n "$soe_problem" ]]; then
+    if [[ "$SECOND_OPINION_ENGINE_EXPLICIT" == "true" ]]; then
+      echo "error: $soe_label: $soe_problem。" >&2
+      exit 1
+    fi
+    echo "warning: $soe_label は、今回の構成では使えません（$soe_problem）。ORIGIN の記録を外し、指定が無いときの決め方に戻します。" >&2
+    SECOND_OPINION_ENGINE_OPT=""
+  fi
+fi
+if [[ "$CLAUDE_REMOTE_CONTROL_EXPLICIT" == "true" && "$NO_CLAUDE_REMOTE_CONTROL" == "true" ]]; then
+  echo "error: --claude-remote-control と --no-claude-remote-control は同時に指定できません。" >&2
+  exit 1
+fi
+if [[ "$UPDATE_CHECK_ON_EXPLICIT" == "true" && "$NO_UPDATE_CHECK_EXPLICIT" == "true" ]]; then
+  echo "error: --update-check と --no-update-check は同時に指定できません。" >&2
+  exit 1
+fi
+# --claude-remote-control は、生成の前（何も書く前）に検証する。~/.claude/settings.json を
+# 書くのは Claude Code を導入する構成だけなので、--with-claude が要る。--upgrade で
+# 記録から引き継いだ値は、--without-claude で行き先が無くなっただけなら警告して外す
+# （そうしないと --without-claude のあと --upgrade が通らなくなる）。
+if [[ "$CLAUDE_REMOTE_CONTROL" == "true" ]] && ! has_with claude; then
+  if [[ "$CLAUDE_REMOTE_CONTROL_EXPLICIT" == "true" ]]; then
+    echo "error: --claude-remote-control には --with-claude が必要です（Claude Code を導入しない構成では、設定を書く行き先がありません）。" >&2
+    exit 1
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then crc_verb="外すことになります（--dry-run のため書き込みません）"; else crc_verb="外します"; fi
+  echo "warning: ORIGIN の input:claude-remote-control=true は、今回の構成では使えません（--with-claude を選んでいません）。ORIGIN の記録を$crc_verb。" >&2
+  CLAUDE_REMOTE_CONTROL="false"
+fi
 case "$PLAYBOOK_CONFLICT_POLICY" in
   skip|overwrite|prompt) ;;
   *) echo "error: --playbook-conflict-policy must be one of: skip, overwrite, prompt" >&2; exit 1 ;;
@@ -831,6 +1193,7 @@ template_rel_paths() {
     'scripts/post-rebuild-check.sh' \
     'scripts/session-ledger.sh' \
     'scripts/setup-git-identity.sh' \
+    'scripts/update-check.sh' \
     'scripts/verify-commit-identity.sh' \
     'scripts/verify-commit-identity-selftest.sh' \
     'scripts/verify.sh'
@@ -899,6 +1262,14 @@ get_template_content() {
 # Gemini API キー（第二意見レビュー scripts/second-opinion-review.sh が読む）
 GEMINI_API_KEY=
 __SECOND_OPINION_ENGINE_LINES__
+
+# 新しい版の確認（scripts/update-check.sh）。devcontainer-bootstrap と ai-playbook の新しい安定版が
+# あれば、接続時に通知を 1 行出し、対話のシェルで「追従しますか？ [y/N]」と聞く（y なら
+# bootstrap.sh --upgrade で追従し、差分を作業ツリーに残して止める。コミット・push・PR はしない）。
+# 問い合わせは 1 日 1 回、認証なし。既定は有効。止めるには次の行の # を外す（環境変数で
+# UPDATE_CHECK=off を設定しても止まる。環境の値が優先される）。
+# 生成時に --no-update-check を付けると、ORIGIN に記録して --upgrade でも引き継ぐ。
+# UPDATE_CHECK=off
 
 # GitHub の PAT（personal access token）。gh がこの名前を直接読む。
 #
@@ -1245,6 +1616,7 @@ install_if_missing() {
 
 __AGY_FUNCTION_LINES__
 __CODEX_FUNCTION_LINES__
+__CLAUDE_FUNCTION_LINES__
 __AI_INSTALL_LINES__
 echo "[install-ai-tools] done"
 TMPL
@@ -1542,13 +1914,41 @@ inject_env_autoload() {
   {
     echo ""
     echo "$marker"
-    echo "if [[ -f \"$HELPER\" ]]; then . \"$HELPER\"; fi"
+    # パスは printf %q で引用する（$(...) などを含むパスが rc の起動時にコマンドにならないように）。
+    printf '%s\n' "if [[ -f $(printf '%q' "$HELPER") ]]; then . $(printf '%q' "$HELPER"); fi"
     echo "# <<< project .env autoload <<<"
   } >> "$rc"
   echo "[on-attach] injected project .env autoload into $rc"
 }
 inject_env_autoload "$HOME/.bashrc"
 inject_env_autoload "$HOME/.zshrc"
+
+# 新しい版の確認（update-check.sh）の問いかけを、対話シェルの rc へ注入する（冪等）。
+# 端末が付いている対話のシェルで、今いるディレクトリがこのプロジェクトの中のときだけ聞く
+# （AI エージェント・CI・スクリプトのシェルでは何も出ない）。印はプロジェクトごと
+# （同じコンテナの 2 つ目のプロジェクトも注入される）。update-check.sh が無い構成では何もしない。
+UPDATE_CHECK_SCRIPT="$HERE/update-check.sh"
+UPDATE_CHECK_PROJECT="$(cd "$HERE/.." && pwd)"
+# パスは rc にシェルの語として書かれるので、printf %q で引用する（空白・引用符・$(...) を含むパスが
+# 対話シェルの起動時にコマンドとして解釈されないように。印のコメントの行も同じ）。
+inject_update_check_prompt() {
+  local rc="$1" q_proj q_script marker
+  [[ -f "$UPDATE_CHECK_SCRIPT" ]] || return 0
+  q_proj="$(printf '%q' "$UPDATE_CHECK_PROJECT")"
+  q_script="$(printf '%q' "$UPDATE_CHECK_SCRIPT")"
+  marker="# >>> dcb update check: $q_proj >>>"
+  [[ -f "$rc" ]] || touch "$rc"
+  grep -qxF -- "$marker" "$rc" && return 0
+  {
+    echo ""
+    printf '%s\n' "$marker"
+    printf '%s\n' "case \"\$-\" in *i*) case \"\$PWD/\" in $q_proj/*) if [ -t 0 ] && [ -t 1 ] && [ -f $q_script ]; then bash $q_script prompt || true; fi ;; esac ;; esac"
+    echo "# <<< dcb update check <<<"
+  } >> "$rc"
+  echo "[on-attach] injected update check prompt into $rc"
+}
+inject_update_check_prompt "$HOME/.bashrc"
+inject_update_check_prompt "$HOME/.zshrc"
 
 # ホストの Docker 資格情報ヘルパーを打ち消す。
 #
@@ -1674,6 +2074,600 @@ check_gh_auth() {
 if command -v gh >/dev/null 2>&1; then
   check_gh_auth
 fi
+
+# DCB と ai-playbook の新しい安定版があれば、通知の 1 行を出す（聞かない）。1 日 1 回、失敗は
+# 黙って通す（短いタイムアウト）。止め方は --no-update-check か UPDATE_CHECK=off。
+if [[ -f "$UPDATE_CHECK_SCRIPT" ]]; then
+  bash "$UPDATE_CHECK_SCRIPT" notify || true
+fi
+TMPL
+      ;;
+    'scripts/update-check.sh')
+      # DCB と ai-playbook の新しい安定版の確認と、対話のシェルでの追従（--upgrade）。
+      # on-attach.sh が notify を、対話シェルの rc が prompt を呼ぶ。止め方は ORIGIN の
+      # input:update-check=off（--no-update-check）と、環境変数 UPDATE_CHECK=off。
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# update-check.sh — devcontainer-bootstrap（DCB）と ai-playbook の新しい安定版を知らせ、
+# 対話のシェルで yes と答えたときだけ、bootstrap.sh --upgrade で追従する。
+#
+# サブコマンド:
+#   notify   on-attach.sh が呼ぶ。1 日 1 回だけ最新の安定版を問い合わせ（認証なし）、新しい版が
+#            あれば通知を 1 行だけ出す。聞かない。失敗は黙って通す。
+#   prompt   対話のシェルの rc が呼ぶ。端末が付いているときだけ、キャッシュを読んで
+#            「追従しますか？ [y/N]」と聞く。ネットワークには出ない。
+#   upgrade  最新を問い合わせ、新しい版があれば追従する（prompt の y と同じ処理）。
+#
+# 追従の処理: 新しい bootstrap.sh と SHA256SUMS を取得して照合し、既定ブランチの上なら作業用の
+# ブランチを切ってから、ORIGIN を引き継ぐ --upgrade を流す。差分を作業ツリーに残して止め、
+# 変わったファイルと次の手順を出す。コミット・push・PR はしない。
+#
+# 何もしない条件（黙って 0 で終わる）:
+#   - 環境変数 UPDATE_CHECK が off（0 / false / no / disabled も同じ）
+#   - ORIGIN（.devcontainer/ORIGIN）が無い、または input:update-check=off が記録されている
+#   - ORIGIN の version= が vX.Y.Z の形でない（リリースから取得した版ではない）
+#   - 端末が付いていない（prompt のみ。notify は標準出力へ 1 行出すだけで、聞かない）
+#
+# キャッシュ: ${XDG_CACHE_HOME:-~/.cache}/dcb-update-check/<プロジェクトごとの鍵>/ 。コミットしない。
+# 試験用の上書き: UPDATE_CHECK_CACHE_DIR（キャッシュ）/ UPDATE_CHECK_TODAY（今日の日付）/
+# UPDATE_CHECK_ASSUME_TTY=1（端末が付いている扱い。標準入力から答えを読む）。
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+ORIGIN="$ROOT/.devcontainer/ORIGIN"
+HELPER="$HERE/load-project-env.sh"
+
+# 配布元のリポジトリ。ai-playbook は、ORIGIN に記録した取得元の URL に owner があればそれを使う。
+DCB_SLUG="ojos/devcontainer-bootstrap"
+PB_DEFAULT_SLUG="ojos/ai-playbook"
+LOG_PREFIX="[update-check]"
+
+# .env の UPDATE_CHECK を効かせる（ローダーは source 専用・冪等。無ければ何もしない）。
+# ローダーは .env の値で既存の環境変数を上書きするので、環境で設定した値（例: off）は読む前に
+# 退避し、読んだあとで戻す（環境の値を優先する。.env の空の行で打ち消されない）。
+ENV_UPDATE_CHECK="${UPDATE_CHECK-}"
+if [[ -f "$HELPER" ]]; then
+  # shellcheck source=/dev/null
+  . "$HELPER" 2>/dev/null || true
+fi
+if [[ -n "$ENV_UPDATE_CHECK" ]]; then
+  UPDATE_CHECK="$ENV_UPDATE_CHECK"
+fi
+
+# UPDATE_CHECK が止める値なら 0 を返す（止めない値なら 1）。
+disabled_by_env() {
+  case "$(printf '%s' "${UPDATE_CHECK:-}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no|disabled) return 0 ;;
+  esac
+  return 1
+}
+
+# ORIGIN の値を 1 つ出す（無ければ 1）。値の符号化は、このスクリプトが読む範囲では不要。
+origin_get() {
+  [[ -f "$ORIGIN" ]] || return 1
+  awk -v k="$1=" 'index($0, k) == 1 { print substr($0, length(k) + 1); found = 1; exit } END { exit !found }' "$ORIGIN"
+}
+
+# vX.Y.Z の形かを判定する。
+is_semver() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# 版 $1 が版 $2 より古ければ 0。どちらかが vX.Y.Z でなければ 1（比べられないので新しいとは言わない）。
+ver_lt() {
+  local a="$1" b="$2" i
+  is_semver "$a" && is_semver "$b" || return 1
+  a="${a#v}"; b="${b#v}"
+  local -a pa pb
+  IFS=. read -r -a pa <<< "$a"
+  IFS=. read -r -a pb <<< "$b"
+  for i in 0 1 2; do
+    if (( 10#${pa[$i]} < 10#${pb[$i]} )); then return 0; fi
+    if (( 10#${pa[$i]} > 10#${pb[$i]} )); then return 1; fi
+  done
+  return 1
+}
+
+CUR_DCB="" CUR_PB="" PB_SLUG="$PB_DEFAULT_SLUG"
+# PB_KIND: 規範の取得元の種類（tag / url）。PB_REPRO: 取得した bootstrap.sh で生成を再現できるか（ok / no）。
+PB_KIND="" PB_REPRO="ok"
+
+# ORIGIN から、今の版を読む。DCB の版が読めなければ 1（何もしない）。
+load_origin() {
+  local v src ref
+  [[ -f "$ORIGIN" ]] || return 1
+  v="$(origin_get version)" || return 1
+  is_semver "$v" || return 1
+  CUR_DCB="$v"
+  CUR_PB="" PB_SLUG="$PB_DEFAULT_SLUG" PB_KIND="" PB_REPRO="ok"
+  if [[ "$(origin_get input:playbook 2>/dev/null)" == "installed" ]]; then
+    src="$(origin_get input:playbook-source 2>/dev/null)" || src=""
+    ref="$(origin_get input:playbook-ref 2>/dev/null)" || ref=""
+    case "$src" in
+      tag)
+        if is_semver "$ref"; then CUR_PB="$ref"; PB_KIND="tag"; fi
+        ;;
+      url)
+        # リリースのタグの tarball の URL だけを、リリースから取得した版として扱う。
+        if [[ "$ref" =~ ^https://github\.com/([A-Za-z0-9_.-]+)/ai-playbook/archive/refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz$ ]]; then
+          PB_SLUG="${BASH_REMATCH[1]}/ai-playbook"
+          CUR_PB="${BASH_REMATCH[2]}"
+          PB_KIND="url"
+        elif [[ -z "$ref" ]]; then
+          PB_REPRO="no"
+        fi
+        ;;
+      adjacent|local)
+        PB_REPRO="no"
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# ORIGIN が無効化を記録していれば 0。
+disabled_by_origin() {
+  local v
+  v="$(origin_get input:update-check 2>/dev/null)" || return 1
+  [[ "$v" == "off" ]]
+}
+
+comp_cur()   { case "$1" in dcb) printf '%s' "$CUR_DCB" ;; playbook) printf '%s' "$CUR_PB" ;; esac; }
+comp_repo()  { case "$1" in dcb) printf 'devcontainer-bootstrap' ;; playbook) printf 'ai-playbook' ;; esac; }
+comp_slug()  { case "$1" in dcb) printf '%s' "$DCB_SLUG" ;; playbook) printf '%s' "$PB_SLUG" ;; esac; }
+
+# キャッシュの置き場所。プロジェクトごとに分ける（1 つのコンテナに複数のプロジェクトがありうる）。
+cache_dir() {
+  local key
+  if [[ -n "${UPDATE_CHECK_CACHE_DIR:-}" ]]; then
+    printf '%s' "$UPDATE_CHECK_CACHE_DIR"
+    return 0
+  fi
+  key="$(printf '%s' "$ROOT" | cksum | awk '{ print $1 }')"
+  printf '%s/dcb-update-check/%s' "${XDG_CACHE_HOME:-$HOME/.cache}" "$key"
+}
+
+# URL を取得して $2 へ書く。認証なし・短いタイムアウト。$3 は全体の秒数（既定 3）。
+# https だけを許し、リダイレクト先も https に限る。失敗は curl の終了コード（curl が無ければ 127）。
+fetch() {
+  local url="$1" out="$2" max="${3:-3}"
+  command -v curl >/dev/null 2>&1 || return 127
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 2 --max-time "$max" \
+    -H 'Accept: application/vnd.github+json' -H 'User-Agent: dcb-update-check' \
+    "$url" -o "$out" 2>/dev/null
+}
+
+# リリースの JSON から tag_name を 1 つ出す。
+json_tag_name() {
+  awk '
+    match($0, /"tag_name"[ ]*:[ ]*"[^"]*"/) {
+      s = substr($0, RSTART, RLENGTH)
+      sub(/^"tag_name"[ ]*:[ ]*"/, "", s)
+      sub(/"$/, "", s)
+      print s
+      exit
+    }
+  ' "$1"
+}
+
+# 配布先の CHANGELOG.md から、「### 移行」の節を持つ版（「## vX.Y.Z」の節）を出す。
+# リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないため、CHANGELOG.md を読む。
+changelog_migration_tags() {
+  awk '
+    /^## / { tag = ""; if ($2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+/) { tag = $2; sub(/\r$/, "", tag) } }
+    /^### 移行/ { if (tag != "") print tag }
+  ' "$1"
+}
+
+# 通信ができない（名前を引けない・つながらない・時間切れ・curl が無い）ことを表す curl の終了コードか。
+# このとき、残りの問い合わせは試さない（遅らせない）。HTTP の失敗などは、部品ごとの失敗として扱う。
+is_offline_rc() {
+  case "$1" in 6|7|28|127) return 0 ;; esac
+  return 1
+}
+
+# 最新の安定版を問い合わせ、キャッシュへ書く。部品ごとの失敗は、もう片方の確認を止めない。
+# 通信ができないと分かったときだけ、残りを試さない。
+# 今日の取得に失敗した部品の、前の日のキャッシュは使わない（先に消す）。
+refresh_cache() {
+  local dir c cur slug tmp tag t list rc
+  dir="$(cache_dir)"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  # 先に今日の印を書く。失敗しても、同じ日にもう一度問い合わせない（1 日 1 回）。
+  printf '%s\n' "${UPDATE_CHECK_TODAY:-$(date +%Y-%m-%d)}" > "$dir/checked" 2>/dev/null || return 0
+  rm -f "$dir"/latest-* "$dir"/migrations-* 2>/dev/null
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dcb-update-check.XXXXXX" 2>/dev/null)" || return 0
+  for c in dcb playbook; do
+    cur="$(comp_cur "$c")"
+    [[ -n "$cur" ]] || continue
+    slug="$(comp_slug "$c")"
+    fetch "https://api.github.com/repos/$slug/releases/latest" "$tmp" 3
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+      if is_offline_rc "$rc"; then
+        rm -f "$tmp"
+        return 0
+      fi
+      continue
+    fi
+    tag="$(json_tag_name "$tmp")"
+    # プレリリース・draft は latest に出ないはずだが、形の合わない値も取り込まない。
+    is_semver "$tag" || continue
+    printf '%s\n' "$tag" > "$dir/latest-$c" 2>/dev/null || continue
+    # 新しいときだけ、飛び越える版のうち「移行」の節がある版を、最新のタグの CHANGELOG.md から調べる
+    # （読めなければ印を消し、案内に留める）。
+    if ver_lt "$cur" "$tag" && fetch "https://raw.githubusercontent.com/$slug/$tag/CHANGELOG.md" "$tmp" 5; then
+      list=""
+      while IFS= read -r t; do
+        [[ -n "$t" ]] || continue
+        if ver_lt "$cur" "$t" && ! ver_lt "$tag" "$t"; then list="$list $t"; fi
+      done < <(changelog_migration_tags "$tmp")
+      printf '%s\n' "${list# }" > "$dir/migrations-$c" 2>/dev/null || true
+    fi
+  done
+  rm -f "$tmp"
+  return 0
+}
+
+# 追従の候補（今より新しく、N と答えていない版。引数があれば N の版も含める）を、"dcb" "playbook" の空白区切りで出す。
+pending_components() {
+  local ignore_declined="${1:-}" dir c cur latest declined out=""
+  dir="$(cache_dir)"
+  for c in dcb playbook; do
+    cur="$(comp_cur "$c")"
+    [[ -n "$cur" && -f "$dir/latest-$c" ]] || continue
+    latest="$(cat "$dir/latest-$c" 2>/dev/null)" || continue
+    ver_lt "$cur" "$latest" || continue
+    if [[ -z "$ignore_declined" ]]; then
+      declined="$(cat "$dir/declined-$c" 2>/dev/null || true)"
+      [[ "$declined" != "$latest" ]] || continue
+    fi
+    out="$out $c"
+  done
+  printf '%s' "${out# }"
+}
+
+# 今日まだ問い合わせていなければ問い合わせ、追従の候補があれば通知を 1 行だけ出す（聞かない）。
+cmd_notify() {
+  local dir pend c line="" cur latest
+  dir="$(cache_dir)"
+  if [[ "$(cat "$dir/checked" 2>/dev/null || true)" != "${UPDATE_CHECK_TODAY:-$(date +%Y-%m-%d)}" ]]; then
+    refresh_cache
+  fi
+  pend="$(pending_components)"
+  [[ -n "$pend" ]] || return 0
+  for c in $pend; do
+    cur="$(comp_cur "$c")"
+    latest="$(cat "$dir/latest-$c")"
+    line="${line:+$line, }$(comp_repo "$c") $cur -> $latest"
+  done
+  echo "$LOG_PREFIX 新しい版があります: $line。対話のシェルで追従できます（bash scripts/update-check.sh upgrade でも追従できます）。止めるには UPDATE_CHECK=off（.env）"
+  return 0
+}
+
+# 端末が付いているか。
+tty_ok() {
+  [[ -n "${UPDATE_CHECK_ASSUME_TTY:-}" ]] && return 0
+  [[ -t 0 && -t 1 ]]
+}
+
+# 排他を取る。複数の端末が同時に開いても、聞く・追従するのは 1 つだけにする。取れなければ 1。
+# flock があれば flock -n（プロセスの終了で解放される）。無ければロックのディレクトリで簡易に
+# 排他する（持ち主の pid が消えていれば奪う）。UPDATE_CHECK_NO_FLOCK=1 は試験用。
+LOCK_DIR=""
+acquire_lock() {
+  local dir pid
+  dir="$(cache_dir)"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  if [[ -z "${UPDATE_CHECK_NO_FLOCK:-}" ]] && command -v flock >/dev/null 2>&1; then
+    exec 9>"$dir/lock"
+    flock -n 9
+    return $?
+  fi
+  if ! mkdir "$dir/lock.d" 2>/dev/null; then
+    pid="$(cat "$dir/lock.d/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]]; then
+      # pid があって、そのプロセスが無いときだけ奪う。
+      if kill -0 "$pid" 2>/dev/null; then
+        return 1
+      fi
+    elif [[ -z "$(find "$dir/lock.d" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      # pid がまだ無い（作った直後で、書くまでのあいだ）。十分古くなるまでは持ち主ありとみなす。
+      return 1
+    fi
+    # 奪うのは名前の変更で 1 つだけを成功させる（rm してから作り直すと、同時に奪いに来た端末が、
+    # 先に奪った側の新しいロックまで消せるため）。変えた先の pid が、古いと判断したものと違えば
+    # （判断のあとに別の端末が奪って作り直した）、そのロックは生きているので戻して諦める。
+    mv "$dir/lock.d" "$dir/lock.d.stale.$$" 2>/dev/null || return 1
+    if [[ "$(cat "$dir/lock.d.stale.$$/pid" 2>/dev/null || true)" != "$pid" ]]; then
+      mv "$dir/lock.d.stale.$$" "$dir/lock.d" 2>/dev/null || rm -rf "$dir/lock.d.stale.$$"
+      return 1
+    fi
+    rm -rf "$dir/lock.d.stale.$$"
+    mkdir "$dir/lock.d" 2>/dev/null || return 1
+  fi
+  echo $$ > "$dir/lock.d/pid"
+  LOCK_DIR="$dir/lock.d"
+  trap 'rm -rf "$LOCK_DIR"' EXIT
+  return 0
+}
+
+# 作業用のブランチを切る（既定ブランチの上にいるときだけ）。切ったら名前を $BRANCH_MADE へ、
+# 元のブランチを $BRANCH_ORIG へ入れる。
+BRANCH_MADE=""
+BRANCH_ORIG=""
+prepare_branch() {
+  local want="$1" cur def n name
+  git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  cur="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 0
+  def="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || def=""
+  def="${def#origin/}"
+  # origin/HEAD が無ければ、手元に main / master のブランチがあれば、それを既定ブランチとみなす。
+  if [[ -z "$def" ]]; then
+    local b
+    for b in main master; do
+      if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$b"; then def="$b"; break; fi
+    done
+  fi
+  # それでも判定できない（origin/HEAD が無く、main / master のブランチも無い）ときは、念のため作業用のブランチを切る
+  # （切って困ることは無く、切らずに既定ブランチの作業ツリーへ差分を置くほうが困るため）。
+  [[ -z "$def" || "$cur" == "$def" ]] || return 0
+  name="$want"; n=1
+  while git -C "$ROOT" show-ref --verify --quiet "refs/heads/$name"; do
+    n=$((n + 1)); name="$want-$n"
+  done
+  if ! git -C "$ROOT" switch -c "$name" >/dev/null 2>&1; then
+    echo "$LOG_PREFIX 作業用のブランチ $name を切れませんでした。何も変えずに止めます。" >&2
+    return 1
+  fi
+  BRANCH_MADE="$name"
+  BRANCH_ORIG="$cur"
+  echo "$LOG_PREFIX 既定ブランチ（${def:-判定できないため念のため}）の上だったので、作業用のブランチ $name を切りました。"
+  return 0
+}
+
+# 切った作業用のブランチから元のブランチへ戻し、空のブランチを消す（失敗したときに残さない）。
+restore_branch() {
+  [[ -n "$BRANCH_MADE" ]] || return 0
+  if git -C "$ROOT" switch -q "$BRANCH_ORIG" 2>/dev/null; then
+    git -C "$ROOT" branch -D "$BRANCH_MADE" >/dev/null 2>&1 || true
+    echo "$LOG_PREFIX 作業用のブランチ $BRANCH_MADE を消し、$BRANCH_ORIG へ戻しました。" >&2
+  else
+    echo "$LOG_PREFIX 元のブランチ $BRANCH_ORIG へ戻せませんでした。作業用のブランチ $BRANCH_MADE に居ます。" >&2
+  fi
+  BRANCH_MADE=""
+}
+
+# sha256 を計算する（GNU の sha256sum が無ければ shasum -a 256）。
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    return 1
+  fi
+}
+
+# 取得した bootstrap.sh では追従できない構成なら、その理由を出す（追従できるなら何も出さない）。
+# 規範の取得元が adjacent / local / 記録のない url のとき、取得した bootstrap.sh は一時ディレクトリから
+# 動くため、規範の置き場所を見つけられず --upgrade が必ず失敗する。
+follow_blocker() {
+  if [[ "$PB_REPRO" == "no" ]]; then
+    echo "規範（ai-playbook）の取得元がリリースの版を指していない（adjacent / local / 記録のない url）ため、取得した bootstrap.sh からは生成を再現できません。手元の bootstrap.sh（規範の置き場所が見える場所のもの）で --upgrade してください。"
+  fi
+}
+
+# 追従する。$1 は追従する部品（"dcb" "playbook" の空白区切り。聞いて y と答えたもの）。
+# 失敗は 1（何も実行していないか、止めた理由を出している）。
+# DCB を上げないとき（N と答えた・すでに最新・最新より新しい）は、今の版の bootstrap.sh を使い、
+# 生成物の DCB の版を動かさない。
+do_upgrade() {
+  local want="$1" dir latest_dcb="" latest_pb="" want_dcb="" want_pb="" use_tag blocker
+  local work base wantbranch expected actual rc branch_hint changed
+  local -a pbargs
+  pbargs=()
+  dir="$(cache_dir)"
+  load_origin || { echo "$LOG_PREFIX ORIGIN から今の版を読めないため、追従しません。" >&2; return 1; }
+  case " $want " in *" dcb "*) want_dcb="yes" ;; esac
+  case " $want " in *" playbook "*) want_pb="yes" ;; esac
+  if [[ -z "$want_dcb" && -z "$want_pb" ]]; then
+    echo "$LOG_PREFIX すでに最新です（devcontainer-bootstrap $CUR_DCB）。"
+    return 0
+  fi
+  blocker="$(follow_blocker)"
+  if [[ -n "$blocker" ]]; then
+    echo "$LOG_PREFIX $blocker" >&2
+    return 1
+  fi
+  use_tag="$CUR_DCB"
+  if [[ -n "$want_dcb" ]]; then
+    latest_dcb="$(cat "$dir/latest-dcb" 2>/dev/null)" || latest_dcb=""
+    is_semver "$latest_dcb" || { echo "$LOG_PREFIX 最新の版がまだ分かりません（問い合わせに失敗した）。あとでもう一度試してください。" >&2; return 1; }
+    use_tag="$latest_dcb"
+  fi
+  if [[ -n "$want_pb" ]]; then
+    latest_pb="$(cat "$dir/latest-playbook" 2>/dev/null)" || latest_pb=""
+    is_semver "$latest_pb" || { echo "$LOG_PREFIX ai-playbook の最新の版がまだ分かりません。あとでもう一度試してください。" >&2; return 1; }
+    # 取得元の種類と、フォークの owner を保つ（--playbook-version は既定の配布元の URL に展開されるため）。
+    case "$PB_KIND" in
+      tag) pbargs=(--playbook-version "$latest_pb") ;;
+      url) pbargs=(--playbook-from "https://github.com/$PB_SLUG/archive/refs/tags/$latest_pb.tar.gz") ;;
+      *) echo "$LOG_PREFIX 規範の取得元を読めないため、追従しません。" >&2; return 1 ;;
+    esac
+  fi
+  # 差分を読めるよう、作業ツリーが汚れているときは止める（追従の差分と混ざるため）。
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+    echo "$LOG_PREFIX 作業ツリーに未コミットの変更があるため、追従しません（差分が混ざるため）。コミットか退避をしてからやり直してください。" >&2
+    return 1
+  fi
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/dcb-update-upgrade.XXXXXX" 2>/dev/null)" || return 1
+  base="https://github.com/$DCB_SLUG/releases/download/$use_tag"
+  if ! fetch "$base/bootstrap.sh" "$work/bootstrap.sh" 60 || ! fetch "$base/SHA256SUMS" "$work/SHA256SUMS" 60; then
+    echo "$LOG_PREFIX $use_tag の bootstrap.sh か SHA256SUMS を取得できませんでした。何も変えずに止めます。" >&2
+    rm -rf "$work"
+    return 1
+  fi
+  expected="$(awk '$2 == "bootstrap.sh" || $2 == "*bootstrap.sh" { print $1; exit }' "$work/SHA256SUMS")"
+  actual="$(sha256_of "$work/bootstrap.sh")" || actual=""
+  if [[ -z "$expected" || -z "$actual" || "$expected" != "$actual" ]]; then
+    echo "$LOG_PREFIX bootstrap.sh のハッシュが SHA256SUMS と一致しません（または照合できません）。実行せずに止めます。" >&2
+    rm -rf "$work"
+    return 1
+  fi
+  echo "$LOG_PREFIX bootstrap.sh $use_tag を取得し、SHA256SUMS と照合しました。"
+
+  if [[ -n "$want_dcb" ]]; then
+    wantbranch="chore/update-dcb-$latest_dcb"
+    [[ -z "$want_pb" ]] || wantbranch="$wantbranch-playbook-$latest_pb"
+  else
+    wantbranch="chore/update-playbook-$latest_pb"
+  fi
+  if ! prepare_branch "$wantbranch"; then
+    rm -rf "$work"
+    return 1
+  fi
+
+  echo "$LOG_PREFIX bootstrap.sh --upgrade を実行します。"
+  bash "$work/bootstrap.sh" --upgrade --output-dir "$ROOT" ${pbargs[@]+"${pbargs[@]}"}
+  rc=$?
+  rm -rf "$work"
+  if [[ $rc -ne 0 && $rc -ne 2 ]]; then
+    echo "$LOG_PREFIX --upgrade が失敗しました（終了コード $rc）。出力を確かめてください。" >&2
+    # 途中で書かれたファイルを自動では戻さない（作業ツリー全体を戻すと、追従のあいだに別の端末で編集したものまで消しうるため）。
+    # 何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻す。書かれていれば、作業用のブランチに留まり
+    # （既定ブランチの作業ツリーを汚さない）、戻し方を案内する。
+    if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      && [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+      if [[ -n "$BRANCH_MADE" ]]; then
+        echo "$LOG_PREFIX 途中で書かれたファイルがあるため、作業用のブランチ $BRANCH_MADE に留まります（$BRANCH_ORIG には戻していません）。" >&2
+      else
+        echo "$LOG_PREFIX 途中で書かれたファイルが、今のブランチの作業ツリーに残っています。" >&2
+      fi
+      echo "$LOG_PREFIX 差分を読んで、要らなければ git restore . と git clean -fd（消す前に git clean -nd で確かめる）で戻してください。" >&2
+      BRANCH_MADE=""
+    else
+      restore_branch
+    fi
+    return 1
+  fi
+  branch_hint=""
+  [[ -z "$BRANCH_MADE" ]] || branch_hint="（作業用のブランチ $BRANCH_MADE に切り替え済みです）"
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    changed="$(git -C "$ROOT" status --short 2>/dev/null | sed -n '1,40p')"
+    echo "$LOG_PREFIX 追従の差分を作業ツリーに残しました。コミット・push・PR はしていません$branch_hint。"
+    echo "変わったファイル:"
+    if [[ -n "$changed" ]]; then printf '%s\n' "$changed" | sed 's/^/  /'; else echo "  （変わったファイルはありません）"; fi
+  else
+    echo "$LOG_PREFIX 追従の差分を残しました（git の作業ツリーではないため、変わったファイルの一覧は出しません）。"
+  fi
+  if [[ $rc -eq 2 ]]; then
+    echo "  手を入れたファイルの隣に .dcb-new が置かれました。差分を見て取り込んでください（--upgrade の出力を参照）。"
+  fi
+  echo "次の手順:"
+  echo "  1) 差分を読む（git diff。リリースノートの「移行」も読む）"
+  echo "  2) bash scripts/verify.sh"
+  echo "  3) コミットする"
+  echo "  4) PR を作る"
+  return 0
+}
+
+# 端末で聞く。聞くのは表示した部品だけで、y で上げるのも、その部品だけ。
+cmd_prompt() {
+  local dir pend c cur latest mig n ans blocker
+  tty_ok || return 0
+  # ほかの端末が聞いている・追従しているあいだは、この端末では聞かない。
+  acquire_lock || return 0
+  dir="$(cache_dir)"
+  pend="$(pending_components)"
+  [[ -n "$pend" ]] || return 0
+  echo "$LOG_PREFIX 新しい版があります。"
+  for c in $pend; do
+    cur="$(comp_cur "$c")"
+    latest="$(cat "$dir/latest-$c")"
+    echo "  $(comp_repo "$c"): $cur -> $latest"
+    if [[ -f "$dir/migrations-$c" ]]; then
+      mig="$(cat "$dir/migrations-$c" 2>/dev/null)"
+      n="$(printf '%s\n' "$mig" | wc -w | tr -d ' ')"
+      if [[ "$n" -ge 2 ]]; then
+        echo "  [注意] 「移行」の節がある版を $n 個飛び越えます（$mig）。リリースノート（CHANGELOG.md）の「移行」を読んでから追従してください。"
+      elif [[ "$n" -eq 1 ]]; then
+        echo "  「移行」の節がある版: $mig"
+      fi
+    else
+      echo "  リリースノート（移行の節）を読んでください: https://github.com/$(comp_slug "$c")/releases"
+    fi
+  done
+  blocker="$(follow_blocker)"
+  if [[ -n "$blocker" ]]; then
+    # 自動では追従できない。案内を 1 回出し、この版のあいだは聞かない。
+    echo "  [自動では追従できません] $blocker"
+    for c in $pend; do
+      cat "$dir/latest-$c" > "$dir/declined-$c" 2>/dev/null || true
+    done
+    return 0
+  fi
+  printf '追従しますか？ [y/N] '
+  ans=""
+  read -r ans || ans=""
+  case "$ans" in
+    y|Y|yes|YES|Yes)
+      do_upgrade "$pend" || true
+      ;;
+    *)
+      # N の版は、その版のあいだ聞かない。
+      for c in $pend; do
+        cat "$dir/latest-$c" > "$dir/declined-$c" 2>/dev/null || true
+      done
+      echo "$LOG_PREFIX 追従しません。この版のあいだは聞きません（あとで追従するときは bash scripts/update-check.sh upgrade）。"
+      ;;
+  esac
+  return 0
+}
+
+# 手で追従する。N と答えた版も含め、今より新しいものすべてを対象にする。
+cmd_upgrade() {
+  load_origin || { echo "$LOG_PREFIX ORIGIN から今の版を読めないため、追従しません。" >&2; return 1; }
+  if ! acquire_lock; then
+    echo "$LOG_PREFIX ほかの端末が聞いている、または追従しているため、追従しません。" >&2
+    return 1
+  fi
+  refresh_cache
+  # 最新の版を取得できなかったら、「すでに最新」と言わずに失敗で終える（取得できない日は、追従するか判断できない）。
+  # どちらか一方でも取得できていれば、取得できたほうで判断する（片方の失敗で、もう片方の追従を止めない）。
+  if [[ ! -s "$(cache_dir)/latest-dcb" && ! -s "$(cache_dir)/latest-playbook" ]]; then
+    echo "$LOG_PREFIX 最新の版を取得できなかったため、追従するか判断できません（オフライン・GitHub の不調・API の制限）。時間をおいて、もう一度実行してください。" >&2
+    return 1
+  fi
+  do_upgrade "$(pending_components all)"
+}
+
+main() {
+  local sub="${1:-}"
+  case "$sub" in
+    notify|prompt)
+      # 何もしない条件。起動・対話シェルの開始を止めないよう、失敗は黙って 0 で終わる。
+      disabled_by_env && return 0
+      load_origin || return 0
+      disabled_by_origin && return 0
+      if [[ "$sub" == "notify" ]]; then cmd_notify; else cmd_prompt; fi
+      return 0
+      ;;
+    upgrade)
+      cmd_upgrade
+      return $?
+      ;;
+    *)
+      echo "usage: bash scripts/update-check.sh <notify|prompt|upgrade>" >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
 TMPL
       ;;
     'scripts/setup-git-identity.sh')
@@ -4471,7 +5465,7 @@ sed [^|;&]*\\x[0-9A-Fa-f]	\xNN は GNU sed の拡張。BSD sed は文字 x と�
 readlink +-f	BSD の readlink に -f は無い。cd と pwd で解決する		# bsd-ok: 規則表の綴りそのもの
 base64 [^|;&]*-w	BSD の base64 に -w は無い。折り返しが要るなら fold へ渡す		# bsd-ok: 規則表の綴りそのもの
 find [^|;&]*-printf	BSD の find に -printf は無い。-exec か -print と組み合わせる		# bsd-ok: 規則表の綴りそのもの
-xargs [^|;&]*-r	BSD の xargs に -r は無い（空入力でも実行しない挙動が既定）		# bsd-ok: 規則表の綴りそのもの
+xargs[[:space:]]+([^|;&]*[[:space:]])?(-[A-Za-z0-9]*r[A-Za-z0-9]*|--no-run-if-empty)([^A-Za-z0-9_-]|$)	BSD の xargs に -r は無い（空入力でも実行しない挙動が既定）		# bsd-ok: 規則表の綴りそのもの
 (head|tail) +-n +-[0-9]	負の行数は GNU 拡張。BSD には無い		# bsd-ok: 規則表の綴りそのもの
 (^|[^-[:alnum:]_/])tac( |$)	BSD 系には tac が無い。tail -r か awk で代用する		# bsd-ok: 規則表の綴りそのもの
 (^|[^-[:alnum:]_])sha256sum	BSD 系に sha256sum は無い。shasum -a 256 か openssl dgst -sha256 への分岐を書く	shasum|openssl[[:space:]]+dgst	# bsd-ok: 規則表の綴りそのもの
@@ -9088,12 +10082,13 @@ TMPL
 #
 # やること:
 #   .env の SESSION_HOST_LABEL（無ければ環境変数）があれば、環境変数
-#   CLAUDE_CODE_SESSION_NAME を <ラベル>-<作業ツリー名>-<PID の 16 進> にして exec する。
-#   この値が SendMessage の宛先名になり、ListAgents にも出る。PID の 16 進は起動ごとに変わる
-#   （同じ作業ツリーで複数のセッションを動かしても、同時に起動しても宛先名が重ならないようにするため）。
-#   ただし起動の引数に --resume=<会話の識別子> / --resume <会話の識別子>（UUID の形）があれば、
-#   末尾を PID ではなくその識別子の先頭 8 桁（最初のハイフンの前）にする。会話を再開しても宛先名が変わらず、
-#   ほかのセッションが一度覚えた宛先名へ再起動の後も送れる。識別子の形に合わないときは PID を使う。
+#   CLAUDE_CODE_SESSION_NAME を <ラベル>-<作業ツリー名>-<末尾> にして exec する。
+#   この値が SendMessage の宛先名になり、ListAgents にも出る。末尾は次のとおり決める。
+#   - 起動の引数に --resume=<会話の識別子> / --resume <会話の識別子>（UUID の形）があれば、
+#     その識別子の先頭 8 桁（最初のハイフンの前）。会話を再開しても宛先名が変わらず、
+#     ほかのセッションが一度覚えた宛先名へ再起動の後も送れる。
+#   - 識別子が無い、または形に合わないときは PID の 16 進。起動ごとに変わるので、
+#     同じ作業ツリーで複数のセッションを動かしても、同時に起動しても宛先名が重ならない。
 #
 # 何も変えずに exec "$@" するとき（起動を妨げないことが最優先）:
 #   - ラベルが無い
@@ -9838,14 +10833,6 @@ has_language() {
   return 1
 }
 
-# --with-* で選択された装備に含まれるか。has_language と対になる述語。
-# WITH_SET は空になり得るため、未束縛展開を避けて空配列を安全に扱う。
-has_with() {
-  local target="$1" w
-  for w in ${WITH_SET[@]+"${WITH_SET[@]}"}; do [[ "$w" == "$target" ]] && return 0; done
-  return 1
-}
-
 # with-feature（devcontainer feature）の path を返す。cloud CLI と Terraform。
 with_feature_path() {
   case "$1" in
@@ -10367,8 +11354,10 @@ build_session_host_label_block() {
 
 # セッションの宛先名に含める場所のラベル（scripts/claude-session-wrapper.sh が読む）。
 # 空なら宛先名を変えない。設定すると、Claude Code のセッションの宛先名が
-# <ラベル>-<作業ツリー名>-<PID の16進> になり、複数の機械・コンテナで動くセッションを
+# <ラベル>-<作業ツリー名>-<末尾> になり、複数の機械・コンテナで動くセッションを
 # 宛先名から見分けられる（/peers で一覧・宛先の解決・一斉送信ができる）。
+# 末尾は、起動の引数に会話の識別子（--resume）があればその先頭 8 桁で、会話を再開しても
+# 変わらない。識別子が無い起動では PID の 16 進になる。
 # 英数字と . _ - だけを使う。
 SESSION_HOST_LABEL=
 LBLTMPL
@@ -10392,8 +11381,10 @@ build_second_opinion_engine_block() {
   #   既定の gemini（CLI もキーも無い）で回り、設定するまで使えないため。
   # - gemini を選ばず antigravity と codex の両方を選んだときは、一意に決まらないので空のまま
   #   （既定の gemini へ落ちたことは reviewer の通知が知らせる）。
+  # - --second-opinion-engine の指定があれば、上のどれよりも優先してその値（検証済み）。
   local engine_default=""
-  if has_with gemini; then engine_default="gemini"
+  if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then engine_default="$SECOND_OPINION_ENGINE_OPT"
+  elif has_with gemini; then engine_default="gemini"
   elif has_with codex && ! has_with antigravity; then engine_default="codex"
   elif has_with antigravity && ! has_with codex; then engine_default="antigravity"
   fi
@@ -10403,6 +11394,7 @@ build_second_opinion_engine_block() {
 
 # 第二意見レビューのエンジン（gemini | antigravity | codex）。空なら gemini。
 # gemini も選んで生成した構成では gemini を記入済みで出す。
+# 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
 # antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
 # 対応しない。初回は対話で `agy` を起動してログインすること。
@@ -10423,6 +11415,7 @@ ENGTMPL
 
 # 第二意見レビューのエンジン（gemini | codex）。空なら gemini。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、codex だけなら codex）を記入済みで出す。
+# 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
 # codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
 # 対話で `codex login` を通すこと。GEMINI_API_KEY は使わない。
@@ -10437,6 +11430,7 @@ ENGTMPL
 
 # 第二意見レビューのエンジン（gemini | antigravity）。空なら gemini。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、antigravity だけなら antigravity）を記入済みで出す。
+# 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
 # antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
 # 対応しない。初回は対話で `agy` を起動してログインすること。GEMINI_API_KEY は
@@ -10471,7 +11465,103 @@ build_ai_install_block() {
     pkg="${spec#* }"
     out+="install_if_missing $cmd \"$pkg\""$'\n'
   done < <(selected_ai_tools)
+  # --claude-remote-control のときだけ、設定のマージを呼ぶ（関数は __CLAUDE_FUNCTION_LINES__）。
+  # claude の導入行（上の loop）より後ろに置く。未指定なら 1 行も足さない。
+  if [[ "$CLAUDE_REMOTE_CONTROL" == "true" ]]; then
+    out+="enable_claude_remote_control"$'\n'
+  fi
   printf '%s' "$out"
+}
+
+# install-ai-tools.sh の __CLAUDE_FUNCTION_LINES__。Claude Code の Remote Control を
+# 常に有効にするユーザー設定のマージ。--claude-remote-control が無ければ空を返し、
+# 生成物にこの関連は 1 行も入らない。
+#
+# remoteControlAtStartup の true が効くのはユーザー設定（~/.claude/settings.json）と
+# 管理ポリシーだけで、プロジェクトの .claude/settings.json の true は読まれない。
+# したがってコミットする形では有効にできず、コンテナの作成時にマージする。
+#
+# 設定の書き込みは agy の enableTelemetry と同じ流儀（マージ・一時ファイル＋mv・
+# 壊れた JSON を捨てない）だが、失敗の扱いだけ違う。これは利用者のオプトインした
+# 利便であって、無効化の保証（テレメトリ）ではないため、jq が無い・JSON が壊れて
+# いるときは警告して飛ばし、コンテナの作成を止めない。
+build_claude_remote_control_block() {
+  [[ "$CLAUDE_REMOTE_CONTROL" == "true" ]] || { printf ''; return; }
+  cat <<'CRCTMPL'
+# Claude Code の Remote Control を常に有効にする（remoteControlAtStartup）。
+# キーが無いときだけ true を足す。利用者が明示した値（false を含む）は覆さない。
+CLAUDE_USER_SETTINGS="$HOME/.claude/settings.json"
+
+enable_claude_remote_control() {
+  local dir tmp mode
+  dir="$(dirname "$CLAUDE_USER_SETTINGS")"
+
+  # この関数は set -e の下で動く。どの失敗でも警告して 0 を返し、コンテナの作成を止めない。
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[install-ai-tools] warning: jq が無いため Remote Control の設定を飛ばします（remoteControlAtStartup は未設定のまま）" >&2
+    return 0
+  fi
+
+  # シンボリックリンクは書き換えない（mv が通常のファイルで置き換え、利用者の dotfiles を壊す）。
+  if [[ -L "$CLAUDE_USER_SETTINGS" ]]; then
+    echo "[install-ai-tools] warning: シンボリックリンクのため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+    return 0
+  fi
+  if [[ -e "$CLAUDE_USER_SETTINGS" && ! -f "$CLAUDE_USER_SETTINGS" ]]; then
+    echo "[install-ai-tools] warning: 通常のファイルでないため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+    return 0
+  fi
+
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "[install-ai-tools] warning: $dir を作れないため Remote Control の設定を飛ばします" >&2
+    return 0
+  fi
+
+  mode=""
+  if [[ -f "$CLAUDE_USER_SETTINGS" ]]; then
+    # 壊れた JSON、オブジェクトでない JSON、複数の値を連結した JSON を黙って置き換えない
+    # （-s で全体を配列として読み、値がちょうど 1 つのオブジェクトであることを確かめる）。
+    if ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$CLAUDE_USER_SETTINGS" >/dev/null 2>&1; then
+      echo "[install-ai-tools] warning: JSON のオブジェクトとして読めないため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+      return 0
+    fi
+    # 冪等。キーがあれば（false でも）触らない。
+    if jq -e 'has("remoteControlAtStartup")' "$CLAUDE_USER_SETTINGS" >/dev/null 2>&1; then
+      echo "[install-ai-tools] remoteControlAtStartup already set, skipping"
+      return 0
+    fi
+    # 利用者が読み取り専用にしたファイルは、親ディレクトリに書けても mv で置き換えない。
+    if [[ ! -w "$CLAUDE_USER_SETTINGS" ]]; then
+      echo "[install-ai-tools] warning: 書き込めないため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+      return 0
+    fi
+    # 既存のファイルは元の権限を保つ（stat は GNU / BSD で書式が違う）。
+    mode="$(stat -c %a "$CLAUDE_USER_SETTINGS" 2>/dev/null || stat -f %Lp "$CLAUDE_USER_SETTINGS" 2>/dev/null || true)"
+  fi
+
+  # 一時ファイルへ書いて mv で差し替える（同じディレクトリに作る。理由は agy の設定と同じ）。
+  if ! tmp="$(mktemp "$dir/.settings.json.XXXXXX" 2>/dev/null)"; then
+    echo "[install-ai-tools] warning: $dir に一時ファイルを作れないため Remote Control の設定を飛ばします" >&2
+    return 0
+  fi
+  # ファイルが無ければ新規（600）。あれば既存のキーを保ってマージする。
+  if [[ -f "$CLAUDE_USER_SETTINGS" ]]; then
+    jq '.remoteControlAtStartup = true' "$CLAUDE_USER_SETTINGS" > "$tmp" 2>/dev/null
+  else
+    jq -n '{remoteControlAtStartup: true}' > "$tmp" 2>/dev/null
+  fi || {
+    rm -f "$tmp"
+    echo "[install-ai-tools] warning: settings.json の書き換えに失敗したため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+    return 0
+  }
+  if ! chmod "${mode:-600}" "$tmp" 2>/dev/null || ! mv "$tmp" "$CLAUDE_USER_SETTINGS" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "[install-ai-tools] warning: settings.json を置き換えられないため Remote Control の設定を飛ばします: $CLAUDE_USER_SETTINGS" >&2
+    return 0
+  fi
+  echo "[install-ai-tools] Claude Code Remote Control enabled (remoteControlAtStartup=true)"
+}
+CRCTMPL
 }
 
 # install-ai-tools.sh の __AGY_FUNCTION_LINES__。agy の導入とテレメトリ無効化の
@@ -10813,6 +11903,7 @@ render_content() {
   subst_block __ON_CREATE_COMMAND__ "$(build_on_create_command_block)"
   subst_block __AGY_FUNCTION_LINES__ "$(build_agy_block)"
   subst_block __CODEX_FUNCTION_LINES__ "$(build_codex_block)"
+  subst_block __CLAUDE_FUNCTION_LINES__ "$(build_claude_remote_control_block)"
   subst_block __AI_INSTALL_LINES__ "$(build_ai_install_block)"
   subst_block __VOLUME_MOUNTS__ "$(build_volume_mounts_block)"
   subst_block __VOLUME_SECTION__ "$(build_volume_section_block)"
@@ -11664,6 +12755,22 @@ upgrade_apply_file() {
   else
     newh="$(dcb_file_sha256 "$src")"
   fi
+  # absent: の記録があり、現物が無い（記録どおり意図して置いていない）ファイルは作らず、記録を
+  # 引き継ぐ。外せない一覧のパスの absent: は破損として無視し、通常どおり生成する。現物がある
+  # ときは記録と食い違っているので、記録は引き継がず（UPGRADE_ABSENT_KEEP に入れない）通常どおり扱う。
+  if [[ "$UPGRADE_ABSENT_RECORDED" == *$'\n'"$rel"$'\n'* ]] \
+    && ! absent_forbidden_rel_paths | grep -Fx -- "$rel" >/dev/null; then
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+      UPGRADE_ABSENT_KEEP="${UPGRADE_ABSENT_KEEP}${rel}"$'\n'
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "plan: absent (recorded as intentionally absent) $dest"
+      else
+        echo "absent (recorded as intentionally absent): $dest"
+      fi
+      return 0
+    fi
+    echo "note: $rel に absent: の記録がありますが現物があるため、記録を外して通常どおり扱います" >&2
+  fi
   UPGRADE_HASHES="${UPGRADE_HASHES}${rel}"$'\t'"${newh}"$'\n'
   rec="$(dcb_origin_get "$OUTPUT_DIR/$ORIGIN_REL_PATH" "hash:$rel" 2>/dev/null || true)"
 
@@ -12080,6 +13187,18 @@ EOF
     dcb_origin_line input:base-image "$BASE_IMAGE"
     echo "input:manage-gitignore=$MANAGE_GITIGNORE"
     dcb_origin_line input:gitignore-targets "$GITIGNORE_TARGETS"
+    # 指定があったときだけ書く（未指定の ORIGIN を変えない）。
+    if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then
+      dcb_origin_line input:second-opinion-engine "$SECOND_OPINION_ENGINE_OPT"
+    fi
+    # 指定があったときだけ true を書く（未指定の ORIGIN を変えない）。
+    if [[ "$CLAUDE_REMOTE_CONTROL" == "true" ]]; then
+      echo "input:claude-remote-control=true"
+    fi
+    # off のときだけ書く（既定の有効は ORIGIN を変えない）。
+    if [[ "$UPDATE_CHECK_OFF" == "true" ]]; then
+      echo "input:update-check=off"
+    fi
     if should_install_playbook; then
       echo "input:playbook=installed"
       pb_src="$(origin_playbook_source)"
@@ -12096,6 +13215,12 @@ EOF
       h=""
       if [[ "$UPGRADE" == "true" ]]; then
         h="$(printf '%s' "$UPGRADE_HASHES" | awk -F'\t' -v r="$rel" '$1 == r { h = $2 } END { print h }')"
+      fi
+      # absent: のため作らなかったファイルは、現物が無いので、旧 ORIGIN の記録をそのまま引き継ぐ。
+      if [[ -z "$h" && "$UPGRADE" == "true" ]]; then
+        case $'\n'"$UPGRADE_ABSENT_KEEP" in
+          *$'\n'"$rel"$'\n'*) h="$(dcb_origin_get "$dest" "hash:$rel" 2>/dev/null || true)"; [[ -n "$h" ]] || continue ;;
+        esac
       fi
       [[ -n "$h" ]] || h="$(dcb_file_sha256 "$OUTPUT_DIR/$rel")"
       echo "hash:$rel=$h"
@@ -12129,6 +13254,13 @@ EOF
         case $'\n'"$UPGRADE_ACCEPT_KEEP" in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
         echo "$line"
       done < <(grep '^accepted:' "$dest" || true)
+      # absent: の記録は、今回「作らなかった」パスの分だけを引き継ぐ（UPGRADE_ABSENT_KEEP）。
+      # 生成対象から外れたパスの記録は、origin_rels に無いので残らない。
+      while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        case $'\n'"$origin_rels"$'\n' in *$'\n'"$rel"$'\n'*) ;; *) continue ;; esac
+        echo "absent:$rel=1"
+      done < <(printf '%s' "$UPGRADE_ABSENT_KEEP" | sort -u)
     fi
   } > "$tmp"
   # --upgrade は既存 ORIGIN のモードを保つ（無ければ 644）。従来の経路は常に 644。
