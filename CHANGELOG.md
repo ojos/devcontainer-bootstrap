@@ -6,6 +6,17 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.23.1
+
+### Summary
+- **v0.23.0 で足した `scripts/update-check.sh` の不具合を直した。** `bootstrap.sh --upgrade` で追従すれば効く（手で行う移行の作業は無い）。
+  - **ai-playbook の新しい版を通知していなかった**（ojos/ai-packages-dev#631 / ojos/ai-packages-dev#636）。ai-playbook はタグだけを打ち、GitHub の Release を作らないため、`releases/latest` が必ず 404 になっていた（失敗は黙って通すので、「新しい版は無い」と同じに見えていた）。ai-playbook の最新は、タグの一覧から `vX.Y.Z` の最大を取るようにした（ページをたどる。上限 10 ページ）。DCB は今のまま `releases/latest` を読む。
+  - **接続時の確認（notify）がキャッシュを更新している最中に開いたシェルでは、新しい版があっても問いかけが出なかった**（ojos/ai-packages-dev#632 / ojos/ai-packages-dev#636）。取得の結果は作業用の場所に集めてから差し替え、更新は専用のロックで排他するようにした（問いかけは更新中でも出る）。取得のどれかが失敗した日は、その日を「確認済み」に数えず、次の接続で取り直す（オフラインのマシンでは、接続のたびに最大 2 秒の問い合わせが残る）。失敗した部品の古いキャッシュは使わない。
+  - **問いかけで表示した版と、N で記録する版・y で追従する版がずれることがあった**（ojos/ai-packages-dev#633 / ojos/ai-packages-dev#636）。表示した版を持ち回り、記録と追従にはその版を使う。`update-check.sh upgrade` は、今回取得できた部品だけを対象にする。
+  - **`origin/HEAD` の無いリポジトリで、main を既定ブランチと決めつけていた**（ojos/ai-packages-dev#634 / ojos/ai-packages-dev#636）。既定ブランチが master のリポジトリでは、作業用のブランチを切らずに追従の差分を master に残すことがあった。推定をやめ、main / master のどちらの上でも作業用のブランチを切る。
+  - **対話シェルでは、環境の `UPDATE_CHECK=off` が `.env` の値に負けていた**（ojos/ai-packages-dev#635 / ojos/ai-packages-dev#637）。`.env` の自動読み込みが先に走るためで、「環境の値が `.env` より優先される」という説明と食い違っていた。`scripts/load-project-env.sh` が `.env` を読む前の値を退避し、`update-check.sh` がそれを優先する。入れ子のシェル（tmux など）でも同じ。`~/.bashrc` / `~/.zshrc` は書き換えない（既に差し込まれた行のまま効く）。新しいシェルから効く。
+- キャッシュの `migrations-<部品>` の形式が変わった。v0.23.0 が書いた古い形式は使われず、次の取得で置き換わる（キャッシュはコミットしないので、利用側の作業は無い）。
+
 ## v0.23.0
 
 ### Summary

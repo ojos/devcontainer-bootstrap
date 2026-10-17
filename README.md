@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.23.0`
+- `v0.23.1`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.23.0
+TAG=v0.23.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.23.0
+TAG=v0.23.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.23.0
+TAG=v0.23.1
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -1054,7 +1054,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.23.0
+version=v0.23.1
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1341,13 +1341,13 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 
 生成した環境が、DCB と ai-playbook の古い版のまま気づかずに使われ続けないようにする仕組みです。生成物の `scripts/update-check.sh` が担い、**既定で有効**です（既存の利用者は次の `--upgrade` から）。
 
-- **確認:** 接続時（`postAttachCommand` の `scripts/on-attach.sh`）に、ORIGIN の版を GitHub の最新の安定版（`releases/latest`。プレリリースを除く。認証なし）と比べ、新しければ通知を 1 行だけ出します。聞きません。`on-attach.sh` は端末の入力を受けられないためです。
+- **確認:** 接続時（`postAttachCommand` の `scripts/on-attach.sh`）に、ORIGIN の版を GitHub の最新の安定版（DCB は `releases/latest`。プレリリースを除く。ai-playbook は Release を作らずタグだけを打つため、タグの一覧（`/repos/<owner>/ai-playbook/tags`。100 件ずつ。100 件未満のページが来るまで、上限 10 ページ）のうち `vX.Y.Z` の形（プレリリースの形を除く）の最大。認証なし）と比べ、新しければ通知を 1 行だけ出します。聞きません。`on-attach.sh` は端末の入力を受けられないためです。
 - **聞く:** 対話のシェル（`on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入します。端末が付いている対話のシェルで、今いるディレクトリがそのプロジェクトの中のときだけ。差し込みの印はプロジェクトごとです）で「追従しますか？ [y/N]」と聞きます。今の版と最新の版を示し、**「移行」の節がある版を 2 つ以上飛び越えるときは `[注意]` で目立たせます**（最新のタグの配布先の `CHANGELOG.md`（`raw.githubusercontent.com`）を読み、(今の版, 最新] の「## vX.Y.Z」の節のうち「### 移行」を持つ版を数えます。リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないためです。読めなければ、リリースノートを読む案内に留めます）。複数の端末が同時に開いても、聞く・追従するのは 1 つの端末だけです（`flock`。無い環境ではロックのディレクトリ）。
-- **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方（`git restore .` と `git clean -fd`）を案内します。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 未コミットの変更があるときは、差分が混ざるので追従せずに止めます。照合に通らないときは何も実行しません。
+- **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方（`git restore .` と `git clean -fd`）を案内します。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。既定ブランチは `origin/HEAD` で判定します。`origin/HEAD` が無いときは推定せず、main / master のどちらかの上にいれば切ります（リモートへは問い合わせません）。問いかけで表示した版だけが、N の記録と y の追従の対象です（待っているあいだにキャッシュが更新されても、読み直しません）。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 未コミットの変更があるときは、差分が混ざるので追従せずに止めます。照合に通らないときは何も実行しません。
 - **N のとき:** その版のあいだは聞きません（通知も出しません）。さらに新しい版が出れば、また聞きます。
 - **手で追従する:** `bash scripts/update-check.sh upgrade`（最新を問い合わせて、y と同じ処理をします）。
-- **間引きと失敗:** 問い合わせは 1 日 1 回です。失敗した日も数えます。オフライン・API の失敗・制限は黙って通し（短いタイムアウト）、起動を止めません。端末が付いていないシェル（AI エージェント・CI・スクリプト）では何も聞かず、何も出しません。
-- **キャッシュ:** `${XDG_CACHE_HOME:-~/.cache}/dcb-update-check/<プロジェクトごとの鍵>/`。コミットしません。
+- **間引きと失敗:** 問い合わせは 1 日 1 回です。**取得をすべて終えた日だけ**数えます。どの部品の取得がどんな理由（通信ができない・HTTP のエラー・API の制限・形の不一致・`CHANGELOG.md` の取得の失敗）で失敗しても、その日の印を書かず、次の接続で取り直します（成功した部品は差し替え、失敗した部品の前の日のキャッシュは消します。更新は更新用のロック（`refresh-lock`）を取って行い、取れなければ（別の接続が更新中なら）更新を飛ばして、通知だけキャッシュから出します。問いかけのロックとは別なので、更新のあいだも問いかけは出ます）。`upgrade` は、今回の問い合わせで取得できた部品だけを対象にします（取得できなかった部品は、同じ日のキャッシュがあっても追従せず、そう報告します。どちらも取得できなければ失敗で終わります）。オフラインのマシンでは接続のたびに問い合わせます（最大 2 秒）。オフライン・API の失敗・制限は黙って通し（短いタイムアウト）、起動を止めません。端末が付いていないシェル（AI エージェント・CI・スクリプト）では何も聞かず、何も出しません。
+- **キャッシュ:** `${XDG_CACHE_HOME:-~/.cache}/dcb-update-check/<プロジェクトごとの鍵>/`。コミットしません。問い合わせの結果は、いったん作業用のファイルへ書いてから rename で差し替えます（先に消さないので、更新のあいだに prompt が読んでも一貫した状態を読めます）。今日の印（`checked`）は取得を終えてから最後に書きます。通信ができずに途中で抜けたときは書かず、前の日のキャッシュを消すので、次の接続で取り直します（`upgrade` は取得できなかったと報告して失敗で終わり、古い版へは追従しません）。`migrations-<部品>` は「<版>=<版の一覧>」で、`latest-<部品>` と版が一致するときだけ使います（別々の rename でも、組み合わせを読み違えません）。作業用のファイルは、中断（Ctrl-C など）でも片づけ、1 日より古い残りは次の取得の開始時に消します。
 - **確認の対象:** ORIGIN の `version=` が `vX.Y.Z` のときの DCB（取得元は `ojos/devcontainer-bootstrap`）。ai-playbook は、取得元が `tag`、またはリリースのタグの tarball の URL（`https://github.com/<owner>/ai-playbook/archive/refs/tags/<版>.tar.gz`）のときだけで、ほかの取得元（`adjacent` / `local` など）は確認しません。ORIGIN が無い、`version=` がリリースの版でない環境（この開発リポジトリを含む）では何もしません。
 - **止め方:** 生成時の `--no-update-check`（ORIGIN に記録し、`--upgrade` で引き継ぎます。戻すのは `--upgrade --update-check`）、または `UPDATE_CHECK=off`（`0` / `false` / `no` / `disabled` も同じ）。環境変数で設定すれば止まります（`.env` が読み込まれても環境の値が優先されます）。`.env` に書くときは、`.env.example` のコメントの行の `#` を外します。
 
