@@ -104,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.23.2"
+DCB_VERSION="v0.23.3"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -1258,16 +1258,14 @@ get_template_content() {
 # 認証そのもの（cloud / AI CLI）はコンテナ内で行う。ログイン状態は named volume に
 # 残るため、rebuild しても消えない。トークンをこのファイルへ書き写す必要はない。
 # 例外は GitHub（gh）だけで、理由は下の GH_TOKEN の項に書く。
-
-# Gemini API キー（第二意見レビュー scripts/second-opinion-review.sh が読む）
-GEMINI_API_KEY=
+__GEMINI_API_KEY_LINES__
 __SECOND_OPINION_ENGINE_LINES__
 
 # 新しい版の確認（scripts/update-check.sh）。devcontainer-bootstrap と ai-playbook の新しい安定版が
 # あれば、接続時に通知を 1 行出し、対話のシェルで「追従しますか？ [y/N]」と聞く（y なら
 # bootstrap.sh --upgrade で追従し、差分を作業ツリーに残して止める。コミット・push・PR はしない）。
 # 問い合わせは 1 日 1 回、認証なし。既定は有効。止めるには次の行の # を外す（環境変数で
-# UPDATE_CHECK=off を設定しても止まる。環境の値が優先される）。
+# UPDATE_CHECK=off を設定しても止まる。環境の値・コマンドで明示した値が .env より優先される）。
 # 生成時に --no-update-check を付けると、ORIGIN に記録して --upgrade でも引き継ぐ。
 # UPDATE_CHECK=off
 
@@ -1729,23 +1727,18 @@ TMPL
 #   - .env は source せず安全にパースする（KEY=VALUE のみ export、任意コードは実行しない）。
 #     これにより、壊れた .env が対話シェルの初期化ごと落とす事故を防ぐ。
 #   - CRLF・=前後や値前後の空白など、実務的な .env の揺れを吸収する。
+#   - UPDATE_CHECK だけは .env の値で上書きしない（環境の値・コマンドで明示した値を優先する）。
+#     読み飛ばすのは常にで、合図の変数は無い。.env の UPDATE_CHECK を知りたい update-check.sh は、
+#     __load_project_env_value UPDATE_CHECK で値だけを標準出力へ受け取る（変数は変えない）。
+#   - __load_project_env_value KEY: .env の KEY の値（後勝ち）を標準出力へ返す。見つかれば 0、
+#     無ければ 1。解釈は読み込み本体と同じ処理を共有する（引数に KEY を渡した __load_project_env）。
 #
 # 冪等: 複数回 source しても安全。.env が無ければ何もしない。
 
 __load_project_env() {
   local project_root env_file line key val src
-  # .env で UPDATE_CHECK を上書きする前の値（環境で設定した値）を、最上位のシェルで一度だけ退避する。
-  # 対話シェルでは rc の自動読み込みが先に .env で上書きするため、update-check.sh は退避が無いと
-  # 環境の値を知れない。export するので、入れ子のシェル（tmux・bash）や子プロセスも同じ値を受け継ぎ、
-  # 子の読み込みで .env の値を退避し直すことが無い（${DCB_ENV_UPDATE_CHECK+x} が空のときだけ退避する）。
-  # 退避し直す条件: 退避が無いとき、または今の UPDATE_CHECK がローダーが前回読んだ直後の値
-  # （DCB_ENV_UPDATE_CHECK_LOADED）と違うとき（親が未設定のまま、利用者が UPDATE_CHECK=off bash の
-  # ように明示して入れ子のシェルを開いたとき）。同じなら親の .env の値を受け継いだだけなので退避し直さない。
-  if [ -z "${DCB_ENV_UPDATE_CHECK+x}" ] || [ "${UPDATE_CHECK-}" != "${DCB_ENV_UPDATE_CHECK_LOADED-}" ]; then
-    export DCB_ENV_UPDATE_CHECK="${UPDATE_CHECK-}"
-  fi
-  # .env が DCB_ENV_UPDATE_CHECK を書いていても上書きされないよう、読んだあとで戻す。
-  local saved_update_check="$DCB_ENV_UPDATE_CHECK"
+  # 引数があれば値の取得モード: その KEY の値を標準出力へ返すだけで、何も export しない。
+  local want_key="${1-}" result="" found=1
   # ソース中ファイルのパスを bash / zsh 双方で解決する。zsh には BASH_SOURCE が無いため
   # ${BASH_SOURCE[0]} は空になり CWD 依存へ化ける。実行シェルを判定して回避する。
   if [ -n "${BASH_VERSION:-}" ]; then
@@ -1785,7 +1778,7 @@ __load_project_env() {
   fi
 
   if [[ ! -f "$env_file" ]]; then
-    export DCB_ENV_UPDATE_CHECK_LOADED="${UPDATE_CHECK-}"
+    [[ -z "$want_key" ]] || return 1
     return 0
   fi
 
@@ -1818,11 +1811,27 @@ __load_project_env() {
     elif [[ ${#val} -ge 2 && "$val" == \'*\' ]]; then
       val="${val:1:${#val}-2}"
     fi
+    # 値の取得モード: 変数は変えず、後勝ちで値だけを控える。
+    if [[ -n "$want_key" ]]; then
+      if [[ "$key" == "$want_key" ]]; then result="$val"; found=0; fi
+      continue
+    fi
+    # UPDATE_CHECK は上書きしない（シェルの値は、環境の値か、コマンドで明示した値のまま）。
+    # 「明示した値」と「.env が上書きした値」を後から推測しなくて済むようにするため。
+    [[ "$key" != UPDATE_CHECK ]] || continue
     # 後勝ちで既存の環境変数（remoteEnv 由来のホスト値）を上書きする。
     export "$key=$val"
   done < "$env_file"
-  export DCB_ENV_UPDATE_CHECK="$saved_update_check"
-  export DCB_ENV_UPDATE_CHECK_LOADED="${UPDATE_CHECK-}"
+  if [[ -n "$want_key" ]]; then
+    printf '%s' "$result"
+    return "$found"
+  fi
+  return 0
+}
+
+# .env の KEY の値だけを標準出力へ返す（変数は変えない。見つかれば 0、無ければ 1）。
+__load_project_env_value() {
+  __load_project_env "$1"
 }
 
 __load_project_env
@@ -2145,24 +2154,21 @@ DCB_SLUG="ojos/devcontainer-bootstrap"
 PB_DEFAULT_SLUG="ojos/ai-playbook"
 LOG_PREFIX="[update-check]"
 
-# .env の UPDATE_CHECK を効かせる（ローダーは source 専用・冪等。無ければ何もしない）。
-# ローダーは .env の値で既存の環境変数を上書きするので、環境で設定した値（例: off）は読む前に
-# 退避し、読んだあとで戻す（環境の値を優先する。.env の空の行で打ち消されない）。
-# 対話シェルでは、rc の自動読み込み（load-project-env.sh）が先に .env で UPDATE_CHECK を上書きしている。
-# そのため、ローダーが読み込み前に退避した DCB_ENV_UPDATE_CHECK が空でなければ、それを環境の値とする。
-# ただし、今の UPDATE_CHECK がローダーの読んだ直後の値（DCB_ENV_UPDATE_CHECK_LOADED）と違えば、
-# このコマンドで利用者が明示したものとして今の値を採る（ローダーが退避し直す条件と同じ考え方）。
-if [[ -n "${DCB_ENV_UPDATE_CHECK-}" && "${UPDATE_CHECK-}" == "${DCB_ENV_UPDATE_CHECK_LOADED-}" ]]; then
-  ENV_UPDATE_CHECK="$DCB_ENV_UPDATE_CHECK"
-else
-  ENV_UPDATE_CHECK="${UPDATE_CHECK-}"
-fi
+# .env を読み込む（ローダーは source 専用・冪等。無ければ何もしない）。HTTPS_PROXY や GIT_IDENTITY_* など、
+# curl や子の bootstrap.sh --upgrade が使う値を届けるため、UPDATE_CHECK の有無によらず常に読む。
+# ローダーは UPDATE_CHECK を常に読み飛ばすので、読み込みは UPDATE_CHECK の優先順位を変えない。
 if [[ -f "$HELPER" ]]; then
   # shellcheck source=/dev/null
   . "$HELPER" 2>/dev/null || true
 fi
-if [[ -n "$ENV_UPDATE_CHECK" ]]; then
-  UPDATE_CHECK="$ENV_UPDATE_CHECK"
+# UPDATE_CHECK の優先順位: UPDATE_CHECK に値（空でない）があればそれを採る（環境の値、またはコマンドで
+# 明示した値）。無いときだけ、ローダーの値取得の関数で .env の UPDATE_CHECK を読む（読み方はローダーと
+# 同じ。変数は変えない）。値の比較による推測はしない。
+if [[ -z "${UPDATE_CHECK-}" ]] && declare -F __load_project_env_value >/dev/null 2>&1; then
+  ENV_UPDATE_CHECK="$(__load_project_env_value UPDATE_CHECK 2>/dev/null)" || ENV_UPDATE_CHECK=""
+  if [[ -n "$ENV_UPDATE_CHECK" ]]; then
+    UPDATE_CHECK="$ENV_UPDATE_CHECK"
+  fi
 fi
 
 # UPDATE_CHECK が止める値なら 0 を返す（止めない値なら 1）。
@@ -2362,10 +2368,12 @@ is_offline_rc() {
 # ai-playbook はタグだけを打って Release を作らないため、タグの一覧から vX.Y.Z の最大を取る。
 # latest-<部品> は版だけの 1 行。migrations-<部品> は「<版>=<移行の節がある版の空白区切り>」で、
 # 読む側は latest の版と一致するときだけ使う（rename は別々でも、組み合わせを読み違えない）。
+# 第 1 引数が preserve なら、失敗しても既存のキャッシュと今日の印を消さない（upgrade は今回取得できた部品
+# だけを使うので、古いキャッシュを使う心配が無い。直前に notify が取得した内容を消さないため）。
 REFRESHED=""
 refresh_cache() {
   local dir c cur slug tag t list rc offline="" failed="" today
-  local keep="" drop=""
+  local keep="" drop="" preserve="${1-}"
   REFRESHED=""
   dir="$(cache_dir)"
   mkdir -p "$dir" 2>/dev/null || return 1
@@ -2426,7 +2434,7 @@ refresh_cache() {
     mv -f "$RC_STAGE/latest-$c" "$dir/latest-$c" 2>/dev/null || rm -f "$dir/latest-$c"
   done
   for c in $drop; do
-    rm -f "$dir/latest-$c" "$dir/migrations-$c" 2>/dev/null
+    [[ "$preserve" == preserve ]] || rm -f "$dir/latest-$c" "$dir/migrations-$c" 2>/dev/null
   done
   rm -rf "$RC_TMP" "$RC_STAGE"
   RC_TMP="" RC_STAGE=""
@@ -2434,7 +2442,7 @@ refresh_cache() {
   # 成功した notify の印が残ると、失敗で消した部品を、その日のうちに取り直さないため。
   # 前の日の印は、どのみち今日の取り直しを止めないので、そのままにする。
   if [[ -n "$offline" || -n "$failed" ]]; then
-    if [[ "$(cat "$dir/checked" 2>/dev/null)" == "$today" ]]; then rm -f "$dir/checked" 2>/dev/null; fi
+    if [[ "$preserve" != preserve && "$(cat "$dir/checked" 2>/dev/null)" == "$today" ]]; then rm -f "$dir/checked" 2>/dev/null; fi
     [[ -z "$offline" ]] || return 1
     return 0
   fi
@@ -2472,14 +2480,19 @@ pend_names() {
 
 # 今日まだ問い合わせていなければ問い合わせ、追従の候補があれば通知を 1 行だけ出す（聞かない）。
 cmd_notify() {
-  local dir pend t c line="" cur latest
+  local dir pend t c line="" cur latest today
   dir="$(cache_dir)"
-  if [[ "$(cat "$dir/checked" 2>/dev/null || true)" != "${UPDATE_CHECK_TODAY:-$(date +%Y-%m-%d)}" ]]; then
+  # 今日の日付は 1 度だけ求め、外側の確認とロックの後の読み直しで同じ値を使う（日付をまたいで食い違わないように）。
+  today="${UPDATE_CHECK_TODAY:-$(date +%Y-%m-%d)}"
+  if [[ "$(cat "$dir/checked" 2>/dev/null || true)" != "$today" ]]; then
     # 更新は更新用の排他（refresh-lock）を取って行う（待たずに試し、取れなければ飛ばす。checked を書かないので、
     # 次の接続で取り直す）。聞く側のロック（lock）は取らないので、prompt が問いかけ中でも更新でき、更新中でも
     # prompt は問いかけられる。飛ばすのは更新だけで、通知は出す（キャッシュを読んで知らせるだけで、
     # 更新は rename 差し替えなので、ほかの端末が更新・問いかけの最中でも一貫した状態を読める）。
-    if acquire_lock refresh-lock 8; then
+    # ロックを取ったあとで checked を読み直す。ほかの notify が、こちらの確認とロックのあいだに更新を
+    # 終えていれば、同じ日に取り直さない（取り直して失敗すると、相手が取得したキャッシュと今日の印を消すため）。
+    if acquire_lock refresh-lock 8 \
+      && [[ "$(cat "$dir/checked" 2>/dev/null || true)" != "$today" ]]; then
       refresh_cache || true
     fi
   fi
@@ -2490,7 +2503,7 @@ cmd_notify() {
     cur="$(comp_cur "$c")"
     line="${line:+$line, }$(comp_repo "$c") $cur -> $latest"
   done
-  echo "$LOG_PREFIX 新しい版があります: $line。対話のシェルで追従できます（bash scripts/update-check.sh upgrade でも追従できます）。止めるには UPDATE_CHECK=off（.env）"
+  echo "$LOG_PREFIX 新しい版があります: $line。対話のシェルで追従できます（bash scripts/update-check.sh upgrade でも追従できます）。止めるには UPDATE_CHECK=off（環境の値。無ければ .env の値）"
   return 0
 }
 
@@ -2559,14 +2572,31 @@ acquire_lock() {
   return 0
 }
 
-# 作業用のブランチを切る（既定ブランチの上にいるときだけ）。切ったら名前を $BRANCH_MADE へ、
-# 元のブランチを $BRANCH_ORIG へ入れる。
-BRANCH_MADE=""
-BRANCH_ORIG=""
-prepare_branch() {
-  local want="$1" cur def n name why=""
+# 作業用のブランチの名前の元（追従する版から決める）。$1 = DCB の版（上げないなら空）、$2 = ai-playbook の版（同）。
+# 問いかけ・手で呼ぶ upgrade の案内・prepare_branch が同じ名前を使うよう、決め方はここにだけ置く。
+follow_branch_name() {
+  local ver_dcb="$1" ver_pb="$2" bname
+  if [[ -n "$ver_dcb" ]]; then
+    bname="chore/update-dcb-$ver_dcb"
+    [[ -z "$ver_pb" ]] || bname="$bname-playbook-$ver_pb"
+  else
+    bname="chore/update-playbook-$ver_pb"
+  fi
+  printf '%s' "$bname"
+}
+
+# 追従で作業用のブランチを切るかを決める（git は変えない）。結果:
+#   BRANCH_PLAN     = make（切る）/ stay（今のブランチの上で追従する）/ none（git のブランチの上ではない）
+#   BRANCH_PLAN_CUR = 今のブランチ
+#   BRANCH_PLAN_WHY = 切る理由（make のとき）
+# 既定ブランチの判断（origin/HEAD が無いときの扱い。#634）は、prepare_branch と問いかけで共有する。
+BRANCH_PLAN="" BRANCH_PLAN_CUR="" BRANCH_PLAN_WHY=""
+plan_branch() {
+  local cur def
+  BRANCH_PLAN="none" BRANCH_PLAN_CUR="" BRANCH_PLAN_WHY=""
   git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   cur="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 0
+  BRANCH_PLAN_CUR="$cur"
   def="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || def=""
   def="${def#origin/}"
   # origin/HEAD が無ければ、既定ブランチを推定しない（main と master が両方あると取り違えるため。
@@ -2578,28 +2608,58 @@ prepare_branch() {
     for b in main master; do
       if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$b"; then has_default="yes"; fi
     done
-    [[ -z "$has_default" || "$cur" == main || "$cur" == master ]] || return 0
+    if [[ -n "$has_default" && "$cur" != main && "$cur" != master ]]; then BRANCH_PLAN="stay"; return 0; fi
+    BRANCH_PLAN="make"
     if [[ -n "$has_default" ]]; then
-      why="origin/HEAD が無いため、main / master の上を既定ブランチの上とみなして"
+      BRANCH_PLAN_WHY="origin/HEAD が無いため、main / master の上を既定ブランチの上とみなして"
     else
-      why="既定ブランチを判断できなかった（origin/HEAD も main / master も無い）ため、念のため"
+      BRANCH_PLAN_WHY="既定ブランチを判断できなかった（origin/HEAD も main / master も無い）ため、念のため"
     fi
   elif [[ "$cur" != "$def" ]]; then
-    return 0
+    BRANCH_PLAN="stay"
   else
-    why="既定ブランチ（$def）の上だったので"
+    BRANCH_PLAN="make"
+    BRANCH_PLAN_WHY="既定ブランチ（$def）の上だったので"
   fi
-  name="$want"; n=1
+  return 0
+}
+
+# 切るブランチの実際の名前（$1 = 名前の元。同名が既にあれば -2, -3 を付ける）。
+unique_branch_name() {
+  local want="$1" name n=1
+  name="$want"
   while git -C "$ROOT" show-ref --verify --quiet "refs/heads/$name"; do
     n=$((n + 1)); name="$want-$n"
   done
+  printf '%s' "$name"
+}
+
+# 追従で何が起きるかを 1 文で出す（作業ツリーのパスと、切るブランチ／追従するブランチ）。$1 = 名前の元。
+branch_plan_text() {
+  plan_branch
+  case "$BRANCH_PLAN" in
+    make) printf '作業ツリー %s で、作業用のブランチ %s を切って追従します' "$ROOT" "$(unique_branch_name "$1")" ;;
+    stay) printf '作業ツリー %s で、今のブランチ %s の上で追従します' "$ROOT" "$BRANCH_PLAN_CUR" ;;
+    *)    printf '作業ツリー %s で、ブランチは切らずに追従します（git のブランチの上ではありません）' "$ROOT" ;;
+  esac
+}
+
+# 作業用のブランチを切る（既定ブランチの上にいるときだけ）。切ったら名前を $BRANCH_MADE へ、
+# 元のブランチを $BRANCH_ORIG へ入れる。
+BRANCH_MADE=""
+BRANCH_ORIG=""
+prepare_branch() {
+  local want="$1" name
+  plan_branch
+  [[ "$BRANCH_PLAN" == make ]] || return 0
+  name="$(unique_branch_name "$want")"
   if ! git -C "$ROOT" switch -c "$name" >/dev/null 2>&1; then
     echo "$LOG_PREFIX 作業用のブランチ $name を切れませんでした。何も変えずに止めます。" >&2
     return 1
   fi
   BRANCH_MADE="$name"
-  BRANCH_ORIG="$cur"
-  echo "$LOG_PREFIX ${why}、作業用のブランチ $name を切りました。"
+  BRANCH_ORIG="$BRANCH_PLAN_CUR"
+  echo "$LOG_PREFIX ${BRANCH_PLAN_WHY}、作業用のブランチ $name を切りました。"
   return 0
 }
 
@@ -2703,12 +2763,10 @@ do_upgrade() {
   fi
   echo "$LOG_PREFIX bootstrap.sh $use_tag を取得し、SHA256SUMS と照合しました。"
 
-  if [[ -n "$want_dcb" ]]; then
-    wantbranch="chore/update-dcb-$latest_dcb"
-    [[ -z "$want_pb" ]] || wantbranch="$wantbranch-playbook-$latest_pb"
-  else
-    wantbranch="chore/update-playbook-$latest_pb"
-  fi
+  # 名前には、追従する部品の版だけを入れる（追従しない部品の最新版を入れると、問いかけで示した名前と食い違う）。
+  wantbranch="$(follow_branch_name "${want_dcb:+$latest_dcb}" "${want_pb:+$latest_pb}")"
+  # 問いかけを経ない（手で呼ぶ upgrade）ときは、追従を始める前に何が起きるかを 1 行出す。
+  [[ -n "$from_prompt" ]] || echo "$LOG_PREFIX $(branch_plan_text "$wantbranch")。"
   if ! prepare_branch "$wantbranch"; then
     rm -rf "$work"
     return 1
@@ -2807,7 +2865,8 @@ cmd_prompt() {
     done
     return 0
   fi
-  printf '追従しますか？ [y/N] '
+  # 追従する作業ツリーと、切る（または乗る）ブランチを問いかけの文に含める。名前は prepare_branch と同じ関数で決める。
+  printf '%s。追従しますか？ [y/N] ' "$(branch_plan_text "$(follow_branch_name "$shown_dcb" "$shown_playbook")")"
   ans=""
   read -r ans || ans=""
   case "$ans" in
@@ -2838,7 +2897,7 @@ cmd_upgrade() {
   fi
   # 取得の結果は部品ごとに見る。今回取得できた部品だけを対象にする（取得できなかった部品は、
   # 前の日・同じ日のキャッシュがあっても使わない）。どちらも取得できなければ、「すでに最新」と言わずに失敗で終える。
-  refresh_cache || true
+  refresh_cache preserve || true
   if [[ -z "$REFRESHED" ]]; then
     echo "$LOG_PREFIX 最新の版を取得できなかったため、追従するか判断できません（オフライン・GitHub の不調・API の制限）。時間をおいて、もう一度実行してください。" >&2
     return 1
@@ -4129,19 +4188,25 @@ CNS_PROBE='
     printf "%s\n" "$before"
     exit 0
   fi
-  # ローダーが内部用に export する DCB_ENV_UPDATE_CHECK（.env を読む前の UPDATE_CHECK の退避）は、
-  # .env のキーではない。ソース前の一覧へ足して、差分に現れないようにする。
-  before="$(printf "%s\n" "$before" DCB_ENV_UPDATE_CHECK DCB_ENV_UPDATE_CHECK_LOADED | sort -u)"
   . "$loader" || exit 3
   after="$(compgen -e | sort)"
   keys="$(comm -13 <(printf "%s\n" "$before") <(printf "%s\n" "$after"))"
+  # ローダーは UPDATE_CHECK を読み飛ばす（変数が変わらず、差分に現れない）。.env / .env.example に
+  # あるキーとして数えるため、ローダーの値取得の関数で読む。
+  uc=""; uc_found=0
+  if uc="$(__load_project_env_value UPDATE_CHECK)"; then
+    uc_found=1
+    if [ -n "$keys" ]; then keys="$keys
+UPDATE_CHECK"; else keys="UPDATE_CHECK"; fi
+  fi
   if [ "$mode" = keys ]; then
     printf "%s\n" "$keys"
     exit 0
   fi
   printf "%s\n" "$keys" | while IFS= read -r k; do
     [ -n "$k" ] || continue
-    if [ -n "${!k}" ]; then printf "%s\n" "$k"; fi
+    if [ "$k" = UPDATE_CHECK ] && [ "$uc_found" = 1 ]; then v="$uc"; else v="${!k}"; fi
+    if [ -n "$v" ]; then printf "%s\n" "$k"; fi
   done
   exit 0
 '
@@ -8017,7 +8082,13 @@ set -uo pipefail
 for_each_clause() {
   local handler="$1" text="$2"
   local i n c
-  local word="" have_word=0 word_quoted=0 word_start=-1
+  # ${text:i:1} は 1 回ごとに先頭から i まで数えるため、1 文字ずつ取り出すと走査全体が
+  # 長さの 2 乗になる（#647。LC_ALL=C でも同じ）。そこで text から 512 文字の塊 blk を
+  # 切り出し、塊の中の位置 k で 1 文字を読む。塊の取り直しは 500 文字ごとなので、
+  # 塊の中を読む費用は一定で、先読み（k + 1）も塊の中に収まる。ロケールは変えない
+  # （文字コードによっては、バイト単位で数えると 2 バイト目を区切りと取り違える）。
+  local blk="" blk_start=0 k=0 word_raw=""
+  local word="" have_word=0 word_quoted=0
   local in_squote=0 in_dquote=0
 
   clause_words=()
@@ -8027,10 +8098,16 @@ for_each_clause() {
   n=${#text}
 
   for ((i = 0; i < n; i++)); do
-    c="${text:i:1}"
+    if ((i == 0 || i - blk_start >= 500)); then
+      blk_start=$i
+      blk="${text:i:512}"
+    fi
+    k=$((i - blk_start))
+    c="${blk:k:1}"
 
     if [[ $in_squote -eq 1 ]]; then
       clause_text+="$c"
+      word_raw+="$c"
       if [[ "$c" == "'" ]]; then
         in_squote=0
       else
@@ -8041,15 +8118,18 @@ for_each_clause() {
       continue
     fi
     if [[ $in_dquote -eq 1 ]]; then
+      word_raw+="$c"
       if [[ "$c" == '"' ]]; then
         in_dquote=0
         clause_text+="$c"
       elif [[ "$c" == $'\\' ]]; then
         clause_text+="$c"
         i=$((i + 1))
+        k=$((k + 1))
         if [[ $i -lt $n ]]; then
-          clause_text+="${text:i:1}"
-          word+="${text:i:1}"
+          clause_text+="${blk:k:1}"
+          word_raw+="${blk:k:1}"
+          word+="${blk:k:1}"
           have_word=1
           word_quoted=1
         fi
@@ -8064,43 +8144,32 @@ for_each_clause() {
 
     case "$c" in
       "'")
-        # クォートが開いた時点で「語が始まった」ことを記録する。空クォート
-        # （'' / ""）は中身の文字を 1 つも追加しないため、内容が付くときにだけ
-        # have_word を立てる実装だと、空クォートだけの語はいつまでも
-        # have_word=0 のまま扱われる（実測）。その結果、空白や区切り文字に
-        # 達しても「語を確定させて word_start をリセットする」処理
-        # （下の空白・区切り文字の分岐、いずれも have_word -eq 1 を条件にする）
-        # が走らず、word_start が空クォートの開始位置に残り続ける。次の語の
-        # 先頭でも word_start が -1 に戻っていないため上書きされず、
-        # clause_word_raw の切り出しに直前の空クォートや区切り文字まで
-        # 巻き込んでしまい、環境変数代入の判定（^[A-Za-z_][A-Za-z0-9_]*=）が
-        # raw の先頭に来るはずの文字の前へ無関係な文字が挟まって外れる
-        # （実測: `echo '' ; FOO=bar gh pr merge 1` が素通りしていた）。逆に
-        # `'' gh pr merge 1` では、空クォートが語として clause_words に入らない
-        # ため gh が誤って先頭語として扱われ、逆方向の誤検知も起きていた
-        # （実測）。クォートが開いた瞬間に have_word と word_quoted を立てる
-        # ことで、中身が空でも「クォートで作った語」を 1 つの語として確定
-        # できるようにする。
-        [[ $word_start -eq -1 ]] && word_start=$i
+        # クォートが開いた時点で have_word と word_quoted を立てる。空クォート
+        # （'' / ""）は中身の文字を足さないため、内容が付くときにだけ立てる実装だと、
+        # 空クォートだけの語が確定されず、次の語と混ざる（実測: `echo '' ; FOO=bar gh pr merge 1`
+        # が素通りし、`'' gh pr merge 1` では gh が誤って先頭語になっていた）。
         have_word=1
         word_quoted=1
         in_squote=1
         clause_text+="$c"
+        word_raw+="$c"
         ;;
       '"')
-        [[ $word_start -eq -1 ]] && word_start=$i
         have_word=1
         word_quoted=1
         in_dquote=1
         clause_text+="$c"
+        word_raw+="$c"
         ;;
       $'\\')
-        [[ $word_start -eq -1 ]] && word_start=$i
         clause_text+="$c"
+        word_raw+="$c"
         i=$((i + 1))
+        k=$((k + 1))
         if [[ $i -lt $n ]]; then
-          clause_text+="${text:i:1}"
-          word+="${text:i:1}"
+          clause_text+="${blk:k:1}"
+          word_raw+="${blk:k:1}"
+          word+="${blk:k:1}"
           have_word=1
           word_quoted=1
         fi
@@ -8110,11 +8179,11 @@ for_each_clause() {
         if [[ $have_word -eq 1 ]]; then
           clause_words+=("$word")
           clause_word_quoted+=("$word_quoted")
-          clause_word_raw+=("${text:word_start:i-word_start}")
+          clause_word_raw+=("$word_raw")
+          word_raw=""
           word=""
           have_word=0
           word_quoted=0
-          word_start=-1
         fi
         ;;
       '{')
@@ -8129,13 +8198,13 @@ for_each_clause() {
         # の引数でしかなく実際には実行されない）のような無害な文字列まで拾って
         # しまう（実測）。
         if [[ $have_word -eq 0 ]] && _clause_prefix_is_reserved_only \
-          && { [[ "${text:$((i + 1)):1}" == ' ' ]] \
-            || [[ "${text:$((i + 1)):1}" == $'\t' ]] \
-            || [[ "${text:$((i + 1)):1}" == $'\n' ]]; }; then
+          && { [[ "${blk:k+1:1}" == ' ' ]] \
+            || [[ "${blk:k+1:1}" == $'\t' ]] \
+            || [[ "${blk:k+1:1}" == $'\n' ]]; }; then
           :
         else
-          [[ $word_start -eq -1 ]] && word_start=$i
           clause_text+="$c"
+          word_raw+="$c"
           word+="$c"
           have_word=1
         fi
@@ -8144,11 +8213,11 @@ for_each_clause() {
         if [[ $have_word -eq 1 ]]; then
           clause_words+=("$word")
           clause_word_quoted+=("$word_quoted")
-          clause_word_raw+=("${text:word_start:i-word_start}")
+          clause_word_raw+=("$word_raw")
+          word_raw=""
           word=""
           have_word=0
           word_quoted=0
-          word_start=-1
         fi
         if [[ -n "$clause_text" || ${#clause_words[@]} -gt 0 ]]; then
           "$handler"
@@ -8159,13 +8228,13 @@ for_each_clause() {
         clause_text=""
         # && / || の 2 文字目は読み飛ばす（境界としては 1 回でよい）。
         if { [[ "$c" == '&' ]] || [[ "$c" == '|' ]]; } \
-          && [[ "${text:$((i + 1)):1}" == "$c" ]]; then
+          && [[ "${blk:k+1:1}" == "$c" ]]; then
           i=$((i + 1))
         fi
         ;;
       *)
-        [[ $word_start -eq -1 ]] && word_start=$i
         clause_text+="$c"
+        word_raw+="$c"
         word+="$c"
         have_word=1
         ;;
@@ -8175,7 +8244,8 @@ for_each_clause() {
   if [[ $have_word -eq 1 ]]; then
     clause_words+=("$word")
     clause_word_quoted+=("$word_quoted")
-    clause_word_raw+=("${text:word_start:n-word_start}")
+    clause_word_raw+=("$word_raw")
+    word_raw=""
   fi
   if [[ -n "$clause_text" || ${#clause_words[@]} -gt 0 ]]; then
     "$handler"
@@ -8480,6 +8550,16 @@ squash_ci_skip_check() {
   squash_ci_skip_detail="$overall_detail"
 }
 
+# 走査の前の素通しに使う判定。クォートとバックスラッシュを取り除いた文字列に merge が
+# あるかを返す（0 = ある、1 = 無い）。バイト単位の照合でよいので LC_ALL=C にする。
+# 取り除く文字が何バイト目に現れても、取りこぼす側（merge を見落とす側）には
+# 振れない。local なので関数を抜ければ元のロケールへ戻る。
+may_contain_merge() {
+  local LC_ALL=C
+  local stripped="${1//[\'\"\\]/}"
+  [[ "$stripped" == *merge* ]]
+}
+
 payload="$(cat)"
 
 reason=""
@@ -8506,7 +8586,9 @@ else
     target="$payload"
   fi
 
-  # バックスラッシュ行継続（\ + 改行）だけを空白へ正規化する。判定にのみ使い、
+  # バックスラッシュ行継続（\ + 改行）だけを取り除く（空白には置き換えない。bash は
+  # この 2 文字を何も無かったものとして扱うので、`gh pr mer\<改行>ge` は `gh pr merge`
+  # として走る。空白にすると `mer ge` に割れて検知を抜ける）。判定にのみ使い、
   # payload・target 自体や理由文は書き換えない。長い REST 呼び出しを \ で複数行に
   # 分けるのは普通の書き方で、-XPUT / --method=PUT と同じ「うっかり実行」側にあたる。
   # 分けて書くと pulls/<n>/merge と PUT が別行になり、REST 判定の同一節条件が外れて
@@ -8519,8 +8601,20 @@ else
   # CRLF を先に処理する。LF だけを落とすと \ + CR が残り、CR が語末境界として働いて
   # 判定が外れる。CRLF がこのフックへ届く経路は実測できていないが、置換 1 行で
   # 恒久的に問いを消せるため入れておく。
-  norm_target="${target//$'\\\r\n'/ }"
-  norm_target="${norm_target//$'\\\n'/ }"
+  norm_target="${target//$'\\\r\n'/}"
+  norm_target="${norm_target//$'\\\n'/}"
+
+  # 走査の前の素通し（#647）。検知する 3 つの綴り（gh pr merge / pulls/<n>/merge と
+  # PUT / mergePullRequest）はどれも、語として merge を含む。語はクォートと
+  # バックスラッシュを剥がして作られる（m"er"ge、m\erge も merge になる）ので、
+  # それらを取り除いた文字列に merge が無ければ、解析しても何も見つからない。
+  # 取りこぼさない側に倒すため、迷う形（クォートで割った綴りなど）は取り除いて
+  # 照合し、merge が見つかれば走査へ進む。ペイロード全体を対象にする場合
+  # （extracted=no）も、照合する綴りは merge を含むので同じ条件で足りる。
+  # バイト単位で照合するので長いコマンドでも線形で終わる。
+  if ! may_contain_merge "$norm_target"; then
+    exit 0
+  fi
 
   # 語末の境界。空白か行末だけにすると、JSON の引用符（"gh pr merge"）に隣接した形を
   # 取りこぼす。逆に境界を置かないと gh pr mergequeue のような別サブコマンドまで拾う。
@@ -11579,6 +11673,43 @@ SESSION_HOST_LABEL=
 LBLTMPL
 }
 
+# 第二意見のエンジンとして .env.example へ記入する値を標準出力へ返す（決まらなければ空）。
+# build_second_opinion_engine_block と build_gemini_api_key_block が同じ決め方を使う。
+# 優先順: --second-opinion-engine の指定 > gemini を選んだ構成 > codex / antigravity の片方だけ。
+resolve_second_opinion_engine_default() {
+  if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then printf '%s' "$SECOND_OPINION_ENGINE_OPT"
+  elif has_with gemini; then printf 'gemini'
+  elif has_with codex && ! has_with antigravity; then printf 'codex'
+  elif has_with antigravity && ! has_with codex; then printf 'antigravity'
+  fi
+}
+
+# .env.example の __GEMINI_API_KEY_LINES__。引数 $1 は resolve_second_opinion_engine_default の結果。
+# 欄を出さないのは、エンジンが codex / antigravity に決まっていて、かつ --with-gemini を選んでいない
+# ときだけ。--with-gemini を選んだ構成は、エンジンを固定しても gemini の CLI が入るので欄が要る。
+# 先頭の空行はこのブロックが持つ（欄が無いとき、直後のエンジンの欄の空行と 2 つ続かないため）。
+build_gemini_api_key_block() {
+  if gemini_key_hidden "$1"; then printf ''; return; fi
+  printf '\n%s\n%s' \
+    '# Gemini API キー（第二意見レビュー scripts/second-opinion-review.sh が読む）' \
+    'GEMINI_API_KEY='
+}
+
+# GEMINI_API_KEY の欄を出さない構成なら 0。引数 $1 はエンジンの記入値。
+gemini_key_hidden() {
+  has_with gemini && return 1
+  [[ "$1" == "codex" || "$1" == "antigravity" ]]
+}
+
+# build_second_opinion_engine_block の雛形（標準入力）に、エンジンの記入値とキーの欄の文言を埋める。
+# 使い方: second_opinion_engine_fill <エンジンの記入値> <KEY_LINE の文言> <KEY_NOTE の文言> < 雛形
+second_opinion_engine_fill() {
+  local engine_default="$1" key_line="$2" key_note="$3" t
+  t="$(sed "s|__ENGINE_DEFAULT__|$engine_default|")"
+  t="${t//__KEY_LINE__/$key_line}"
+  printf '%s\n' "${t//__KEY_NOTE__/$key_note}"
+}
+
 # 選択した AI ツールの install 行を生成する（install-ai-tools.sh の __AI_INSTALL_LINES__）。
 # トークン分岐は行わない。未選択なら空。
 # .env.example の __SECOND_OPINION_ENGINE_LINES__。第二意見のエンジン選択。
@@ -11588,6 +11719,7 @@ LBLTMPL
 # ときだけ出す。常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
 # 値は、選んだエンジンから一意に決まるときだけ記入済みにする（下記）。
 build_second_opinion_engine_block() {
+  # $1 は resolve_second_opinion_engine_default の結果（キーの欄と同じ判断を使う）
   has_with antigravity || has_with codex || { printf ''; return; }
 
   # 値は、選んだエンジンから一意に決まるときだけ記入済みにする。
@@ -11598,15 +11730,15 @@ build_second_opinion_engine_block() {
   # - gemini を選ばず antigravity と codex の両方を選んだときは、一意に決まらないので空のまま
   #   （既定の gemini へ落ちたことは reviewer の通知が知らせる）。
   # - --second-opinion-engine の指定があれば、上のどれよりも優先してその値（検証済み）。
-  local engine_default=""
-  if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then engine_default="$SECOND_OPINION_ENGINE_OPT"
-  elif has_with gemini; then engine_default="gemini"
-  elif has_with codex && ! has_with antigravity; then engine_default="codex"
-  elif has_with antigravity && ! has_with codex; then engine_default="antigravity"
+  local engine_default="$1" key_note="" key_line=""
+  # キーの欄が無い構成では、読み手に見えないキーを指さない。
+  if ! gemini_key_hidden "$engine_default"; then
+    key_note="GEMINI_API_KEY は使わない。"
+    key_line=$'\n#\n# いずれも GEMINI_API_KEY は使わない。'
   fi
 
   if has_with antigravity && has_with codex; then
-    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
+    cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
 # 第二意見レビューのエンジン（gemini | antigravity | codex）。空なら gemini。
 # gemini も選んで生成した構成では gemini を記入済みで出す。
@@ -11616,9 +11748,7 @@ build_second_opinion_engine_block() {
 # 対応しない。初回は対話で `agy` を起動してログインすること。
 #
 # codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
-# 対話で `codex login` を通すこと。
-#
-# いずれも GEMINI_API_KEY は使わない。
+# 対話で `codex login` を通すこと。__KEY_LINE__
 SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 
 # 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
@@ -11627,14 +11757,14 @@ SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 SECOND_OPINION_MODEL=
 ENGTMPL
   elif has_with codex; then
-    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
+    cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
 # 第二意見レビューのエンジン（gemini | codex）。空なら gemini。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、codex だけなら codex）を記入済みで出す。
 # 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
 # codex（Codex CLI）は ChatGPT アカウントの OAuth 認証（または API キー）。初回は
-# 対話で `codex login` を通すこと。GEMINI_API_KEY は使わない。
+# 対話で `codex login` を通すこと。__KEY_NOTE__
 SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 
 # 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
@@ -11642,15 +11772,14 @@ SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 SECOND_OPINION_MODEL=
 ENGTMPL
   else
-    cat <<'ENGTMPL' | sed "s|__ENGINE_DEFAULT__|$engine_default|"
+    cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
 # 第二意見レビューのエンジン（gemini | antigravity）。空なら gemini。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、antigravity だけなら antigravity）を記入済みで出す。
 # 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
 # antigravity（Antigravity CLI）は Google アカウントの OAuth 認証で、API キーに
-# 対応しない。初回は対話で `agy` を起動してログインすること。GEMINI_API_KEY は
-# 使わない。
+# 対応しない。初回は対話で `agy` を起動してログインすること。__KEY_NOTE__
 SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 ENGTMPL
   fi
@@ -12006,6 +12135,10 @@ build_volume_section_block() {
 # 止める順は seccomp → AppArmor なので、AppArmor だけ外しても足りない）。Docker Desktop
 # には AppArmor が無く、apparmor=unconfined は効き目が無いだけで害は無い。
 # systempaths=unconfined は要らない（codex は /proc の mount の失敗を自分で避ける）。
+# 第二意見（second-opinion-review.sh）の起動のしかた（env -i、ツールを --disable、
+# --sandbox read-only）でも外せない: ツールのコマンドが走らなくても、codex は起動のたびに
+# bwrap を能力の確認として起動する（bwrap --unshare-user --unshare-net --ro-bind / / /bin/true。
+# codex 0.162.1 を strace で実測、#649）。緩和を外した環境での挙動は未実測。
 # 隔離を弱めるので、サンドボックスを使う codex を選んだ構成に限る。
 #
 # 置き場所が compose.yaml の security_opt ではなく devcontainer.json の securityOpt なのは、
@@ -12027,6 +12160,8 @@ build_security_opt_comment() {
   // ネイティブ Linux ではさらに AppArmor が mount を止める（片方だけ外しても動かない）。
   // コンテナの中から namespace の作成や mount ができるようになり、隔離が弱まる。
   // codex を使わなくなったら消してよい。
+  // 第二意見のようにツールを無効にした起動でも、codex は起動のたびに bwrap を
+  // 能力の確認として起動するので、codex を使う限りこの設定は残す。
   // compose.yaml の security_opt に置かないこと。go などの feature が同じ値を足すため、
   // Compose が重複を拒否してコンテナが起動しなくなる。
 BLK
@@ -12113,7 +12248,9 @@ render_content() {
   subst_block __LANGUAGE_EXTENSIONS__ "$(build_language_extensions_block)"
   subst_block __WITH_EXTENSIONS__ "$(build_with_extensions_block)"
   subst_block __MOUNT_OWNER_LINES__ "$(build_mount_owner_block)"
-  subst_block __SECOND_OPINION_ENGINE_LINES__ "$(build_second_opinion_engine_block)"
+  local so_engine; so_engine="$(resolve_second_opinion_engine_default)"
+  subst_block __GEMINI_API_KEY_LINES__ "$(build_gemini_api_key_block "$so_engine")"
+  subst_block __SECOND_OPINION_ENGINE_LINES__ "$(build_second_opinion_engine_block "$so_engine")"
   subst_block __SESSION_HOST_LABEL_LINES__ "$(build_session_host_label_block)"
   subst_block __VSCODE_SETTINGS__ "$(build_vscode_settings_block)"
   subst_block __ON_CREATE_COMMAND__ "$(build_on_create_command_block)"

@@ -6,6 +6,23 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.23.3
+
+### Summary
+- **`scripts/update-check.sh` の `UPDATE_CHECK` の優先順位を、推測に頼らない設計へ変えた**（ojos/ai-packages-dev#645）。v0.23.1・v0.23.2 では、`.env` の自動読み込みが `UPDATE_CHECK` を上書きしたうえで、上書き前の値を退避して推測していたため、コマンドで明示した値が、たまたま `.env` を読んだ直後の値と同じだと、退避した値が勝っていた。
+  - `scripts/load-project-env.sh` は、`.env` に `UPDATE_CHECK` があっても上書きしない。シェルの `UPDATE_CHECK` は、環境の値か、コマンドで明示した値のまま。
+  - `update-check.sh` は、`UPDATE_CHECK` に値があればそれを、無ければ `.env` の値を採る。どんな値の組み合わせでも、環境・明示した値が `.env` より優先される。
+  - 退避用の変数 `DCB_ENV_UPDATE_CHECK` / `DCB_ENV_UPDATE_CHECK_LOADED` はやめた。代わりに、ローダーに `.env` の 1 つのキーの値を返す関数 `__load_project_env_value` を足した。
+  - 通知の文言を「止めるには UPDATE_CHECK=off（環境の値。無ければ .env の値）」にした。
+- **接続時の確認（notify）が、ロックを取ったあとで今日の確認済みの印を読み直すようにした**（ojos/ai-packages-dev#643）。同時の接続で、片方の取得が終わったあとにもう片方が同じ日に取り直し、それが失敗すると、取得済みのキャッシュと印を消していた。手で呼ぶ `update-check.sh upgrade` の取得が失敗しても、既存のキャッシュと印は消さない。
+- **y で追従を始める前に、どの作業ツリーのどのブランチが動くかを示すようにした**（ojos/ai-packages-dev#650）。問いかけの文（と手で呼ぶ `upgrade`）に、追従する作業ツリーのパスと、切る作業用のブランチ（または上で追従する今のブランチ）の名前を出す。
+- **`.env.example` の `GEMINI_API_KEY` の欄は、第二意見のエンジンが codex / antigravity に決まっていて、かつ `--with-gemini` を選んでいない構成では出さないようにした**（ojos/ai-packages-dev#646）。エンジンが空（既定の gemini で回る）か gemini、または `--with-gemini` を選んだ構成では、今のとおり出す。
+- **`scripts/confirm-merge-hook.sh`（マージの直前に確認を挟むフック）が、長いコマンドで長さの 2 乗で遅くなっていたのを直した**（ojos/ai-packages-dev#647）。UTF-8 のロケールでは、20,000 文字のコマンドで 1 回あたり数秒かかり、Bash の呼び出しのたびに待たされていた。走査を長さにほぼ比例する形にし、検知の対象になりうる綴り（`merge`）を含まないコマンドは走査せずに通す。バックスラッシュと改行による行の継続を、bash と同じく取り除いて読むようにした（`gh pr mer\<改行>ge` も検知する）。
+- 雛形の `devcontainer.json` の、codex のための AppArmor / seccomp の緩和は残す。第二意見のようにツールを無効にした起動でも、codex は起動のたびに bwrap をサンドボックスの確認として起動することを確かめた（ojos/ai-packages-dev#649）。理由をコメントと README に書いた。
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** 変わる生成物は `scripts/update-check.sh`、`scripts/load-project-env.sh`、`scripts/check-no-secrets.sh`、`scripts/confirm-merge-hook.sh`、`.env.example`（構成による）。手を入れていれば `.dcb-new` が置かれる。
+- **追従したら、開いているシェルと tmux を開き直す。** v0.23.1・v0.23.2 のローダーは、`.env` の `UPDATE_CHECK` をシェルへ export していた。開いたままのシェル（と、そこから起動した tmux のサーバー）にはその値が残り、新しい `update-check.sh` は、それを環境の値として `.env` より優先する。開き直せば、`.env` の値が効く。
+
 ## v0.23.2
 
 ### Summary

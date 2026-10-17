@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.23.2`
+- `v0.23.3`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.23.2
+TAG=v0.23.3
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -135,7 +135,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.23.2
+TAG=v0.23.3
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +176,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.23.2
+TAG=v0.23.3
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -766,6 +766,8 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 
 - **実測した環境**: Ubuntu 26.04.1（カーネル 7.0.0-38、AppArmor 有効、`kernel.apparmor_restrict_unprivileged_userns = 1`）のネイティブの Docker Engine と、codex 0.160.0。既定と AppArmor だけ外した場合は `codex sandbox -- git status` が上の表の 1 行目で失敗し、2 つとも外すと通りました。ホストの `apparmor_restrict_unprivileged_userns` は、この失敗に関わっていませんでした。Docker Desktop（macOS）でも、既定のままでは同じ 1 行目で失敗し、2 つを外すと user namespace の作成と mount が通ることを確かめています。
 - **代償**: コンテナの中のプロセスが namespace を作り、mount できるようになります。Docker がコンテナに既定で掛けている隔離の 2 層を外すことになるので、`--with-codex` を選んだ構成に限っています。codex を使わなくなったら、`devcontainer.json` から `securityOpt`（とその説明のコメント）を消してください。
+- **第二意見（`scripts/second-opinion-review.sh --engine codex`）だけでも要るか**: 外せると言えないため、残しています。第二意見は codex を `env -i` で、ツールを `--disable` し、`--sandbox read-only` で起動するので、モデルのコマンドは走りません。それでも codex は起動のたびに、サンドボックスが使えるかの確認として `bwrap --unshare-user --unshare-net --ro-bind / / /bin/true` を起動します（codex 0.162.1 の第二意見 1 回を `strace -f -e trace=execve` で記録し、3 回の実行で bwrap が 3 回起動されることを確認）。この確認は namespace の作成を伴い、既定の seccomp が止める操作そのものです。緩和を外したコンテナでの実測は行っていないため、その場合に確認が失敗して第二意見が止まるのか、警告だけで動くのかは分かっていません。
+- **緩和を外してよいのは**、そのコンテナで codex を使わないときだけです（`--with-codex` を選ばない、または `devcontainer.json` から `securityOpt` を消す）。
 - **`systempaths=unconfined` は入れていません。** bwrap は `/proc` を新しく mount しようとして、Docker が `/proc` の一部を隠していることで拒まれますが、codex はこの失敗を自分で避けて動きます。外す範囲を広げずに済むので入れていません。
 - **Docker Desktop（macOS）** には AppArmor がなく、`apparmor=unconfined` は効き目がないだけで害はありません。止めているのは seccomp なので、Mac でもこの設定が要ります。
 
@@ -784,7 +786,7 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 
 `.env.example` が持つキー:
 
-- `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。
+- `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。**記入するエンジン（下の `SECOND_OPINION_ENGINE`）が `codex` / `antigravity` に決まっていて、かつ `--with-gemini` を選んでいないときだけ出しません**（gemini の CLI が入らず、どのエンジンも使わないため）。`--with-gemini` を選んだ構成は、エンジンを固定しても gemini の CLI が入るので出します。エンジンが gemini、空（既定の gemini で回る）、またはエンジンの欄自体が出ない構成でも出します。
 - `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-antigravity` / `--with-codex` を選んだときだけ出ます）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（既定の gemini は CLI もキーも無く、設定するまで使えないため）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら gemini）。**実際に使うエンジンが、これらの決め方と違うとき（例: gemini の CLI を入れたまま第二意見を codex で回す）は、`--second-opinion-engine <gemini|antigravity|codex>` で明示します。** 指定した値が最優先で記入されます。止まる条件と `--upgrade` の引き継ぎは、オプション一覧の `--second-opinion-engine` の項に従います。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
 - `GH_TOKEN` — GitHub の PAT。**上表の「コンテナ内でのログイン」に対する唯一の例外**です（下記「[GitHub 認証だけが例外である理由](#github-認証だけが例外である理由)」）。空にすれば従来どおり `gh auth login` の保存済み認証で動きます（**`GITHUB_TOKEN` も未設定であることが条件**。下記「[`GITHUB_TOKEN` は設定しない](#github_token-は設定しない)」）。
 - `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` — コミット identity。`scripts/setup-git-identity.sh` が local へ適用します。
@@ -953,7 +955,7 @@ bash scripts/check-no-secrets.sh   # 終了コード 0 / 標準出力 SECRETS_PA
 | エンジン | コマンド | 認証環境変数 | 導入経路 | 未導入・未認証時の挙動 |
 |----------|----------|--------------|-------------------|------------------------|
 | Claude | `claude` | `/login`（既定。トークン注入は任意） | `--with-claude` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は `/login` プロンプト表示（トークン運用は下記「Claude の認証」参照） |
-| Gemini | `gemini` | `.env` の `GEMINI_API_KEY` | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
+| Gemini | `gemini` | `.env` の `GEMINI_API_KEY`（`.env.example` の欄は、エンジンが codex / antigravity に決まり `--with-gemini` を選ばない構成では出ません） | `--with-gemini` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | API キー不足または API/認証エラーで失敗 |
 | Antigravity | `agy` | Google アカウントの **OAuth のみ**（API キー非対応） | `--with-antigravity` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時は応答を返さず終了（非対話ではツール実行許可を自動拒否し、診断は標準エラーへ出る） |
 | Copilot | `copilot` | GitHub 認証（`gh` / OAuth） | `--with-copilot` 指定時に `scripts/install-ai-tools.sh`（`postCreateCommand`）で導入 | 未認証時はログインプロンプト表示またはエラー終了 |
 | Codex  | `codex` | `.env` の `OPENAI_API_KEY` | 未対応（`--with-codex` は将来対応予定。現状は手動導入のみ） | バイナリ未導入または API キー未設定で失敗 |
@@ -990,7 +992,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 
 - `.devcontainer/devcontainer.json`（言語別 feature を反映。docker-compose ベースで `.devcontainer/compose.yaml` の `app` サービスを参照。`--with-codex` のときだけ、説明のコメント付きで `securityOpt` を持つ JSONC になる）
 - `.devcontainer/compose.yaml`（単一サービス `app` の compose 定義。compose 利用時は feature や devcontainer.json の mounts が適用されないため、docker socket を常に明示。認証用の永続 volume は `gh` を常時、cloud / AI CLI を `--with-*` 随伴で配置。`init: true` で PID 1 を Docker の組み込みの init にし、孤児になったプロセスを回収させる。PID 1 の `sleep infinity` は子を回収しないため、これが無いとゾンビが溜まり、数日でプロセス数の上限に達して `docker exec` もコンテナ内のセッションも止まる。既存の生成先は `--upgrade` で取り込んだあと、コンテナの作り直し（Rebuild）で効く）
-- `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY` / `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
+- `.env.example`（プロジェクト固有値の雛形。`GEMINI_API_KEY`（条件付き。上記）/ `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL`）
 - `scripts/fix-mount-owner.sh`（永続 volume のマウント先を remoteUser 所有へ戻す。`postCreateCommand` の先頭で実行）
 - `scripts/install-ai-tools.sh`（`postCreateCommand` の後段で実行。`--with-<ai>` で選んだ AI CLI だけを導入する。上記「AI CLI 導入挙動」参照）
 - `scripts/load-project-env.sh`（プロジェクト `.env` の優先読み込み。下記参照）
@@ -1054,7 +1056,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.23.2
+version=v0.23.3
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1342,14 +1344,14 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 生成した環境が、DCB と ai-playbook の古い版のまま気づかずに使われ続けないようにする仕組みです。生成物の `scripts/update-check.sh` が担い、**既定で有効**です（既存の利用者は次の `--upgrade` から）。
 
 - **確認:** 接続時（`postAttachCommand` の `scripts/on-attach.sh`）に、ORIGIN の版を GitHub の最新の安定版（DCB は `releases/latest`。プレリリースを除く。ai-playbook は Release を作らずタグだけを打つため、タグの一覧（`/repos/<owner>/ai-playbook/tags`。100 件ずつ。100 件未満のページが来るまで、上限 10 ページ）のうち `vX.Y.Z` の形（プレリリースの形を除く）の最大。認証なし）と比べ、新しければ通知を 1 行だけ出します。聞きません。`on-attach.sh` は端末の入力を受けられないためです。
-- **聞く:** 対話のシェル（`on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入します。端末が付いている対話のシェルで、今いるディレクトリがそのプロジェクトの中のときだけ。差し込みの印はプロジェクトごとです）で「追従しますか？ [y/N]」と聞きます。今の版と最新の版を示し、**「移行」の節がある版を 2 つ以上飛び越えるときは `[注意]` で目立たせます**（最新のタグの配布先の `CHANGELOG.md`（`raw.githubusercontent.com`）を読み、(今の版, 最新] の「## vX.Y.Z」の節のうち「### 移行」を持つ版を数えます。リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないためです。読めなければ、リリースノートを読む案内に留めます）。複数の端末が同時に開いても、聞く・追従するのは 1 つの端末だけです（`flock`。無い環境ではロックのディレクトリ）。
+- **聞く:** 対話のシェル（`on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入します。端末が付いている対話のシェルで、今いるディレクトリがそのプロジェクトの中のときだけ。差し込みの印はプロジェクトごとです）で「追従しますか？ [y/N]」と聞きます。今の版と最新の版を示し、**「移行」の節がある版を 2 つ以上飛び越えるときは `[注意]` で目立たせます**（最新のタグの配布先の `CHANGELOG.md`（`raw.githubusercontent.com`）を読み、(今の版, 最新] の「## vX.Y.Z」の節のうち「### 移行」を持つ版を数えます。リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないためです。読めなければ、リリースノートを読む案内に留めます）。問いかけの文には、**追従する作業ツリーのパスと、何が起きるか**を問いかけの文に含めます（既定ブランチの上なら「作業用のブランチ <名前> を切って追従します」、それ以外なら「今のブランチ <名前> の上で追従します」。名前は実際に切るブランチと同じ関数で決めます。`origin/HEAD` が無いときの扱いも同じです。専用の worktree は作らないので、プライマリの作業ツリーで y と答えると、そのブランチが動きます）。手で呼ぶ `upgrade` も、追従を始める前に同じ内容を 1 行出します。 複数の端末が同時に開いても、聞く・追従するのは 1 つの端末だけです（`flock`。無い環境ではロックのディレクトリ）。
 - **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方（`git restore .` と `git clean -fd`）を案内します。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。既定ブランチは `origin/HEAD` で判定します。`origin/HEAD` が無いときは推定せず、main / master のどちらかの上にいれば切ります（リモートへは問い合わせません）。問いかけで表示した版だけが、N の記録と y の追従の対象です（待っているあいだにキャッシュが更新されても、読み直しません）。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 未コミットの変更があるときは、差分が混ざるので追従せずに止めます。照合に通らないときは何も実行しません。
 - **N のとき:** その版のあいだは聞きません（通知も出しません）。さらに新しい版が出れば、また聞きます。
 - **手で追従する:** `bash scripts/update-check.sh upgrade`（最新を問い合わせて、y と同じ処理をします）。
 - **間引きと失敗:** 問い合わせは 1 日 1 回です。**取得をすべて終えた日だけ**数えます。どの部品の取得がどんな理由（通信ができない・HTTP のエラー・API の制限・形の不一致・`CHANGELOG.md` の取得の失敗）で失敗しても、その日の印を書かず、次の接続で取り直します（成功した部品は差し替え、失敗した部品の前の日のキャッシュは消します。更新は更新用のロック（`refresh-lock`）を取って行い、取れなければ（別の接続が更新中なら）更新を飛ばして、通知だけキャッシュから出します。問いかけのロックとは別なので、更新のあいだも問いかけは出ます）。`upgrade` は、今回の問い合わせで取得できた部品だけを対象にします（取得できなかった部品は、同じ日のキャッシュがあっても追従せず、そう報告します。どちらも取得できなければ失敗で終わります）。オフラインのマシンでは接続のたびに問い合わせます（最大 2 秒）。オフライン・API の失敗・制限は黙って通し（短いタイムアウト）、起動を止めません。端末が付いていないシェル（AI エージェント・CI・スクリプト）では何も聞かず、何も出しません。
 - **キャッシュ:** `${XDG_CACHE_HOME:-~/.cache}/dcb-update-check/<プロジェクトごとの鍵>/`。コミットしません。問い合わせの結果は、いったん作業用のファイルへ書いてから rename で差し替えます（先に消さないので、更新のあいだに prompt が読んでも一貫した状態を読めます）。今日の印（`checked`）は取得を終えてから最後に書きます。通信ができずに途中で抜けたときは書かず、前の日のキャッシュを消すので、次の接続で取り直します（`upgrade` は取得できなかったと報告して失敗で終わり、古い版へは追従しません）。`migrations-<部品>` は「<版>=<版の一覧>」で、`latest-<部品>` と版が一致するときだけ使います（別々の rename でも、組み合わせを読み違えません）。作業用のファイルは、中断（Ctrl-C など）でも片づけ、1 日より古い残りは次の取得の開始時に消します。
 - **確認の対象:** ORIGIN の `version=` が `vX.Y.Z` のときの DCB（取得元は `ojos/devcontainer-bootstrap`）。ai-playbook は、取得元が `tag`、またはリリースのタグの tarball の URL（`https://github.com/<owner>/ai-playbook/archive/refs/tags/<版>.tar.gz`）のときだけで、ほかの取得元（`adjacent` / `local` など）は確認しません。ORIGIN が無い、`version=` がリリースの版でない環境（この開発リポジトリを含む）では何もしません。
-- **止め方:** 生成時の `--no-update-check`（ORIGIN に記録し、`--upgrade` で引き継ぎます。戻すのは `--upgrade --update-check`）、または `UPDATE_CHECK=off`（`0` / `false` / `no` / `disabled` も同じ）。環境変数で設定すれば止まります（`.env` が読み込まれても環境の値が優先されます）。`.env` に書くときは、`.env.example` のコメントの行の `#` を外します。
+- **止め方:** 生成時の `--no-update-check`（ORIGIN に記録し、`--upgrade` で引き継ぎます。戻すのは `--upgrade --update-check`）、または `UPDATE_CHECK=off`（`0` / `false` / `no` / `disabled` も同じ）。環境変数で設定すれば止まります。`UPDATE_CHECK` に値（空でない）があれば、環境の値でも、コマンドで明示した値（`UPDATE_CHECK=off bash scripts/update-check.sh notify` など）でも、それを採ります。通知の末尾の「止めるには」も同じ順で、`UPDATE_CHECK=off`（環境の値。無ければ .env の値）と案内します。`.env` の `UPDATE_CHECK` は、`UPDATE_CHECK` に値が無いときだけ `update-check.sh` がローダーの値取得の関数（`__load_project_env_value`。変数は変えません）で読みます（`.env` の自動読み込み `load-project-env.sh` は `UPDATE_CHECK` だけ上書きしません。このキーを読むのは `update-check.sh` だけなので、対話のシェルの `UPDATE_CHECK` は `.env` の値を映しません）。`.env` に書くときは、`.env.example` のコメントの行の `#` を外します。
 
 ## Doctor 自己診断
 
