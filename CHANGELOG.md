@@ -6,6 +6,25 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.23.5
+
+### Summary
+- **`.env` に `UPDATE_CHECK=off` を書くと、`scripts/check-no-secrets.sh` が `SECRETS_FAIL` になっていたのを直した**（ojos/ai-packages-dev#657）。雛形の `.env.example` が案内するとおりに書いた `.env` で、キーの整合の検査が「.env にあるキーが .env.example に無い: UPDATE_CHECK」と読み、`verify.sh` と `loop-gate.sh` が止まっていた。雛形ではこの行がコメントなので、整合の検査では `UPDATE_CHECK` を数えない。`UPDATE_CHECK` の優先順位とローダーの読み飛ばしは変えていない。`.env` にだけある、ほかのキーは今のとおり失敗にする。
+- **`scripts/update-check.sh` の追従（問いかけの y・手で呼ぶ `upgrade`）が、台帳（`scripts/session-ledger.sh`）を確かめずに作業ツリーのブランチを切り替えていたのを直した**（ojos/ai-packages-dev#658）。追従の初めに、作業ツリーの git の登録を台帳へ出す。同じ作業ツリーに他のセッションの登録があれば、案内を出して何も変えずに止める。
+  - 確かめるのは、未コミットの変更の確認のすぐ後で、取得より前。
+  - 台帳は作業ツリーへ移ってから呼ぶ（呼び出し元の cwd に左右されない）。
+  - 持ち主の PID は update-check 自身なので、強制終了や端末を閉じても、プロセスが消えれば登録は失効する。
+  - 登録は、成功・失敗の各経路と EXIT・HUP の後始末で解放する。
+  - 台帳が無いとき、読み書きに失敗したときは、警告して通す。
+- **`scripts/confirm-merge-hook.sh` が、シングルクォートの中のバックスラッシュと改行まで行継続として取り除き、マージにならないコマンドにも確認を出していたのを直した**（ojos/ai-packages-dev#659）。`gh pr 'mer\<改行>ge' 1` には確認を出さない。
+  - クォートを見て継続を取り除くのは、bash の読みを確実に再現できる単純な形だけ。コマンドに `#`・`<<`・`$`・バッククォートのどれかが含まれれば、今までどおり継続を無条件に取り除く。読み違えが起きうる形で、確認を減らさないためである。
+  - クォートの外と二重引用符の中の継続は、今までどおり確認を出す。
+  - 継続の多い長いコマンド（大きなヒアドキュメントなど）は、merge を含まなければ今までどおりの速さで抜ける。
+
+### 移行
+- **`bootstrap.sh --upgrade` で追従する。** 変わる生成物は `scripts/check-no-secrets.sh`・`scripts/update-check.sh`・`scripts/confirm-merge-hook.sh`。
+- 手で行う作業は無い。`.env` に `UPDATE_CHECK=off` を書かずに避けていた生成先は、この版から `.env` で止めてよい。
+
 ## v0.23.4
 
 ### Summary

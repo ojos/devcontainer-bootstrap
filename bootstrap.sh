@@ -104,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.23.4"
+DCB_VERSION="v0.23.5"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -2126,7 +2126,10 @@ TMPL
 #
 # 追従の処理: 新しい bootstrap.sh と SHA256SUMS を取得して照合し、既定ブランチの上なら作業用の
 # ブランチを切ってから、ORIGIN を引き継ぐ --upgrade を流す。差分を作業ツリーに残して止め、
-# 変わったファイルと次の手順を出す。コミット・push・PR はしない。
+# 変わったファイルと次の手順を出す。コミット・push・PR はしない。ブランチを切る前に台帳
+# （session-ledger.sh）で、同じ作業ツリーの git の登録が他のセッションに無いかを確かめ、あれば
+# 何も変えずに止める。実行のあいだは自分の git の登録を持ち、終わったら（失敗でも）解放する。
+# 台帳の不具合は警告して通す（fail-open）。
 #
 # 何もしない条件（黙って 0 で終わる）:
 #   - 環境変数 UPDATE_CHECK が off（0 / false / no / disabled も同じ）
@@ -2520,10 +2523,62 @@ tty_ok() {
 # flock があれば flock -n（プロセスの終了で解放される）。無ければロックのディレクトリで簡易に
 # 排他する（持ち主の pid が消えていれば奪う）。UPDATE_CHECK_NO_FLOCK=1 は試験用。
 LOCK_DIRS=()
+
+# 追従のあいだの、作業ツリーでの git 操作の登録（共有の台帳。ai-playbook の「セッション間の協調」）。
+# 追従は prepare_branch の git switch と --upgrade の書き込みで作業ツリーを変える。人の対話シェルから
+# 走るため session-coord-hook.sh の対象外で、ここで自分から確かめる。台帳が無い・読み書きに失敗した
+# ときは警告して通す（fail-open。台帳の不具合で追従を止めない）。止めるのは、同じ作業ツリーに
+# 他のセッションの git の登録があるときだけ。
+LEDGER_SCRIPT="$HERE/session-ledger.sh"
+LEDGER_CALL="update-check-$$"
+LEDGER_HELD=""
+# 台帳を呼ぶ。台帳は呼び出しの cwd から置き場所（git の共通ディレクトリ）を決めるため、
+# session-coord-hook.sh と同じく作業ツリー $ROOT へ移ってから呼ぶ（$HOME や別のリポジトリから
+# 呼ばれても、違う台帳を見たり、LEDGER_SKIP で素通りしたりしない）。持ち主の PID はこのスクリプト
+# 自身（$$）にする。端末を閉じる・強制終了で解放し損ねても、プロセスが消えれば登録は失効する
+# （長く生きる祖先のプロセスを持ち主にすると、最大 8 時間ほかのセッションを止め続ける）。
+ledger_run() {
+  (cd "$ROOT" && SESSION_LEDGER_PID="$$" bash "$LEDGER_SCRIPT" "$@")
+}
+# 作業ツリー $ROOT の git の登録を確かめて、登録する。他のセッションの登録があれば案内を出して 1 を返す
+# （何も変えない）。登録できたら LEDGER_HELD を立てる。
+ledger_guard() {
+  local out rc
+  # git の作業ツリーでなければ、台帳の置き場所（git の共通ディレクトリ）が無い。確かめる対象も無い。
+  git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  if [[ ! -f "$LEDGER_SCRIPT" ]]; then
+    echo "$LOG_PREFIX 警告: $LEDGER_SCRIPT が無いため、台帳を確かめずに進めます。" >&2
+    return 0
+  fi
+  # claim は内部で衝突を調べ、拒否なら登録せずに 3 を返す。別に check は呼ばない。
+  out="$(ledger_run claim --call "$LEDGER_CALL" git "$ROOT" 2>&1)"; rc=$?
+  if [[ $rc -eq 3 ]]; then
+    echo "$LOG_PREFIX 同じ作業ツリー（$ROOT）で git を操作している、ほかのセッションの登録があります。ブランチを切らず、何も変えずに止めます。" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
+    echo "$LOG_PREFIX 相手が終わって登録を解放してから、もう一度実行してください（拒否を迂回して通しません）。" >&2
+    return 1
+  fi
+  if [[ $rc -ne 0 || "$out" == LEDGER_SKIP* ]]; then
+    echo "$LOG_PREFIX 警告: 台帳を読み書きできませんでした（終了コード $rc）。台帳を確かめずに進めます。" >&2
+    return 0
+  fi
+  LEDGER_HELD="yes"
+  return 0
+}
+# ledger_guard で登録した git の登録を解放する（登録していなければ何もしない）。失敗の経路でも呼ぶ。
+release_git_claim() {
+  [[ -n "$LEDGER_HELD" ]] || return 0
+  LEDGER_HELD=""
+  ledger_run release --call "$LEDGER_CALL" git "$ROOT" >/dev/null 2>&1 \
+    || echo "$LOG_PREFIX 警告: 台帳の git の登録を解放できませんでした（一定時間で失効します）。" >&2
+  return 0
+}
+
 # refresh_cache の作業用のファイル。中断（Ctrl-C・接続の打ち切り）でも片づける。
 RC_TMP="" RC_STAGE=""
 cleanup_exit() {
   local d
+  release_git_claim
   for d in ${LOCK_DIRS[@]+"${LOCK_DIRS[@]}"}; do rm -rf "$d" 2>/dev/null; done
   [[ -z "$RC_TMP" ]] || rm -rf "$RC_TMP" 2>/dev/null
   [[ -z "$RC_STAGE" ]] || rm -rf "$RC_STAGE" 2>/dev/null
@@ -2532,6 +2587,8 @@ cleanup_exit() {
 trap cleanup_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# 端末を閉じたとき（SIGHUP）も、EXIT の後始末（台帳の登録の解放を含む）を通して抜ける。
+trap 'exit 129' HUP
 acquire_lock() {
   local name="${1:-lock}" fd="${2:-9}" dir pid
   dir="$(cache_dir)"
@@ -2746,11 +2803,15 @@ do_upgrade() {
     echo "$LOG_PREFIX 作業ツリーに未コミットの変更があるため、追従しません（差分が混ざるため）。コミットか退避をしてからやり直してください。" >&2
     return 1
   fi
+  # 取得（最大 60 秒ずつ）の前に、台帳で他のセッションの git の登録を確かめる（あれば何も変えずに止める）。
+  # 以降の失敗の経路では、登録を解放してから戻る。
+  ledger_guard || return 1
 
-  work="$(mktemp -d "${TMPDIR:-/tmp}/dcb-update-upgrade.XXXXXX" 2>/dev/null)" || return 1
+  work="$(mktemp -d "${TMPDIR:-/tmp}/dcb-update-upgrade.XXXXXX" 2>/dev/null)" || { release_git_claim; return 1; }
   base="https://github.com/$DCB_SLUG/releases/download/$use_tag"
   if ! fetch "$base/bootstrap.sh" "$work/bootstrap.sh" 60 || ! fetch "$base/SHA256SUMS" "$work/SHA256SUMS" 60; then
     echo "$LOG_PREFIX $use_tag の bootstrap.sh か SHA256SUMS を取得できませんでした。何も変えずに止めます。" >&2
+    release_git_claim
     rm -rf "$work"
     return 1
   fi
@@ -2758,6 +2819,7 @@ do_upgrade() {
   actual="$(sha256_of "$work/bootstrap.sh")" || actual=""
   if [[ -z "$expected" || -z "$actual" || "$expected" != "$actual" ]]; then
     echo "$LOG_PREFIX bootstrap.sh のハッシュが SHA256SUMS と一致しません（または照合できません）。実行せずに止めます。" >&2
+    release_git_claim
     rm -rf "$work"
     return 1
   fi
@@ -2768,6 +2830,7 @@ do_upgrade() {
   # 問いかけを経ない（手で呼ぶ upgrade）ときは、追従を始める前に何が起きるかを 1 行出す。
   [[ -n "$from_prompt" ]] || echo "$LOG_PREFIX $(branch_plan_text "$wantbranch")。"
   if ! prepare_branch "$wantbranch"; then
+    release_git_claim
     rm -rf "$work"
     return 1
   fi
@@ -2793,8 +2856,10 @@ do_upgrade() {
     else
       restore_branch
     fi
+    release_git_claim
     return 1
   fi
+  release_git_claim
   branch_hint=""
   [[ -z "$BRANCH_MADE" ]] || branch_hint="（作業用のブランチ $BRANCH_MADE に切り替え済みです）"
   if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -4313,8 +4378,11 @@ fi
 if [[ -z "$env_keys" ]]; then
   printf '[secrets] .env からキーを取得できないため、キー整合はスキップします（CI など .env が無い環境）。\n'
 else
+  # UPDATE_CHECK は .env だけにあっても数えない。ローダーは UPDATE_CHECK を読み飛ばすため（優先順位は
+  # 環境の値 > .env）、雛形ではコメントの行（# UPDATE_CHECK=off）で案内する。コメントの行はキーに入らず、
+  # 案内どおりに .env へ書くと整合検査が必ず「雛形に無い」と読んでしまう。
   only_env="$(comm -23 \
-    <(printf '%s\n' "$env_keys" | sort) \
+    <(printf '%s\n' "$env_keys" | sed '/^UPDATE_CHECK$/d' | sort) \
     <(printf '%s\n' "$example_keys" | sort))"
   only_example="$(comm -13 \
     <(printf '%s\n' "$env_keys" | sort) \
@@ -8577,6 +8645,84 @@ may_contain_merge() {
   [[ "$stripped" == *merge* ]]
 }
 
+# バックスラッシュ行継続（\ + 改行、\ + CR + LF）を、bash と同じくクォートの外と二重引用符の
+# 中だけで取り除く。シングルクォートの中では \ + 改行は文字のまま残る
+# ので、`gh pr 'mer\<改行>ge' 1` はマージにならない。クォートの状態は先頭から追う。
+# ただし、読み違えが起きうる入力（下の 4 つの文字を含むもの）では追わず、全体を取り除く。
+# 結果は stripped_target に入れる（$(...) で受けると末尾の改行が落ちて、判定する文字列が
+# 変わるため、関数の戻り値にしない）。継続が無い入力は文字ごとの走査を避けて、そのまま返す。
+# クォートの状態を追う実装なので、閉じていないクォートの先は取り除かずに残す（bash では
+# 構文エラーになる形で、マージは走らない）。
+strip_line_continuations() {
+  local s="$1" out="" i=0 n=${#1} c nx state=""
+  if [[ "$s" != *$'\\\n'* ]] && [[ "$s" != *$'\\\r\n'* ]]; then
+    stripped_target="$s"
+    return 0
+  fi
+  # 判定の分かれ目は 4 つの文字（# << $ `）。コマンドに 1 つでも含まれるなら、クォートを追わず、
+  # 継続をすべて取り除く（もとの全体置換。取り除く量が多い側なので、ask は減らない）。
+  #   #   コメントの本文のクォートは、bash では読まれない。
+  #   <<  ヒアドキュメントの本文のクォートも、bash では読まれない（区切り語のクォートの有無で
+  #       本文の展開も変わる）。
+  #   $   $'...'（ANSI-C 引用。\' で閉じない）・$$（PID）・${...}・$(...) など、クォートの読み方が
+  #       変わる形の入口になる。
+  #   `   コマンド置換の中は別の字句として読まれる。
+  # これらを含む入力でクォートを追うと、読み違えたときに行継続が残り、bash ではマージになる入力を
+  # 見逃す（承認の迂回）。#659 は過検知の修正で、迂回を持ち込む価値が無い。クォートを追う走査は、
+  # 単引用符・二重引用符・バックスラッシュだけで bash の読みを確実に再現できる入力にだけ使う。
+  if [[ "$s" == *'#'* || "$s" == *'<<'* || "$s" == *'$'* || "$s" == *'`'* ]]; then
+    s="${s//$'\\\r\n'/}"
+    stripped_target="${s//$'\\\n'/}"
+    return 0
+  fi
+  # ${s:i:1} は 1 回ごとに先頭から i まで数えるため、1 文字ずつ取り出すと走査全体が長さの
+  # 2 乗になる（#647。for_each_clause と同じ事情）。そこで 512 文字の塊 blk を切り出し、塊の
+  # 中の位置 k で読む。塊の取り直しは 500 文字ごとなので、先読み（k + 2）も塊の中に収まる。
+  # ロケールは変えない（for_each_clause と同じ単位で読み、2 つの段でクォートの解釈をずらさない）。
+  local blk="" blk_start=0 k=0
+  while ((i < n)); do
+    if ((i == 0 || i - blk_start >= 500)); then
+      blk_start=$i
+      blk="${s:i:512}"
+    fi
+    k=$((i - blk_start))
+    c="${blk:k:1}"
+    if [[ "$state" == s ]]; then
+      # シングルクォートの中。次の ' まですべて文字のまま。
+      out+="$c"
+      i=$((i + 1))
+      [[ "$c" != "'" ]] || state=""
+    elif [[ "$c" == "\\" ]]; then
+      # クォートの外か二重引用符の中。継続なら落とし、ほかはひと組で残す。
+      nx="${blk:k+1:1}"
+      if [[ "$nx" == $'\n' ]]; then
+        i=$((i + 2))
+      elif [[ "$nx" == $'\r' && "${blk:k+2:1}" == $'\n' ]]; then
+        i=$((i + 3))
+      else
+        out+="${blk:k:2}"
+        i=$((i + 2))
+      fi
+    elif [[ "$state" == d ]]; then
+      out+="$c"
+      i=$((i + 1))
+      [[ "$c" != '"' ]] || state=""
+    elif [[ "$c" == "'" ]]; then
+      out+="$c"
+      i=$((i + 1))
+      state=s
+    elif [[ "$c" == '"' ]]; then
+      out+="$c"
+      i=$((i + 1))
+      state=d
+    else
+      out+="$c"
+      i=$((i + 1))
+    fi
+  done
+  stripped_target="$out"
+}
+
 payload="$(cat)"
 
 reason=""
@@ -8618,8 +8764,20 @@ else
   # CRLF を先に処理する。LF だけを落とすと \ + CR が残り、CR が語末境界として働いて
   # 判定が外れる。CRLF がこのフックへ届く経路は実測できていないが、置換 1 行で
   # 恒久的に問いを消せるため入れておく。
+  #
+  # 取り除くのはクォートの外と二重引用符の中だけで、シングルクォートの中では取り除かない
+  # （strip_line_continuations。bash は 'mer\<改行>ge' を mer\<改行>ge のまま渡すので、
+  # マージにならない）。
+  # 先に、継続をすべて取り除いた文字列で merge の有無を見る（安い。取り除く量が多い側なので、
+  # merge を見落とす側には振れない）。merge が無ければ、クォートを追う走査へ進まない。
+  # 走査は 1 文字ずつ読むため、長い入力（ヒアドキュメントなど）で遅くしない。
   norm_target="${target//$'\\\r\n'/}"
   norm_target="${norm_target//$'\\\n'/}"
+  if ! may_contain_merge "$norm_target"; then
+    exit 0
+  fi
+  strip_line_continuations "$target"
+  norm_target="$stripped_target"
 
   # 走査の前の素通し（#647）。検知する 3 つの綴り（gh pr merge / pulls/<n>/merge と
   # PUT / mergePullRequest）はどれも、語として merge を含む。語はクォートと
