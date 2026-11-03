@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.23.6`
+- `v0.24.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.23.6
+TAG=v0.24.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,12 +120,14 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.12.2
+  --languages node,go --with-claude --playbook-version v0.13.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.12.2 を勧めます（v0.22.1 は v0.11.0 でも動きますが、v0.12.0 以降の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます。v0.12.1 は、第二意見が issue 本文のコード例の中の `acceptance:` を本物として採る不具合を直しています。v0.12.2 は、別のリポジトリの番号を素の `#N` と書いたときに、第二意見が同じ番号の別物と取り違えうることを、規範と第二意見のプロンプトに書いています）。
+**ai-playbook v0.13.0 から、第二意見の既定のエンジンは gemini から codex に変わります。** エンジンを指定していない（`.env` の `SECOND_OPINION_ENGINE` が空か無い）プロジェクトは、その版を取り込むと codex を使おうとし、使えなければ案内を出して止まります。gemini を使い続けるなら、`.env` に `SECOND_OPINION_ENGINE=gemini` を書きます（この版の DCB は、`--with-gemini` を選んだ構成で `gemini` を記入して生成します）。
+
+**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.13.0 を勧めます（v0.24.0 は v0.11.0 でも動きますが、v0.12.0 以降の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます。v0.12.1 は、第二意見が issue 本文のコード例の中の `acceptance:` を本物として採る不具合を直しています。v0.12.2 は、別のリポジトリの番号を素の `#N` と書いたときに、第二意見が同じ番号の別物と取り違えうることを、規範と第二意見のプロンプトに書いています。v0.13.0 は、第二意見の既定のエンジンを codex に変え、`--with-claude` の規則の分割に要る印と雛形を持ちます）。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -135,7 +137,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.23.6
+TAG=v0.24.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -176,7 +178,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.23.6
+TAG=v0.24.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -267,7 +269,7 @@ fi
 |---|---|
 | `--with-aws` | AWS CLI feature + `amazonwebservices.aws-toolkit-vscode` 拡張 + Terraform（下記） |
 | `--with-gcp` | Google Cloud CLI feature（外部 `dhoeric`）+ `GoogleCloudTools.cloudcode` 拡張 + Terraform（下記） |
-| `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 + マージ確認フック（下記） |
+| `--with-claude` | Claude Code CLI（`@anthropic-ai/claude-code`）+ `anthropic.claude-code` 拡張 + `~/.claude` 永続化 + マージ確認フック（下記）。規範を配置する構成では、共通規範を常時と条件付きの規則に分けて `.claude/rules/` へ生成し、`CLAUDE.md` から全文の取り込みを外す（下記「AI 共通ルールの配置」） |
 | `--with-gemini` | Gemini CLI（`@google/gemini-cli`）+ `Google.gemini-cli-vscode-ide-companion` 拡張 + `~/.gemini` 永続化 |
 | `--with-antigravity` | Antigravity CLI（`agy`）+ `~/.gemini` 永続化 + テレメトリ無効化。**VS Code 拡張は入りません**。**OAuth のみ**で初回に対話ログインが要ります（下記） |
 | `--with-codex` | Codex CLI（`@openai/codex`）+ `~/.codex` 永続化。**VS Code 拡張は入りません**。**ChatGPT アカウントの OAuth または API キー**で初回に対話ログインが要ります（下記）。版の下限があり、下回っていれば入れ替えます |
@@ -295,7 +297,7 @@ fi
 - `--gitignore-targets <csv>`（既定: 空。暗黙ターゲットに**追加で合成**する github/gitignore テンプレート名。下記「`.gitignore` と github/gitignore の連携」参照）
 - `--absent <path>...`（既定: 無効。生成先が意図して置かない生成物を、ORIGIN へ `absent:` として記録します。`--upgrade` はそのファイルを作り直さず、`doctor.sh` は欠けていても FAIL にしません。`--accept` と並ぶ動作で、生成の引数や `--upgrade` とは同時に指定できません。`--output-dir`（既定: カレントディレクトリ）と `--dry-run` とは併用できます。下記「`--absent`: 生成物を意図して置かないと記録する」参照）
 - `--no-absent <path>...`（既定: 無効。`absent:` の記録を外します。次の `--upgrade` でそのファイルが生成されます。`--absent` と同じく、生成の引数や `--upgrade` とは同時に指定できません）
-- `--second-opinion-engine <gemini|antigravity|codex>`（既定: 指定なし。`.env.example` の `SECOND_OPINION_ENGINE` へ記入するエンジンを明示します。指定が無いときの決め方は変わりません。ORIGIN に `input:second-opinion-engine` として記録し、`--upgrade` が引き継ぎます。**生成の前に、次の場合は何も書かずに非 0 で止まります**: 未知の値、空の値、`--with-<そのエンジン>` で選んでいないエンジン、`--with-antigravity` も `--with-codex` も選んでいない構成。最後の構成は `.env.example` に `SECOND_OPINION_ENGINE` の記入欄を出さず、指定の行き先が無いためです。値が無いまま最後の引数になっている場合も、エラーで止まります。`--accept` とは同時に指定できません。**`--upgrade` の引き継ぎ**: 記録した値は、渡さなければそのまま使われ、渡せば上書きされます。引き継いだ値が、`--without-<エンジン>` で外した、または選んだ構成から消えたために使えなくなったときは、止めずに警告を出し、ORIGIN の記録を外して指定が無いときの決め方に戻します（明示した値の場合は止まります）。引き継いだ値が未知の値なら、ORIGIN の破損として止まります。下記「`SECOND_OPINION_ENGINE`」参照）
+- `--second-opinion-engine <gemini|antigravity|codex>`（既定: 指定なし。`.env.example` の `SECOND_OPINION_ENGINE` へ記入するエンジンを明示します。指定が無いときの決め方は変わりません。ORIGIN に `input:second-opinion-engine` として記録し、`--upgrade` が引き継ぎます。**生成の前に、次の場合は何も書かずに非 0 で止まります**: 未知の値、空の値、`--with-<そのエンジン>` で選んでいないエンジン、`--with-gemini` / `--with-antigravity` / `--with-codex` のどれも選んでいない構成。最後の構成は `.env.example` に `SECOND_OPINION_ENGINE` の記入欄を出さず、指定の行き先が無いためです。値が無いまま最後の引数になっている場合も、エラーで止まります。`--accept` とは同時に指定できません。**`--upgrade` の引き継ぎ**: 記録した値は、渡さなければそのまま使われ、渡せば上書きされます。引き継いだ値が、`--without-<エンジン>` で外した、または選んだ構成から消えたために使えなくなったときは、止めずに警告を出し、ORIGIN の記録を外して指定が無いときの決め方に戻します（明示した値の場合は止まります）。引き継いだ値が未知の値なら、ORIGIN の破損として止まります。下記「`SECOND_OPINION_ENGINE`」参照）
 - `--claude-remote-control`（既定: 無効。オプトインです。コンテナを作るとき、生成される `scripts/install-ai-tools.sh` が `~/.claude/settings.json` に `remoteControlAtStartup: true` を足し、Claude Code の Remote Control を常に有効にします。**`--with-claude` が要ります**（無い構成では、生成の前に何も書かずに非 0 で止まります）。`--accept` とは同時に指定できません。ORIGIN に `input:claude-remote-control=true` として記録し、`--upgrade` が引き継ぎます（`--without-claude` で行き先が無くなったときは、止めずに警告を出して記録を外します。`--upgrade --dry-run` では書き込まず、「外すことになります」と警告します）。記録の値が `true` 以外のときは、ORIGIN の破損として止まります。**効く範囲と注意**:
   - この設定がユーザー設定（`~/.claude/settings.json`）に置かれるのは、拡張の判定が `true` を読むのをユーザー設定と管理ポリシーに限るためです（プロジェクトの `.claude/settings.json` の `true` は読まれず、`false` で止めるときにしか効きません）。コミットする形では有効にできません。
   - `~/.claude` は named volume なので、**同じ volume を使うすべてのワークスペースに効きます**。新しく起動するセッションから効き、すでに動いているセッションは変わりません。
@@ -310,6 +312,7 @@ fi
 - `--playbook-version <tag>`（既定: 空。既定ソース `ojos/ai-playbook` のタグ tarball への糖衣。`--playbook-from` とは排他。`<tag>` は GitHub の実タグ名をそのまま指定します。例: `v0.1.4`（先頭の `v` を含む）。存在しないタグを指定すると、**ファイルを 1 つも書かずに**明示エラーで終了します）
 - `--playbook-from <path|url>`（既定: 空。ルールの取得元。ディレクトリまたはアーカイブ URL。別 owner・任意 URL・ローカル用）
 - `--playbook-conflict-policy <skip|overwrite|prompt>`（既定: `skip`。**規範ファイル**に既存がある場合の扱い）
+- `--render-claude-rules <正本> <出力ディレクトリ>`（`--with-claude` が規則を作る処理だけを行う入口です。`<正本>`（`shared-ai-rules.md`）の印に従い、`<出力ディレクトリ>` へ `ai-playbook.md` と `ai-playbook-<題>.md` を書き、書いたファイル名を 1 行ずつ出して終了します。出力先に、今回生成しなかった生成物（先頭に生成物の断りを持つ `ai-playbook*.md`。正本から題が消えた・変わったあとの古い規則）があれば消し、`removed: <名前>` を標準エラーへ出します。断りの無い手書きの規則は消しません（`--upgrade` は従来どおり報告だけで消しません）。ほかの引数は見ません。`CLAUDE.md` を手で書いているプロジェクトが、規則を正本から作り直すために使います。印の書式の誤りや、同じ題で `paths` が食い違うときは、何も書かずに非 0 で止まります。出力先に、生成する名前と同名の手書きの規則（生成物の断りが無いファイル）・シンボリックリンク・ファイルでないもの・読めないものがあるときも、上書きせず、その名前を標準エラーへ出して何も書かずに非 0 で止まります。印の書式と意味は ai-playbook の README の「共通規範の Claude Code 用の分割（印）」参照）
 - `-h` / `--help`（使い方を表示して終了。何も生成しません）
 
 ### 廃止フラグ
@@ -464,12 +467,13 @@ bash bootstrap.sh --no-absent .devcontainer/compose.yaml   # 記録を外す（�
 | `.ai-playbook/**` | 共通規範、ロール契約、タスクプレイブック、レビュー運用、intake 規律 |
 | `.ai-playbook/VERSION` | 規範の**取得元**（`version=` / `source=`）を on-disk に残す記録。どの取得元から取り込んだかを生成後の環境から照合できる。生成の入力と現物のハッシュは `.devcontainer/ORIGIN` が記録する（下記「生成物の由来の記録」） |
 | `.github/project-ai-rules.md` | プロジェクト共通ルールの雛形 |
-| `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線）。`CLAUDE.md` だけは、末尾に規範 2 つ（`.ai-playbook/shared-ai-rules.md` / `.github/project-ai-rules.md`）を `@` で取り込む節を足す。Claude Code は、これで規範の全文を毎セッションの文脈へ載せる（生成物で約 53KB） |
-| `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `gemini` CLI（Antigravity CLI への切り替えにも対応するが、`agy` の導入はこの生成器の対象外）。エンジンの指定（引数または `SECOND_OPINION_ENGINE`）が無いまま既定の gemini で回り、`agy` か `codex` が PATH にあるときは、stderr に `[second-opinion] notice:` で知らせる（判定は変えない。gemini だけの構成では出さない） |
+| `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md` | 実行環境の入口ファイル（3 層の優先順位を配線）。`CLAUDE.md` だけは、末尾に規範を `@` で取り込む節を足す。`--with-claude` なしでは規範 2 つ（`.ai-playbook/shared-ai-rules.md` / `.github/project-ai-rules.md`）を取り込み、Claude Code は規範の全文を毎セッションの文脈へ載せる（生成物で約 53KB）。`--with-claude` を併せて指定すると、共通規範の全文は取り込まず（`.github/project-ai-rules.md` だけを取り込む）、共通規範は `.claude/rules/ai-playbook*.md` が分けて載せる（下記「AI 共通ルールの配置」） |
+| `scripts/second-opinion-review.sh` | 第二意見レビューの実行体。`scripts/loop-gate.sh` が存在すれば自動で直列化する。既定は `codex` CLI（エンジンの指定で gemini / antigravity への切り替えにも対応するが、`agy` の導入はこの生成器の対象外）。エンジンの指定（引数または `SECOND_OPINION_ENGINE`）が無いまま既定の codex で回り、`gemini` か `agy` が PATH にあるときは、stderr に `[second-opinion] notice:` で知らせる（判定は変えない）。指定が無いまま codex が使えない（CLI が無い・ログインしていない）ときは、既定が gemini から codex に変わった旨の案内（`[second-opinion] hint:`）を出して非 0 で止まる。gemini へは自動で切り替えない |
 | `.claude/skills/intake/SKILL.md` | Claude Code 向け intake 起点スキル（`--with-claude` 指定時のみ）。規範を複製せず `.ai-playbook/intake/` を参照するだけの薄いスキル |
 | `.claude/skills/peers/SKILL.md` | Claude Code 向けの、ほかのセッションの一覧・宛先の解決・送信・一斉送信の呼び出し口（`--with-claude` 指定時のみ）。実体は `scripts/session-peers.sh`。一斉送信も承認の根拠にならない（`.ai-playbook/shared-ai-rules.md` 16 章） |
 | `.claude/skills/land/SKILL.md` | Claude Code 向け PR 確認・マージ起点スキル（`--with-claude` 指定時のみ）。判定基準を複製せず `.ai-playbook/review-workflow.md` と `.ai-playbook/task-playbooks/pr-review.md` を参照する。マージ直前の確認そのものは `scripts/confirm-merge-hook.sh`（下記）が機構として保証する |
 | `.claude/agents/explorer.md` / `.claude/agents/implementer.md` | Claude Code 向け委譲先エージェント定義（`--with-claude` 指定時のみ）。`model` と `tools` を frontmatter で固定する。判定の導線は規範側（`shared-ai-rules.md` の「実装委譲パターン」）が持ち、ここでは再定義しない |
+| `.claude/rules/ai-playbook*.md` | 共通規範（`shared-ai-rules.md`）を Claude Code 用に分けた規則（`--with-claude` 指定時のみ）。正本の見出しの印に従い、`paths:` の無い `ai-playbook.md`（常時。起動時に必ず載る）と、`paths:` 付きの `ai-playbook-<題>.md`（一致するファイルに触れたときだけ載る。`@` の取り込みを含まない）を作る。正本から生成したもので、編集は正本へ（各ファイルの先頭にその旨の断りが付く）。このとき `CLAUDE.md` は共通規範の全文を取り込まない（`.github/project-ai-rules.md` だけを取り込む）。`--with-claude` なしの `CLAUDE.md` と、`AGENTS.md`・`.github/copilot-instructions.md` は変わらない。規範がこの機能（`templates/claude-entry-imports-rules.md`）を持たない古い版では、従来どおり全文を取り込む。置き方は `.claude/` のほかの生成物と同じで、DCB が作っていない同名のファイルは上書きしない。`--upgrade` では、手を入れていなければ作り直し、手を入れていれば `.dcb-new` を置く |
 
 取得元は次の順で解決します。
 
@@ -479,6 +483,22 @@ bash bootstrap.sh --no-absent .devcontainer/compose.yaml   # 記録を外す（�
 
 `curl` で `bootstrap.sh` を単体取得して実行する場合は隣接チェックアウトが存在しないため、`--playbook-version` または `--playbook-from` の指定が必要です。
 取得元が解決できない場合は、**ファイルを 1 つも書き込まずに終了します**。
+
+#### `--with-claude` のときの共通規範の分け方
+
+`CLAUDE.md` が共通規範（`shared-ai-rules.md`）の全文を取り込むと、毎セッション約 50KB が文脈に載ります。`--with-claude` を併せて指定すると、DCB は正本の見出しの印（`<!-- claude-rules: name=<題> paths=<glob>,<glob> -->`。書式と意味は ai-playbook の README の「共通規範の Claude Code 用の分割（印）」）に従って、共通規範を Claude Code 用の規則に分けて生成します。
+
+- 印の無い範囲（常時）は `.claude/rules/ai-playbook.md` へ。`paths:` が無いので、起動時に必ず載ります。
+- 印の範囲は `.claude/rules/ai-playbook-<題>.md` へ。`paths:` 付きで、一致するファイルに触れたときだけ載ります。同じ題の印が複数あれば、正本の順序で 1 つにまとめます。同じ題で `paths` が食い違うと、書き込む前に停止します。
+- 印の行以外は正本の行をそのまま写し、各ファイルの先頭に、生成物である旨（編集は正本へ）と、相対リンクの基準が `.ai-playbook/` であることを述べる断りを足します。条件付きの規則には親の見出しも添えます。本文に `@` の取り込みは入れません（`paths:` 付きの規則の中の `@` は起動時から載り、条件付きにならないため）。
+- `CLAUDE.md` は、規範の雛形 `templates/claude-entry-imports-rules.md` を使い、`@.ai-playbook/shared-ai-rules.md` の取り込みを外します（`@.github/project-ai-rules.md` は残します）。`--with-claude` なしの `CLAUDE.md` と、`AGENTS.md`・`.github/copilot-instructions.md` は、これまでどおり全文を参照させます。
+- 規範がこの雛形（`templates/claude-entry-imports-rules.md`）を持たない古い版では、この分割をせず、従来どおり全文を取り込みます。
+- **DCB が作っていない同名の既存ファイル**（`.claude/rules/ai-playbook*.md`）が置き先にあって規則を置けないときは、規則を 1 つも置かず、`CLAUDE.md` も全文を取り込む従来の形のままにして、警告を出します（規則だけ置かずに全文の取り込みを外すと、常時の部分が載らなくなるため）。判定は書き込みの前に行い、`--playbook-conflict-policy`（skip / overwrite / prompt）には依りません（同じ中身のもの、ORIGIN に記録のあるものは衝突としません）。手書きの同名の規則を消す（移す）と、次の実行（`--upgrade` を含む）で規則が採用され、`CLAUDE.md` も切り替わります。逆に、規則は置けたのに `CLAUDE.md` が全文を取り込んだままのとき（既存の `CLAUDE.md` の温存、`--upgrade` で手を入れた `CLAUDE.md`）は、二重に載る旨の警告を出します。
+- **正本から題が消えた・変わったとき**: `--upgrade` は、古い `ai-playbook-<題>.md` を消しません（「no longer generated (not deleted)」と報告するだけです）。残すと、その `paths:` に一致するファイルに触れるたびに載り続け、新しい規則と内容が重なります。報告に出た `.claude/rules/ai-playbook-<題>.md` は、手を入れていなければ手で消してください。
+- 印の誤り（入れ子、`paths` の空の要素・引用符・バックスラッシュ・波括弧、印のつもりの崩れた行）は、書き込む前に停止します。
+- 生成物は `.claude/` のほかの生成物と同じ扱いです（ORIGIN にハッシュを記録します。DCB が作っていない同名のファイルは上書きしません。`--upgrade` では手を入れていなければ作り直し、手を入れていれば `.dcb-new` を置きます）。
+- **`--upgrade` で手を入れた `CLAUDE.md` は古いまま残ります**（新しい版は隣の `CLAUDE.md.dcb-new` に置かれます）。古い `CLAUDE.md` は `@.ai-playbook/shared-ai-rules.md` で全文を取り込み続けるので、新しい規則と二重に載ります。`CLAUDE.md.dcb-new` の内容を取り込み（`@.ai-playbook/shared-ai-rules.md` の行を外し）、`CLAUDE.md.dcb-new` を消してから `--accept CLAUDE.md` で取り込み済みにしてください。
+- 生成の処理だけを行う入口が `--render-claude-rules <正本> <出力ディレクトリ>` です。`CLAUDE.md` を手で書くプロジェクトが、規則を作り直すために使います。
 
 ### AI CLI 導入挙動
 
@@ -490,9 +510,11 @@ bash scripts/fix-mount-owner.sh && bash scripts/install-ai-tools.sh
 
 導入するのは `--with-claude` / `--with-gemini` / `--with-antigravity` / `--with-codex` / `--with-copilot` で**明示選択した AI CLI のみ**です。トークン有無での自動導入は行いません（明示 opt-in）。何も選択しなければ AI CLI は導入されません。
 
-`--with-antigravity` だけは npm 配布ではないため、配布元のインストーラを取得して `~/.local/bin/agy` へ置きます。あわせて**テレメトリを無効化**します（下記）。
+**claude と gemini は、版の下限を検査します**（claude は 2.1.314 以上。`doctor.sh` の検査と同じ値で、`blockWritesOutsideWorkingDirectories` が効く最小の版。gemini は 0.64.0 以上）。下限より古いもの（下限と同じ番号のプレリリース版を含む）が既に入っていれば、「在るから飛ばす」ではなく npm の `@latest` で入れ替え（CLI の名前・今の版・下限を出します）、入れたあとも下限未満なら非 0 で止まります。下限以上なら何もしません。
 
-`--with-codex` は npm 配布（`@openai/codex`）ですが、**版の下限を検査します**。第二意見レビューの既定モデルを引ける版より古い CLI が既に入っている場合は、「在るから飛ばす」ではなく入れ替えます。認証は ChatGPT アカウントの OAuth または API キーで、導入だけでは使えません。初回は対話で `codex login` を通してください。
+`--with-antigravity` だけは npm 配布ではありません。配布元のインストーラ（取得して実行する形）は**実行せず**、同じ手順を自分で行います。プラットフォーム（`linux_amd64` / `linux_arm64` とそれぞれの `_musl` 版、`darwin_amd64` / `darwin_arm64`。表に無いものは理由を出して非 0）を決め、配布元のマニフェスト（`<配布元>/manifests/<プラットフォーム>.json` の `version`・`url`・`sha512`）を取り、本体を落として **SHA-512 を照合してから** `~/.local/bin/agy` へ置き、`agy install` で PATH の設定を任せます。照合が通らない・マニフェストを読めない・キーが欠けている・マニフェストの版が下限（1.3.4）未満のときは、理由を出して何も置かずに非 0 で止まります。既にある agy が下限未満なら同じ手順で入れ替え、下限以上なら何もしません。マニフェストは `jq` で JSON として読み（最上位に 3 つのキーが文字列で無ければ止まります）、置く前に、取り出した本体が答える版も下限以上かを確かめます。マニフェストの形と URL は、配布元のインストーラを読んで確かめたもので、変われば導入は理由を出して止まります。あわせて**テレメトリを無効化**します（下記）。
+
+`--with-codex` は npm 配布（`@openai/codex`）ですが、**版の下限を検査します**。第二意見レビューの既定モデルを引ける版（0.156.0 以上）より古い CLI が既に入っている場合は、「在るから飛ばす」ではなく入れ替えます（版の比較は claude・gemini と共通の関数です）。認証は ChatGPT アカウントの OAuth または API キーで、導入だけでは使えません。初回は対話で `codex login` を通してください。
 
 ## ループコーディング支援
 
@@ -518,7 +540,7 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 - `loop-gate.sh` は push / PR 前に **3 段を直列**で通します。**1. commit identity の検証**（`scripts/verify-commit-identity.sh`）→ **2. verify**（受け入れ検証。手前で機密混入検査を含む）→ **3. 任意の第二意見レビュー**の順です。identity を最初に置くのは、判定が最も安く（実測数 ms）、許可外の identity が混じったコミットを他の段の結果を待たずに検知するためです（許可外 identity の検知が CI＝push 後まで遅れていた穴を塞ぐ。詳細は下記「Git identity ガード」参照）。判定ロジックは `loop-gate.sh` へ書き写さず `verify-commit-identity.sh` 側に置きます（判定を二重管理しない）。
   - **移行時の注意:** `verify-commit-identity.sh` は fail-closed です。環境変数 `ALLOWED_AUTHOR_EMAILS` も `.env` の `GIT_IDENTITY_EMAIL` も設定していないプロジェクトでは、`loop-gate.sh` を再生成した時点で**ローカルゲートが緑から赤に変わります**。これは検査が成立しない状態を合格にしない、意図した挙動です。`bash scripts/setup-git-identity.sh` で `.env` の `GIT_IDENTITY_EMAIL` を適用するか、`ALLOWED_AUTHOR_EMAILS` を設定してください（下記「[利用側の設定手順（許可 author email）](#利用側の設定手順許可-author-email)」参照）。
 - `loop-gate.sh` の第二意見は、`scripts/second-opinion-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
-- 差し替えたコマンド（`LOOP_GATE_REVIEW_CMD`）へは、解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡します（ステージ済み差分があるとき・対象が無いときは空）。範囲を受けない差し替えコマンドは、commit 済みのブランチで空のステージ済み差分を見て「対象なし」で終わるため、`loop-gate.sh` は、レビュー対象が実在するのにその出力（`[second-opinion] no diff to review`）を見たときは `GATE_FAIL` にし、記録も残しません。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過します。**限界として、loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが `[second-opinion] no diff to review` を出力したときだけです。** 範囲を使わず、この文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても `GATE_PASS` と記録が出ます。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、自分で範囲を決めて自分で記録を残してください。同梱の reviewer のエンジンだけを変えるなら `LOOP_GATE_REVIEW_CMD='bash scripts/second-opinion-review.sh --engine <名前> ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}'` と書きます。`SECOND_OPINION_ENGINE` の前置は、`.env` が環境変数を上書きするため使えません。
+- 差し替えたコマンド（`LOOP_GATE_REVIEW_CMD`）へは、解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡します（ステージ済み差分があるとき・対象が無いときは空）。範囲を受けない差し替えコマンドは、commit 済みのブランチで空のステージ済み差分を見て「対象なし」で終わるため、`loop-gate.sh` は、レビュー対象が実在するのにその出力（`[second-opinion] no diff to review`）を見たときは `GATE_FAIL` にし、記録も残しません。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過します。**限界として、loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが `[second-opinion] no diff to review` を出力したときだけです。** 範囲を使わず、この文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても `GATE_PASS` と記録が出ます。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、自分で範囲を決めて自分で記録を残してください。レビューする範囲がエージェントの設定・フックに触れるときは、そのパスの一覧を出力し、環境変数 `SECOND_OPINION_AGENT_CONFIG_PATHS`（改行区切り）で第二意見へ渡します（差し替えたコマンドにも届きます。対象と理由は「[危険な git の設定の検査](#危険な-git-の設定の検査)」）。同梱の reviewer のエンジンだけを変えるなら `LOOP_GATE_REVIEW_CMD='bash scripts/second-opinion-review.sh --engine <名前> ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}'` と書きます。`SECOND_OPINION_ENGINE` の前置は、`.env` が環境変数を上書きするため使えません。
 - 第二意見へ渡す**差分の範囲**は、既定の対象を **PR 全体**にして決めます。第二意見のエンジンは差分をプロンプトへ埋め込み、差分の外を読まない形を基本にします。修正を重ねた後の小さな差分（ステージ済みだけ、上流からだけ）を渡すと、差分に現れない既存のコードについて誤った前提を立てて落ちるためです。起点は**既定ブランチとの分岐点（merge-base）**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決します。
   - **ステージ済み差分があるとき**: `--base <起点>` を渡し、起点から索引までを対象にします（コミット済みの分とステージ済みの分の両方が入ります）。記録の scope は `base:<起点>+staged` です。
   - **ステージ済み差分が空のとき**: `--range <起点>..HEAD` を渡します。上流があっても、上流からではなく起点からです。記録の scope は `range:<起点>..HEAD` です。
@@ -786,8 +808,8 @@ codex は、コマンドを読み取り専用などのサンドボックスの�
 
 `.env.example` が持つキー:
 
-- `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。**記入するエンジン（下の `SECOND_OPINION_ENGINE`）が `codex` / `antigravity` に決まっていて、かつ `--with-gemini` を選んでいないときだけ出しません**（gemini の CLI が入らず、どのエンジンも使わないため）。`--with-gemini` を選んだ構成は、エンジンを固定しても gemini の CLI が入るので出します。エンジンが gemini、空（既定の gemini で回る）、またはエンジンの欄自体が出ない構成でも出します。
-- `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-antigravity` / `--with-codex` を選んだときだけ出ます）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（既定の gemini は CLI もキーも無く、設定するまで使えないため）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら gemini）。**実際に使うエンジンが、これらの決め方と違うとき（例: gemini の CLI を入れたまま第二意見を codex で回す）は、`--second-opinion-engine <gemini|antigravity|codex>` で明示します。** 指定した値が最優先で記入されます。止まる条件と `--upgrade` の引き継ぎは、オプション一覧の `--second-opinion-engine` の項に従います。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
+- `GEMINI_API_KEY` — 第二意見レビュー（`scripts/second-opinion-review.sh`）が読みます。**記入するエンジン（下の `SECOND_OPINION_ENGINE`）が `codex` / `antigravity` に決まっていて、かつ `--with-gemini` を選んでいないときだけ出しません**（gemini の CLI が入らず、どのエンジンも使わないため）。`--with-gemini` を選んだ構成は、エンジンを固定しても gemini の CLI が入るので出します。エンジンが gemini、空（既定の codex で回る）、またはエンジンの欄自体が出ない構成でも出します。
+- `SECOND_OPINION_ENGINE` — 第二意見のエンジン（`--with-gemini` / `--with-antigravity` / `--with-codex` のどれかを選んだときだけ出ます。AI CLI を 1 つも選ばない構成では出ません）。**選んだエンジンから一意に決まるときは、記入済みで出します。** `--with-gemini` も選んだ構成では `gemini`（明示しておけば、`.env` を持つ作業ツリーでは下の通知が出ず、`.env` を写し忘れた作業ツリーでだけ出ます）、`--with-gemini` を選ばず antigravity か codex の片方だけを選んだ構成ではそのエンジンです（選んだエンジンを明示しておくため。antigravity だけの構成で空のままにすると、既定の codex を使おうとして止まります）。gemini を選ばず antigravity と codex の両方を選んだ構成は、どれを選ぶかが一意に決まらないので空のままです（空なら codex）。**実際に使うエンジンが、これらの決め方と違うとき（例: gemini の CLI を入れたまま第二意見を codex で回す）は、`--second-opinion-engine <gemini|antigravity|codex>` で明示します。** 指定した値が最優先で記入されます。止まる条件と `--upgrade` の引き継ぎは、オプション一覧の `--second-opinion-engine` の項に従います。**既存の `.env` は書き換えません。** `--upgrade` で変わるのは `.env.example` だけなので、すでに `.env` を持つ構成には効きません。
 - `GH_TOKEN` — GitHub の PAT。**上表の「コンテナ内でのログイン」に対する唯一の例外**です（下記「[GitHub 認証だけが例外である理由](#github-認証だけが例外である理由)」）。空にすれば従来どおり `gh auth login` の保存済み認証で動きます（**`GITHUB_TOKEN` も未設定であることが条件**。下記「[`GITHUB_TOKEN` は設定しない](#github_token-は設定しない)」）。
 - `GIT_IDENTITY_NAME` / `GIT_IDENTITY_EMAIL` — コミット identity。`scripts/setup-git-identity.sh` が local へ適用します。
   - `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` という名前を使わないのは、それが **git 自身の読む環境変数**だからです。環境に置くと local 設定を持たないリポジトリでも identity が解決でき、`user.useConfigOnly` による保護（未設定なら commit を止める）が無効になります。
@@ -948,6 +970,45 @@ bash scripts/check-no-secrets.sh   # 終了コード 0 / 標準出力 SECRETS_PA
 - **ロケールを `LC_ALL=C` に固定します。** 追跡前の検査は `git add --dry-run` の人間向け出力（`add '<path>'`）を解析するため、その文字列が翻訳されると「該当なし」として通り、失敗の仕方がサイレントな合格になります（実測では git 2.53.0 の翻訳カタログに当該 msgid は無く、現時点では翻訳されません。それでも人間向け出力への依存は残るため固定します）。キー整合の `sort` / `comm` も同じ理由です。GNU `sort` の照合順はロケールで変わり、両辺が別の照合順で並ぶと `comm` は警告を出しつつ終了コード 0 で誤った差集合を返します。
 - **`git ls-files` には `-c core.quotePath=false` を渡します。** 既定（`true`）では非 ASCII やスペースを含むパスが `"..."` で囲まれ、非 ASCII 部分が `\NNN` の 8 進エスケープへ置き換わります。閉じ引用符が付くことで名前の末尾を見る判定が阻まれ、追跡済みの「非 ASCII ディレクトリ/`.env`」がすり抜けるうえ、`.env.example` の除外判定も末尾が `example"` になって成立せず逆に誤検知します。1 行で両方を塞げます。
 
+## 危険な git の設定の検査
+
+エージェントは作業の中で git を何度も呼びます。git の設定には、git を呼んだときにコマンドを実行させるもの（`core.fsmonitor` など）があり、ここへ値を仕込まれると、**サンドボックスも承認の確認も通らずに**任意のコードが実行されえます。`scripts/check-git-config.sh` は、そうした設定を読み取りだけで検出して知らせます（常に配置します）。
+
+```bash
+bash scripts/check-git-config.sh          # 0 = 該当なし / 1 = 検出 / 2 = 判定できない。値と取り出し元も出す（人が確かめる用）
+bash scripts/check-git-config.sh --summary # 種類と件数だけを出す。終了コードは同じ（doctor.sh が使う）
+bash scripts/check-git-config.sh --hook   # SessionStart のフック用。検出したキーの種類と件数だけを出し、常に 0
+```
+
+- **検出するキー**: `core.fsmonitor`（値が真偽値・整数のときは組み込みのデーモンの指定なので除く）、`core.hooksPath`、`core.sshCommand`、`core.askPass`、`core.gitProxy`、`core.editor`、`sequence.editor`、`credential.helper`、`credential.<URL>.helper`、`gpg.program`、`gpg.<形式>.program`、`diff.external`、`diff.<名前>.textconv`、`diff.<名前>.command`、`filter.<名前>.clean` / `smudge` / `process`、`merge.<名前>.driver`、`remote.<名前>.uploadpack` / `receivepack`。どれも、git の普段の操作（diff・commit・fetch・push など）でコマンドを実行させうるものです。キーの大文字小文字は区別しません。
+- **見る範囲**: リポジトリの local と worktree の設定（`includeIf` などで取り込んだ先を含む。worktree の設定は `extensions.worktreeConfig` があるときだけ読む）。global と system は見ません。利用者が自分で入れた設定を毎回知らせることになるためです。
+- **フック（`--hook`）と doctor（`--summary`）は、設定の値・`<名前>`・取り込み先のパスを出しません。** フックの出力はそのままエージェントの会話の文脈に入り、doctor の出力もエージェントが読むことがあります。これらは設定を仕込んだ側が自由に書ける文字列で、指示に見える文を値に仕込めば、フックの報告の体裁でエージェントへ届くためです。検出したキーの種類（`diff.<名前>.textconv` のような決まった表記）と件数だけを出し、詳細は手で `bash scripts/check-git-config.sh` を実行して確かめるよう案内します。設定を読めなかったときも、黙らずに「検査できませんでした」と出します（問題が無い状態と区別するため）。まだ git のリポジトリでない場所では何も出しません。
+- **検査は設定の読み取りだけで行います。** `git status` や `git diff` のように fsmonitor を起動しうるコマンドは使いません。検査そのものが、仕込まれたコマンドを実行してしまわないためです。設定は NUL 区切りで読みます（値には改行を含められ、行で分けると 1 つの値を別々の設定として読み違えるため）。bash と git だけで動きます。
+- **引数なしの実行は、値と取り出し元をそのまま出します**（人が確かめるため）。エージェントに実行させると、その出力は文脈に入ります。
+- **呼ばれる場所**: `--with-claude` で生成する `.claude/settings.json` の SessionStart（検出を会話の文脈へ出す。失敗しても通す）と、`doctor.sh`（検出は WARN。FAIL にはしない）。拒否はしません。正当な設定もあるためです。
+- **許可の一覧**: 正当な設定（husky の `core.hooksPath` など）は、リポジトリの根の `.git-config-allow` に `キー=値` の行で書いて**コミットする**と、知らせなくなります。読むのはコミット済み（HEAD）の中身だけで、作業ツリーのファイルや、追跡していないファイルは読みません（差分にもレビューにも現れないまま、検査を黙らせられるため）。キーは大文字小文字を区別せず、値は完全一致です。`#` から始まる行と空行は無視します。
+
+  ```text
+  # husky が設定する
+  core.hooksPath=.husky/_
+  ```
+
+  照合はキーと値だけで、どのファイルの設定かは見ません。**限界として、許可した組と同じキーと値を、取り込み先のファイルや worktree の設定に置かれても黙ります。**
+
+- **その他の限界**（どれも見逃しの方向には働かないため、直していないもの）
+  - `extensions.worktreeConfig` が値によらずあると、worktree の設定も読みます。値が偽のときは local と同じものを読み直すため、同じ設定を 2 回数え、件数の表示が倍になります（警告は正しく出ます。見逃しの方向には働きません）。
+  - doctor は、リポジトリの根のディレクトリ名が改行で終わると、根が生成先そのものかの比較が合わず、検査を飛ばします（SessionStart のフックの検査は動きます）。
+  - `loop-gate.sh` が一覧に出すフックの本体は、DCB が配る 3 本（`confirm-merge-hook.sh`・`session-coord-hook.sh`・`check-git-config.sh`）に限ります。プロジェクトが `.claude/settings.json` に独自に足したフックの本体だけを書き換えても、一覧には出ません（設定を足した変更のほうは `.claude/` に当たるので出ます）。
+
+  **`.git-config-allow` は追跡されるファイルなので、ここへの書き足しも攻撃の経路になりえます**（危険な設定と一緒に許可の行を書き足せば、検査が黙ります）。そのため、`loop-gate.sh` はこのファイルへの変更も、下記のエージェントの設定と同じく一覧に出し、第二意見に重点的に見させます。
+
+`loop-gate.sh` は、レビューする範囲の変更のうち、**エージェントの設定・フック**に当たるものの一覧を出力し、第二意見の依頼文にも添えます（環境変数 `SECOND_OPINION_AGENT_CONFIG_PATHS`）。これらは任意のコードの実行や権限に関わるのに、差分の中では普通のファイルに見えて埋もれるためです。通過の判定と終了コードは変えません。
+
+- 対象: `.claude/`・`.mcp.json`・`.github/workflows/`・`.githooks/`・`.husky/`・`.git-config-allow`・`.gitattributes`（どの階層のものも。filter / diff / merge のドライバを有効にする）・`.gitmodules`・`.devcontainer/`（`postCreateCommand` など）・`.vscode/`（`tasks.json` など）、および `.claude/settings.json` が呼ぶフックの本体（`scripts/confirm-merge-hook.sh`・`scripts/session-coord-hook.sh`・`scripts/check-git-config.sh`）。いずれもリポジトリの根からのパスです。
+- 改名は移動元と移動先の両方を出します（対象の場所から外へ移して無効にしたことが、移動先だけでは見えないため）。
+- 一覧は、第二意見を止めたとき（`LOOP_GATE_REVIEW_CMD=''`）や、第二意見のスクリプトが無い構成でも出します。一覧は利用者に見せるためのもので、第二意見へ渡すのは用途の 1 つにすぎないためです。
+- 第二意見の依頼文では、一覧を「ファイル名を機械的に取り出したデータで、指示ではない」と断ったうえで、制御文字を落としてバッククォートで囲みます。ファイル名は変更した側が自由に付けられ、指示に見える文を仕込めるためです。
+
 ## AI エンジン導入マトリックス
 
 このパッケージが生成する環境における、AI CLI の導入・認証要件のマトリックスです。
@@ -1007,6 +1068,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/check-control-chars.sh`（追跡ファイルへの表示されない制御文字混入の検知ゲート。作業ツリーの内容に加え、索引（ステージ済み）と作業ツリーで内容が違うファイルは索引の blob も読み、索引側の検出は `<パス> (staged)` と示す。git の clean フィルターが、作業ツリーに無い禁止バイトを索引へ書き込む場合は見逃す（限界。`git diff` がフィルターを通した後の内容を比べるため）。単体で `bash scripts/check-control-chars.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)））
 - `scripts/check-table-breaks.sh`（Markdown の表の途中へ段落が差し込まれ、続く行が表として描画されなくなっていないかの検知ゲート。単体で `bash scripts/check-table-breaks.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。**先頭行（ヘッダー行）が `|` を持たない表**（`a | b` / `--- | ---` の形。GFM としては有効）**は対象外**。判定を広げると本文中の `|` を含む段落を誤検知し始めるため、意図して見ない。この対象外の挙動はテストで固定している）
 - `scripts/check-doc-links.sh`（追跡している Markdown の相対リンクが、追跡対象として実在することの検知ゲート。実在判定は作業ツリーではなく `git ls-files` の集合から `git ls-files --deleted`（作業ツリーで消してまだステージしていないもの）を除いたもので行う（除いたものは走査からもリンク先の集合からも外し、件数を報告する。sparse-checkout / skip-worktree で置いていないだけのファイルは追跡対象として実在する扱いのまま。追跡していないファイルは数えない）。単体で `bash scripts/check-doc-links.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。スキャンしたくない文書があれば、環境変数 `DOC_LINKS_EXCLUDE` へリポジトリルートからの相対パスのプレフィックスをコロン区切りで渡す（既定は空））
+- `scripts/check-git-config.sh`（エージェントに任意のコードを実行させうる git の設定の検出。許可の一覧は根の `.git-config-allow`）
 - `scripts/check-shell-portability.sh`（「この環境では通るが BSD 系（macOS）では落ちる」綴りの検知ゲート。単体で `bash scripts/check-shell-portability.sh` として実行する。生成時の `acceptance.sh` の雛形は呼ぶ。既存の出力先ではプロジェクト側で配線する（[Doctor 自己診断](#doctor-自己診断)）。追跡している `*.sh` と `*.md`（**フェンスで囲まれたコード部分だけ**）を走査し、この検査自身とテストも対象に含める。**移植性の保証ではなく、規則表に載っている綴りが無いことしか言わない**——新しく踏んだら規則表へ 1 行足す運用が前提。**代替を用意した上で意図的に使う場合は、その行へ `# bsd-ok: 理由` を書く**（理由は必須で、空の印は認めない）。印は差分に残るのでレビューで見える）
 - `.github/workflows/verify.yml`（受け入れ検証を CI で回すゲート。上記「受け入れ検証の CI ワークフロー」参照）
 - `.devcontainer/ORIGIN`（生成物の由来の記録。DCB の版・使った `--with-*` フラグ・生成の入力・各生成物のハッシュを持つ機械可読な key=value 形式。`doctor.sh` が乖離の診断に、`--upgrade` が入力の再現と手を入れたかの判定に使います。下記「生成物の由来の記録」参照）
@@ -1022,7 +1084,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `scripts/session-coord-hook.sh`（並行セッションの共有台帳を操作の直前に確かめるフックの本体。下記「[セッション協調フック](#セッション協調フックclaude-code)」参照）
 - `scripts/claude-session-wrapper.sh`（セッションの宛先名に場所と作業ツリーを自動で含める起動ラッパー。`.devcontainer/devcontainer.json` が VS Code の設定 `claudeCode.claudeProcessWrapper` へ、作業ツリーの外の固定パス（`/home/vscode/.local/bin/claude-session-launcher`）で配線します。このラッパーを直接指すと、ファイルが無いブランチへ切り替えただけで Claude Code が起動しなくなるため、極小の起動役（ラッパーが実行可能ならそれを、無ければ引数をそのまま exec する）を挟みます。起動役は、`devcontainer.json` の `onCreateCommand` が `scripts/on-attach.sh` を呼ばずに直接書き出し（一時ファイルへ書いて置き換える冪等な設置。失敗しても作成は止めず警告する）、`scripts/on-attach.sh` も接続のたびに冪等に設置します（既存のコンテナへの後追い）。2 つの経路が置く起動役の中身は同じですが、動きは同じではありません（`onCreateCommand` は無条件に設置し、`on-attach.sh` はラッパーが無ければ設置しません）。配線と設置が同じファイルにあるので、`--upgrade` で `on-attach.sh` だけが古いまま残っても、起動役は置かれます。拡張は設定値をそのまま実行ファイルのパスにし、`${workspaceFolder}` や `~` を展開しないため、絶対パスで書きます。`.env` の `SESSION_HOST_LABEL` が空なら宛先名を変えず、どんな失敗でも本体の起動まで進みます。宛先名の末尾は通常、起動ごとに変わる PID の 16 進です。ただし起動の引数に `--resume=<会話の識別子>` または `--resume <会話の識別子>`（UUID の形）があれば、識別子の先頭 8 桁（最初のハイフンの前）を使います。会話を再開しても宛先名が変わらず、ほかのセッションが覚えた宛先名へ再起動の後も送れます。`--resume` の直後が UUID の形でないとき（例: `--resume --verbose`）は PID の 16 進です。新しい会話の最初の起動の引数に識別子が含まれない場合は、その最初の起動だけ PID の名前になり、最初の再開のときに 1 回だけ名前が変わります。識別子の先頭 8 桁は、同じ作業ツリーの別の会話と重なる確率は小さいもののゼロではありません。重なると同じ宛先名のセッションが並び、宛先名だけでは送り分けられません（`/peers` の `resolve` は複数件として候補を出しますが、どれを選んでも宛先名は同じです）。そのときは、片方の会話を開き直して新しい会話にしてください）
 - `scripts/session-peers.sh`（同じプロジェクトで動くほかのセッションの一覧・宛先の解決・送信元の署名。`.claude/skills/peers/SKILL.md` の `/peers` が呼びます。`~/.claude/sessions/*.json` は公開された仕様ではないため、読めなければ警告して `ListAgents` を案内します）
-- `.claude/settings.json`（上記 2 つのフックの配線。既存ファイルは既定ポリシー `skip` で温存します）
+- `.claude/settings.json`（上記 2 つのフックの配線と、締める側の設定 2 つ。既存ファイルは既定ポリシー `skip` で温存します。下記「[生成する settings.json の締める側の設定](#生成する-settingsjson-の締める側の設定)」参照）
 - `.claude/.gitignore`（`settings.local.json` を追跡しない）
 
 規範を配置する場合（`--with-playbook` / `--playbook-version` / `--playbook-from`）は、加えて次を出力します。
@@ -1039,6 +1101,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `.claude/skills/land/SKILL.md`（`--with-claude` を併せて指定した場合のみ。PR 確認・マージ起点スキル）
 - `.claude/skills/peers/SKILL.md`（`--with-claude` を併せて指定した場合のみ。ほかのセッションの一覧・送信・一斉送信の呼び出し口。実体は `scripts/session-peers.sh`）
 - `.claude/agents/explorer.md` / `.claude/agents/implementer.md`（`--with-claude` を併せて指定した場合のみ。委譲先エージェント定義）
+- `.claude/rules/ai-playbook*.md`（`--with-claude` を併せて指定した場合のみ。共通規範を常時と条件付きに分けた規則。正本の印に従って生成する。下記「[AI 共通ルールの配置](#ai-共通ルールの配置)」参照）
 
 `--with-aws` / `--with-gcp` のいずれかを選択した場合は、加えて次を出力します（規範の配置は前提としません）。
 
@@ -1056,7 +1119,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.23.6
+version=v0.24.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1306,6 +1369,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | `scripts/check-control-chars.sh` | そのまま書き出す | — |
 | `scripts/check-deps-installed.sh` | そのまま書き出す | —（`--languages` に `node` を含めたときだけ生成） |
 | `scripts/check-doc-links.sh` | そのまま書き出す | — |
+| `scripts/check-git-config.sh` | そのまま書き出す | — |
 | `scripts/check-no-secrets.sh` | そのまま書き出す | — |
 | `scripts/check-shell-portability.sh` | そのまま書き出す | — |
 | `scripts/check-table-breaks.sh` | そのまま書き出す | — |
@@ -1353,6 +1417,17 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 - **確認の対象:** ORIGIN の `version=` が `vX.Y.Z` のときの DCB（取得元は `ojos/devcontainer-bootstrap`）。ai-playbook は、取得元が `tag`、またはリリースのタグの tarball の URL（`https://github.com/<owner>/ai-playbook/archive/refs/tags/<版>.tar.gz`）のときだけで、ほかの取得元（`adjacent` / `local` など）は確認しません。ORIGIN が無い、`version=` がリリースの版でない環境（この開発リポジトリを含む）では何もしません。
 - **止め方:** 生成時の `--no-update-check`（ORIGIN に記録し、`--upgrade` で引き継ぎます。戻すのは `--upgrade --update-check`）、または `UPDATE_CHECK=off`（`0` / `false` / `no` / `disabled` も同じ）。環境変数で設定すれば止まります。`UPDATE_CHECK` に値（空でない）があれば、環境の値でも、コマンドで明示した値（`UPDATE_CHECK=off bash scripts/update-check.sh notify` など）でも、それを採ります。通知の末尾の「止めるには」も同じ順で、`UPDATE_CHECK=off`（環境の値。無ければ .env の値）と案内します。`.env` の `UPDATE_CHECK` は、`UPDATE_CHECK` に値が無いときだけ `update-check.sh` がローダーの値取得の関数（`__load_project_env_value`。変数は変えません）で読みます（`.env` の自動読み込み `load-project-env.sh` は `UPDATE_CHECK` だけ上書きしません。このキーを読むのは `update-check.sh` だけなので、対話のシェルの `UPDATE_CHECK` は `.env` の値を映しません）。`.env` に書くときは、`.env.example` のコメントの行の `#` を外します。
 
+## 生成する settings.json の締める側の設定
+
+`--with-claude` で生成する `.claude/settings.json` は、フックの配線に加えて、権限を**締める側**の設定を 2 つ持ちます。許可リスト（`allow` / `ask` / `deny` / `additionalDirectories` / `defaultMode`）は持ちません。許可リストをコミットすると、対話中に許可した操作が clone した全員へ配られるためです。
+
+- `permissions.blockWritesOutsideWorkingDirectories: true`: ファイル編集ツール（Write / Edit など）による、作業ディレクトリの外への書き込みを止めます。実測（2.1.314）では、許可ルール（例: `Edit(//外/**)`）で明示的に許した外への書き込みも拒否し、設定が無いと同じ書き込みは通りました。追加の作業ディレクトリ（`--add-dir`）への書き込みは、設定があっても通ります。**確かめたのはファイル編集ツールだけで、Bash のリダイレクト（`echo > 外`）などを止めるかは確かめていません**（Bash を経た書き込みも止めるとは言えません）。**Claude Code 2.1.314 以上で効きます。古い版では、設定ファイルは捨てられませんが、エラーも警告も出ずに黙って効きません**（2.1.296 で確かめました）。`doctor.sh` が版を検査します（下記）。
+- 確認フック（`confirm-merge-hook.sh`）の hook にだけ `"onFailure": "block"` を付けます。フック自体が失敗（異常終了・起動不能）したとき、通さずに止めるためです。マージの確認は承認を機構で保証するもので、フックが壊れて素通りになると保証が黙って消えます。`onFailure` は Claude Code 2.1.295 から効き、上の下限（2.1.314）に含まれます。**代わりに、フック自体が無いとき（`scripts/confirm-merge-hook.sh` を消した、フックを持たない古いコミットへ切り替えた、など）は、マージに限らずすべての Bash が止まります**（2.1.314 で確かめました。`onFailure` が無ければ、同じ状態で Bash は通ります）。止まるのは Bash の matcher に掛かる呼び出しだけで、Write / Edit は止まりません。戻すには、Write / Edit か手で、フックを戻すか、`.claude/settings.json` の確認フックの `"onFailure": "block"` を外します。**セッション協調フック（`session-coord-hook.sh`）には付けません。** 台帳は排他制御ではなく合図で、台帳の不具合ですべての操作を止めないこと（fail-open）が規範だからです。
+
+`doctor.sh` は、対象の `.claude/settings.json` がこの設定を持ち、かつ `claude` が PATH にあるときだけ `claude --version` の先頭の版を読み、下限 2.1.314 と数値で比べます（古ければ `[WARN]`。版を読めないときも判定できないので `[WARN]`。設定を持たない対象と、`claude` が無い環境では検査しません）。
+
+既存の `.claude/settings.json` は温存されるため、この 2 つは足されません。必要なら手で足してください。
+
 ## Doctor 自己診断
 
 生成後、生成先を対象に実行して構成を検証します。公開リリースから `doctor.sh` を入手する手順は [doctor.sh を後から取得する](#doctorsh-を後から取得する) を参照してください。
@@ -1371,7 +1446,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 - `--strict`（既定: 無効。WARN があれば非 0 で終了する）
 - `-h` / `--help`
 
-検査は 5 カテゴリです。
+検査は 6 カテゴリです。
 
 | カテゴリ | 検査内容 |
 |---|---|
@@ -1380,6 +1455,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 | 衛生検査の配線 | 生成先に衛生検査 4 本（`check-control-chars.sh` / `check-table-breaks.sh` / `check-doc-links.sh` / `check-shell-portability.sh`）のいずれかがあり、`scripts/acceptance.sh` がそのファイル名を参照していなければ `[WARN]`（件数と配線の例を添える。`--strict` では非 0）。ファイル名がコメントにあるだけでも参照と見なすので、意図して呼ばない検査はファイル名と理由をコメントで書けば WARN が出ない。`acceptance.sh` が無いときは判定しない。`doctor.sh` は単体で取得されうるため、4 本の一覧は自前で持つ（`bootstrap.sh` と同じ内容。`tests/test-hygiene-wiring.sh` が照合する） |
 | 生成物の由来（下記） | `.devcontainer/ORIGIN`（[生成物の由来の記録](#生成物の由来の記録devcontainerorigin)）と現物を突き合わせ、生成時からの変更・記録した版が古いことを検出する |
 | 実行時コマンドの可用性 | `bash` / `jq` / `perl` / `gh`。`devcontainer.json` の features から検出した言語ランタイム（`rust` は feature 名と実行ファイル名が異なるため `cargo` で判定。`ruby` は一致するため `ruby` で判定）。`--with-aws` / `--with-gcp` で配線した cloud CLI（`aws` / `gcloud` / `terraform`）。`docker-outside-of-docker` を配線していれば `docker`。いずれも不在は WARN |
+| Claude Code の版 | 対象の `.claude/settings.json` が `blockWritesOutsideWorkingDirectories` を true で持ち、`claude` が PATH にあるときだけ、`claude --version` を下限 2.1.314 と数値比較する。古い（`blockWritesOutsideWorkingDirectories` が黙って無視される）または読めなければ WARN |
 
 **`${localEnv:` の検出がこの診断の中核です。** 「[資格情報の扱い](#資格情報の扱い)」で述べたホスト資格情報の非注入は、方針を書いただけでは守られません。`remoteEnv` へホスト環境変数の参照が復活していないことを doctor が機械的に検査し、見つけたら FAIL にします。作業ディレクトリの受け渡し（`${localWorkspaceFolder}`）は `localEnv` ではないため対象外です。
 

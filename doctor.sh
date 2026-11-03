@@ -12,7 +12,7 @@ set -euo pipefail
 # この比較には限界がある。doctor.sh は公開リリースごとに取得し直す前提であり、
 # 古い doctor.sh をそのまま使い続けると、上流がその後さらに新しくなっていても
 # 「上流が更新されています」を報告できない。診断結果にもこの限界を明示する。
-DCB_VERSION="v0.23.6"
+DCB_VERSION="v0.24.0"
 ORIGIN_REL_PATH=".devcontainer/ORIGIN"
 
 TARGET_DIR="$PWD"
@@ -624,6 +624,70 @@ check_hygiene_wiring() {
 
 section "Hygiene checks wiring"
 check_hygiene_wiring
+
+# 任意のコードを実行させうる git の設定（core.fsmonitor / core.hooksPath など）の検出。
+# 検査は scripts/check-git-config.sh が持つ。あれば呼び、1（検出）は WARN、2（判定できない）も
+# WARN で知らせる。FAIL にはしない（husky の core.hooksPath のように正当な設定もあり、
+# 許可の一覧 .git-config-allow で黙らせられるため）。スクリプトが無い構成では何もしない。
+check_git_config() {
+  local script="$TARGET_DIR/scripts/check-git-config.sh" out rc=0
+  [[ -f "$script" ]] || return 0
+  # まだ git のリポジトリになっていない生成先は、検査する設定が無いので判定しない
+  # （生成直後は正常な状態で、WARN にすると --strict が通らなくなる）。生成先が別の
+  # リポジトリの中にあると rev-parse は親を見つけるので、根が生成先そのものかで確かめる
+  # （親リポジトリの設定を、生成先の設定として検査しない）。
+  # rev-parse は設定ファイルが壊れていても失敗するので、失敗だけで「リポジトリでない」と
+  # 決めない。git の文言を英語に固定し、出力の 1 行目が `fatal: not a git repository` で
+  # 始まるときだけを見分ける（含むかで見ると、エラー文に入る取り込み先のファイル名へこの
+  # 語句を仕込まれる）。それ以外の失敗は検査へ進めて「判定できない」の WARN にする。
+  local top
+  if top="$(LC_ALL=C git -C "$TARGET_DIR" rev-parse --show-toplevel 2>&1)"; then
+    [[ "$(cd "$top" && pwd -P)" == "$(cd "$TARGET_DIR" && pwd -P)" ]] || return 0
+  elif [[ "${top%%$'\n'*}" == "fatal: not a git repository"* ]]; then
+    return 0
+  fi
+  # --summary: 値・<名前>・取り出し元を出さない。doctor の出力はエージェントが読むことがあり、
+  # 仕込まれた値をそのまま出すと、指示に見える文が届く経路になる。値は人が直接
+  # bash scripts/check-git-config.sh を実行して確かめる。
+  out="$(cd "$TARGET_DIR" && bash "$script" --summary 2>&1)" || rc=$?
+  case "$rc" in
+    0) ok "no git config entries that can run arbitrary code (scripts/check-git-config.sh)" ;;
+    1) warn "git config has entries that can run arbitrary code (scripts/check-git-config.sh)" ;;
+    *) warn "git config could not be checked (scripts/check-git-config.sh exit $rc): 判定できません" ;;
+  esac
+  [[ "$rc" -eq 0 ]] || printf '%s\n' "$out" | sed 's/^/  /'
+}
+
+section "Git config (arbitrary code execution)"
+check_git_config
+
+# 対象の .claude/settings.json が permissions.blockWritesOutsideWorkingDirectories を true で持つとき、
+# この版より古い claude では黙って無視される（エラーも警告も出ない）。確認フックの onFailure
+# （2.1.295 から）もこの下限に含まれる。設定を持たない対象と、
+# claude が PATH に無い環境（CI など）では検査しない。版を読めないときは、効くかどうか
+# 判定できないので WARN。
+CLAUDE_MIN_VERSION="2.1.314"
+
+check_claude_version() {
+  jq -e '.permissions.blockWritesOutsideWorkingDirectories == true' \
+    "$TARGET_DIR/.claude/settings.json" >/dev/null 2>&1 || return 0
+  command -v claude >/dev/null 2>&1 || return 0
+  local out ver=""
+  out="$(claude --version 2>/dev/null)" || out=""
+  # 先頭の X.Y.Z だけを取る（v の接頭辞や -beta.1 などの後置きは落とす）。
+  # dcb_version_lt は数値でない区分を 0 とみなすので、取れなければ判定できない扱いにする
+  if [[ "$out" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then ver="${BASH_REMATCH[1]}"; fi
+  if [[ -z "$ver" ]]; then
+    warn "claude version could not be determined: 判定できません（blockWritesOutsideWorkingDirectories が効くのは $CLAUDE_MIN_VERSION 以上）"
+  elif dcb_version_lt "$ver" "$CLAUDE_MIN_VERSION"; then
+    warn "claude $ver is older than $CLAUDE_MIN_VERSION: blockWritesOutsideWorkingDirectories is silently ignored (no error, no warning)"
+  else
+    ok "claude $ver supports blockWritesOutsideWorkingDirectories (>= $CLAUDE_MIN_VERSION)"
+  fi
+}
+
+section "Claude Code version"
+check_claude_version
 
 section "Generation origin"
 check_origin_record

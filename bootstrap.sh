@@ -104,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.23.6"
+DCB_VERSION="v0.24.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -343,6 +343,283 @@ dcb_file_sha256() {
   fi
 }
 
+# ── Claude Code 用の規則の生成（--with-claude）────────────────────────────────
+#
+# 規範の共通ルール（shared-ai-rules.md）は全文のまま正本に置き、Claude Code には
+# 「常に効かせる部分」と「要る場面で載る部分」に分けて渡す。分け方は正本の見出しの
+# 直前に置く印で決める（印の書式と意味は ai-playbook の README に書く）。
+#
+#   <!-- claude-rules: name=<題> paths=<glob>,<glob> -->
+#
+# 印は直後の見出し（# 〜 ######）の節に掛かる。範囲は、その見出しから、次の「同じか
+# より上の階層」の見出しの手前まで（下位の見出しは含む）。印の無い範囲は常時で、
+# ファイル冒頭の H1 も含む。同じ題の印が複数あれば、1 つの規則へ正本の順序でまとめる。
+#
+#   常時の範囲   -> .claude/rules/ai-playbook.md        （paths: なし＝起動時に必ず載る）
+#   印の範囲     -> .claude/rules/ai-playbook-<題>.md   （paths: 付き）
+#
+# 条件付きの規則の本文へは @ の取り込みを入れない。paths: 付きの規則の中の @ は
+# 起動時から載り、条件付きにならないため（正本の行は変えずに写すので、正本の本文に
+# @ の取り込みがあれば、そのまま写る。正本側で書かない）。
+#
+# 生成は bash と awk だけで行う。DCB は .ai-playbook/ へ .md しか写さないため、
+# 生成の道具を規範側に置いて配ることができない（生成の入口はこの bootstrap.sh）。
+#
+# 行の扱い: 印の行だけを落とし、ほかの正本の行は 1 行も変えず、ちょうど 1 つの
+# ファイルへ、正本の順序で写す。各ファイルの先頭（frontmatter の後）には、生成物で
+# ある旨と相対リンクの基準（.ai-playbook/ からの相対）を述べる断りの行を足す。条件付きの
+# 規則には、親の見出しを示す行も足す。断りの行は CLAUDE_RULES_NOTICE_PREFIX で始め、本文との
+# 間を空行で区切る（生成物の見分けは、この接頭辞だけで行う。scripts/check-doc-links.sh、
+# tests/test-claude-rules.sh と DCB のテストが使う）。
+# 空行は正本のとおり写す。ただし各ファイルの末尾の空行だけは落とす（節の終わりの
+# 空行が末尾に残ると、ファイルの末尾が空行で終わり git diff --check に掛かるため）。
+# このため照合は、空行以外の行を厳密に（ちょうど 1 回・順序どおり）、空行は
+# 「正本の部分列として現れる」ことで見る。
+#
+# 正本のファイル名。規範の内部のファイル名を DCB が知らない原則（tests/test-templates.sh が
+# 検査する）の、この機能に限った例外で、名前を持つのはこの 1 行だけにする（ほかの箇所は
+# この変数を使う）。
+CLAUDE_RULES_SOURCE_NAME="shared-ai-rules.md"
+# 生成物の断りの行の接頭辞。正本の名前を含めない（生成物の見分けを名前から切り離す）。
+CLAUDE_RULES_NOTICE_PREFIX="> 生成物:"
+
+# 使い方: dcb_claude_rules_awk <list|render> <正本> [出力ディレクトリ]
+#   list    生成するファイル名（ai-playbook*.md）を、正本の登場順に 1 行ずつ出す。
+#   render  出力ディレクトリへ書く（ディレクトリは呼び出し側が作る）。
+# 印の書式の誤り・印の直後が見出しでない・同じ題で paths が食い違う、のいずれかで、
+# 何も書かずに 1 を返す。
+dcb_claude_rules_awk() {
+  local mode="$1" src="$2" outdir="${3-}"
+  awk -v mode="$mode" -v outdir="$outdir" -v notice_prefix="$CLAUDE_RULES_NOTICE_PREFIX" -v src_name="$CLAUDE_RULES_SOURCE_NAME" '
+    function fail(msg) {
+      printf "error: %s:%d: %s\n", FILENAME, NR, msg > "/dev/stderr"
+      failed = 1
+      exit 1
+    }
+    # 出力先のファイル（題 cur の範囲）を登録して番号を返す。登場順に番号を振る。
+    function file_of(name) {
+      if (!(name in idx)) { nfiles++; idx[name] = nfiles; names[nfiles] = name }
+      return idx[name]
+    }
+    function emit(line,   f) {
+      f = file_of(cur)
+      n[f]++
+      body[f, n[f]] = line
+    }
+    BEGIN { cur = ""; curlevel = 0; infence = 0; pend = 0; nfiles = 0; failed = 0; file_of("") }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      # 印。コードの囲みの中は対象にしない。
+      # 印のつもりの行（大文字小文字を問わず「<!--」の後に空白が任意で claude-rule を含む行。
+      # 行頭の空白や綴りの崩れも含む）は、厳密な書式でなければ誤りにする。黙って通すと、
+      # 印が効かず、その節が常時へ入る。
+      if (!infence && tolower(line) ~ /<!--[ \t]*claude-rule/) {
+        if (line !~ /^<!-- claude-rules: name=[a-z0-9][a-z0-9-]* paths=[^[:space:]]+ -->$/) {
+          fail("claude-rules の印の書式が不正です（行頭から <!-- claude-rules: name=<題> paths=<glob>,<glob> --> の形で書く。題は小文字・数字・ハイフン、paths にタブを含む空白類は使えない）")
+        }
+        if (pend) fail("印が続いています（印の直後は見出しでなければならない）")
+        s = line
+        sub(/^<!-- claude-rules: name=/, "", s)
+        pname = s; sub(/ paths=.*$/, "", pname)
+        ppaths = s; sub(/^[^ ]* paths=/, "", ppaths); sub(/ -->$/, "", ppaths)
+        # paths は YAML の二重引用符の文字列へそのまま書く。引用符・バックスラッシュ・波括弧
+        # （カンマで分けられない）と、空の要素（a,,b・先頭や末尾のカンマ）は使えない。
+        if (ppaths ~ /[{}"\\]/ || ppaths ~ /(^,|,,|,$)/) {
+          fail("paths に使えない文字または空の要素があります（引用符・バックスラッシュ・波括弧・空の要素は使えない）: " ppaths)
+        }
+        if (pname in pathsof && pathsof[pname] != ppaths) {
+          fail("同じ題 " pname " の paths が食い違います（" pathsof[pname] " と " ppaths "）")
+        }
+        pathsof[pname] = ppaths
+        pend = 1
+        next
+      }
+      is_heading = 0
+      # 見出し（CommonMark）: 行頭の字下げは 0〜3 個の空白まで（4 個以上はコードブロック）。
+      if (!infence && line ~ /^ ? ? ?#+[ \t]/) {
+        hl = line; sub(/^ +/, "", hl)
+        match(hl, /^#+/)
+        lvl = RLENGTH
+        if (lvl <= 6) is_heading = 1
+      }
+      if (pend && !is_heading) fail("印の直後の行が見出しではありません")
+      if (is_heading) {
+        text = line; sub(/^ +#+[ \t]+/, "", text); sub(/^#+[ \t]+/, "", text); sub(/[ \t]+$/, "", text)
+        if (pend) {
+          # 印のある節の中に別の印（入れ子）は置けない。内側の節が終わったときに外側の残りが
+          # 常時へ漏れる。同じ階層以上の見出しなら、外側の節はすでに終わっているので兄弟でよい。
+          if (cur != "" && lvl > curlevel) {
+            fail("印のある節（" cur "）の中に、別の印（" pname "）があります（入れ子の印は使えない。同じ題でも）")
+          }
+          # 親の見出し: 印の見出しより上の階層で、最も近い H2 以下の見出し。
+          parent = ""
+          for (k = lvl - 1; k >= 2; k--) if (k in ht && ht[k] != "") { parent = ht[k]; break }
+          cur = pname; curlevel = lvl; pend = 0
+          f = file_of(cur)
+          if (parent != "" && !((f, parent) in seenp)) {
+            seenp[f, parent] = 1
+            np[f]++; parents[f, np[f]] = parent
+          }
+        } else if (cur != "" && lvl <= curlevel) {
+          cur = ""
+        }
+        ht[lvl] = text
+        for (k = lvl + 1; k <= 6; k++) ht[k] = ""
+      }
+      # 条件付きの規則へ写す本文に @ の取り込みがあれば失敗させる（paths: 付きの規則の @ は
+      # 起動時から載り、条件付きにならない）。判定は tests/test-claude-rules.sh の check_no_import と
+      # 同じ: バッククォートの中は除き、メールアドレスのように英数字などの直後の @ は数えない。
+      if (cur != "") {
+        t = line
+        gsub(/`[^`]*`/, "", t)
+        if (t ~ /(^|[^A-Za-z0-9_.+-])@[A-Za-z0-9_.\/~-]+/) {
+          fail("条件付きの規則（" cur "）の本文に @ の取り込みがあります（バッククォートで囲むか、言い換える）: " line)
+        }
+      }
+      # コードの囲み（CommonMark）: 開始の記号（` か ~）と長さを覚え、同じ記号で同じ長さ以上、
+      # 後ろが空白だけの行でだけ閉じる。別の記号の行や、短い行は囲みの中の本文として扱う。
+      if (line ~ /^ ? ? ?(```+|~~~+)/) {
+        fl = line; sub(/^ +/, "", fl)
+        fc = substr(fl, 1, 1)
+        match(fl, /^(`+|~+)/)
+        flen_now = RLENGTH
+        rest = substr(fl, flen_now + 1)
+        if (!infence) {
+          # 開始。バッククォートの囲みの情報文字列にバッククォートは入らない（入るならインラインコード）。
+          if (!(fc == "`" && index(rest, "`") > 0)) { infence = 1; fence_char = fc; fence_len = flen_now }
+        } else if (fc == fence_char && flen_now >= fence_len && rest ~ /^[ \t]*$/) {
+          infence = 0
+        }
+      }
+      emit($0)
+    }
+    END {
+      if (failed) exit 1
+      if (pend) { printf "error: %s: 印の直後に見出しがありません\n", FILENAME > "/dev/stderr"; exit 1 }
+      for (f = 1; f <= nfiles; f++) {
+        # 本文が空白だけのファイルは作らない（常時の範囲が空のときなど）。
+        last = 0
+        for (i = n[f]; i >= 1; i--) if (body[f, i] !~ /^[ \t\r]*$/) { last = i; break }
+        if (last == 0) continue
+        fname = (names[f] == "") ? "ai-playbook.md" : "ai-playbook-" names[f] ".md"
+        if (mode == "list") { print fname; continue }
+        path = outdir "/" fname
+        if (names[f] != "") {
+          print "---" > path
+          print "paths:" > path
+          m = split(pathsof[names[f]], g, ",")
+          for (j = 1; j <= m; j++) if (g[j] != "") print "  - \"" g[j] "\"" > path
+          print "---" > path
+          print "" > path
+        }
+        print notice_prefix " 正本 `.ai-playbook/" src_name "` から生成したものです。編集は正本へ行ってください（ここを直しても、作り直しで消えます）。" > path
+        print "> 本文の相対リンクは、このファイルからではなく `.ai-playbook/` からの相対です。" > path
+        if (np[f] > 0) {
+          ptxt = ""
+          for (j = 1; j <= np[f]; j++) ptxt = ptxt "「" parents[f, j] "」"
+          print "> 親の見出し: " ptxt "の一部" > path
+        }
+        print "" > path
+        for (i = 1; i <= last; i++) print body[f, i] > path
+        close(path)
+      }
+    }
+  ' "$src"
+}
+
+# 正本から、Claude Code 用の規則を出力ディレクトリへ生成する（--render-claude-rules の本体）。
+# 出力ディレクトリは無ければ作る。失敗したら、何も書かずに 1 を返す。
+dcb_render_claude_rules() {
+  local src="$1" outdir="$2" tmp
+  if [[ ! -f "$src" ]]; then
+    echo "error: --render-claude-rules: 正本が見つかりません: $src" >&2
+    return 1
+  fi
+  # render は誤りがあれば何も書かずに失敗するが、出力ディレクトリは先に作ることになる。
+  # 印の誤りや衝突のときに空のディレクトリを残さないよう、検証（list）と衝突の検査を作る前に済ませる。
+  local names f base
+  names="$(dcb_claude_rules_awk list "$src")" || return 1
+  dcb_claude_rules_conflicts "$outdir" "$names" || return 1
+  mkdir -p "$outdir" || return 1
+  # 出力先の中の一時ディレクトリへ生成してから、mv で置き換える。awk の書き込みはシンボリック
+  # リンク・ハードリンクを辿り、1 つずつ書くので、途中で失敗すると一部だけ新しくなる。mv は
+  # ディレクトリの項目を差し替えるので、リンクを辿らず、生成の失敗では出力先に何も残さない。
+  tmp="$(mktemp -d "$outdir/.ai-playbook-render.XXXXXX")" || return 1
+  if ! dcb_claude_rules_awk render "$src" "$tmp"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  # 生成のあいだに出力先が変わっていないかを、置き換えの直前にもう一度確かめる（検査と mv の
+  # あいだの窓は残るが、生成にかかる時間ぶんの窓は閉じる）。
+  if ! dcb_claude_rules_conflicts "$outdir" "$names"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    if ! mv -f "$tmp/$base" "$outdir/$base"; then
+      rm -rf "$tmp"
+      echo "error: --render-claude-rules: $base を置けませんでした。" >&2
+      return 1
+    fi
+  done <<< "$names"
+  rm -rf "$tmp"
+  # 今回生成しなかった生成物（正本から題が消えた・変わったあとの古い規則）を消す。生成物かどうかは
+  # 断りの行で見分け、断りの無い手書きの規則は消さない。消した名前は標準エラーへ出す（標準出力は
+  # 生成した名前の一覧に保つ）。--upgrade の方針（報告だけで消さない）はここでは変えない。
+  for f in "$outdir"/ai-playbook*.md; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    base="$(basename "$f")"
+    printf '%s\n' "$names" | grep -x -F -- "$base" >/dev/null && continue
+    if dcb_is_generated_rule "$f"; then
+      rm -f "$f"
+      echo "removed: $base" >&2
+    fi
+  done
+  printf '%s\n' "$names"
+}
+
+# 出力先（$1）に、生成する名前（$2。1 行に 1 つ）と同名で上書きできないものがあるかを調べる。
+# あれば理由つきで名前を標準エラーへ出し、1 を返す。上書きできないのは、シンボリックリンク・
+# 通常のファイルでないもの・読めないもの・生成物の断りが無いもの（手書きの規則）と、スティッキー
+# ビット付きのディレクトリにある、自分もディレクトリも所有していないもの（mv で置き換えられず、
+# 一部だけ新しくなるため。ファイルかディレクトリの所有者なら置き換えられる）。
+# --with-claude の検査（claude_rules_load）は ORIGIN の記録と中身の一致で見分けるので、判定を
+# 共通にしない（こちらには ORIGIN が無く、断りで見分ける）。
+dcb_claude_rules_conflicts() {
+  local outdir="$1" names="$2" base f conflicts=""
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    f="$outdir/$base"
+    [[ -e "$f" || -L "$f" ]] || continue
+    if [[ -L "$f" || ! -f "$f" ]]; then
+      conflicts+="  $base（シンボリックリンクか、通常のファイルでない）"$'\n'
+    elif [[ ! -r "$f" ]]; then
+      conflicts+="  $base（読めないため、生成物か確かめられない）"$'\n'
+    elif ! dcb_is_generated_rule "$f"; then
+      conflicts+="  $base（生成物の断りが無い）"$'\n'
+    elif [[ -k "$outdir" && ! -O "$f" && ! -O "$outdir" ]]; then
+      conflicts+="  $base（スティッキービット付きのディレクトリにあり、ファイルもディレクトリも自分の所有でないので、置き換えられない）"$'\n'
+    fi
+  done <<< "$names"
+  [[ -z "$conflicts" ]] && return 0
+  echo "error: --render-claude-rules: 出力先に、上書きできない同名のものがあるため、何も書きません:" >&2
+  printf '%s' "$conflicts" >&2
+  return 1
+}
+
+# 規則のファイルが生成物か。frontmatter（あれば）の直後の最初の空でない行が、断りの接頭辞で
+# 始まるときだけ真にする。
+dcb_is_generated_rule() {
+  awk -v p="$CLAUDE_RULES_NOTICE_PREFIX" 'BEGIN { r = 1 }
+      NR == 1 && $0 == "---" { fm = 1; next }
+      fm && $0 == "---" { fm = 0; next }
+      fm || $0 ~ /^[ \t\r]*$/ { next }
+      { if (index($0, p) == 1) r = 0; exit }
+      END { exit r }' "$1"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-name)     PROJECT_NAME="$2"; shift 2 ;;
@@ -418,6 +695,14 @@ while [[ $# -gt 0 ]]; do
     --playbook-from)    PLAYBOOK_FROM="$2"; shift 2 ;;
     --playbook-version) PLAYBOOK_VERSION="$2"; shift 2 ;;
     --playbook-conflict-policy) PLAYBOOK_CONFLICT_POLICY="$2"; PLAYBOOK_CONFLICT_POLICY_EXPLICIT="true"; shift 2 ;;
+    # 生成の処理だけを行う入口（--with-claude の生成と同じ処理。このリポジトリのように
+    # CLAUDE.md を手で書くプロジェクトが、規則を正本から作り直すために使う）。ほかの
+    # 引数は見ずに、ここで終わる。
+    --render-claude-rules)
+      [[ $# -ge 3 ]] || { echo "error: --render-claude-rules には <正本> <出力ディレクトリ> の 2 つが必要です。" >&2; exit 1; }
+      dcb_render_claude_rules "$2" "$3" || exit 1
+      exit 0
+      ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -998,8 +1283,8 @@ if [[ -n "$SECOND_OPINION_ENGINE_OPT" ]]; then
       ;;
   esac
   soe_problem=""
-  if ! has_with antigravity && ! has_with codex; then
-    soe_problem="--with-antigravity も --with-codex も選んでいない構成では、.env.example に SECOND_OPINION_ENGINE の記入欄を出さず、指定の行き先がありません"
+  if ! has_with gemini && ! has_with antigravity && ! has_with codex; then
+    soe_problem="--with-gemini も --with-antigravity も --with-codex も選んでいない構成では、.env.example に SECOND_OPINION_ENGINE の記入欄を出さず、指定の行き先がありません"
   elif ! has_with "$SECOND_OPINION_ENGINE_OPT"; then
     soe_problem="--with-$SECOND_OPINION_ENGINE_OPT で選んでいないエンジンは指定できません"
   fi
@@ -1182,6 +1467,7 @@ template_rel_paths() {
     'scripts/acceptance.sh' \
     'scripts/check-control-chars.sh' \
     'scripts/check-doc-links.sh' \
+    'scripts/check-git-config.sh' \
     'scripts/check-no-secrets.sh' \
     'scripts/check-shell-portability.sh' \
     'scripts/check-table-breaks.sh' \
@@ -1600,16 +1886,88 @@ TMPL
 # 選択された AI CLI ツールを導入する（生成時に --with-* で選ばれたものだけ）。
 set -euo pipefail
 
+# 版の比較。`sort -V` は BSD 系に無い版があるので使わない。3 つの数へ分けて
+# 桁ごとに比べる。
+#
+# 読めない綴りは「古い」として扱う（fail-closed）。入れ替えは冪等で副作用が
+# 小さい一方、読めないまま通すと、要件を満たさない CLI で回り続けることになる。
+# プレリリースの印（"2.1.314-beta.1" の "-beta.1"）が付いた版は、同じ番号の正式版
+# より前のものなので、番号が下限と同じなら「古い」とする。
+ai_cli_version_is_old() {
+  local have="$1" want="$2"
+  awk -v have="$have" -v want="$want" '
+    function num(s, part) { split(s, a, "."); return a[part] + 0 }
+    BEGIN {
+      if (have !~ /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/) { exit 0 }   # 読めない → 古い扱い
+      pre = (have ~ /-/); sub(/-.*$/, "", have)
+      for (i = 1; i <= 3; i++) {
+        h = num(have, i); w = num(want, i)
+        if (h > w) { exit 1 }
+        if (h < w) { exit 0 }
+      }
+      exit pre ? 0 : 1
+    }'
+}
+
+# CLI の `--version` の出力から、版の綴りを取り出す。出力は CLI ごとに
+# "2.1.296 (名前)" や "名前 0.162.1" のように違い、"v1.3.5" や "0.66.0-preview.1"
+# の形もありうるので、最初に現れる数の 3 つ組を、プレリリースの印ごと取る
+# （前置の v は落とす。印は ai_cli_version_is_old が見る）。
+# 取れなければ空を返す（呼び出し側が古い扱いにする）。
+# `--version` が非 0 で終わったときは、出力に数字があっても版として読まない
+# （"Node.js 22.0.0 is required" のようなエラーの数字を、CLI の版と取り違えないため）。
+# 出力に違う版が 2 つ以上あるとき（"New version 2.2.0 available" のような知らせが
+# 混じるなど）も、どれが CLI 自身の版か決められないので、読めない扱いにする。
+ai_cli_version() {
+  local out vers
+  out="$("$1" --version 2>/dev/null)" || return 0
+  vers="$(printf '%s\n' "$out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' | sort -u)" || true
+  case "$vers" in *$'\n'*) return 0 ;; esac
+  printf '%s' "$vers"
+}
+
+# npm 配布の CLI を導入する。第 3 引数に版の下限を渡すと、在るときも版を見る。
+#
+# 下限が無ければ「PATH に在れば飛ばす」だけ。下限があるときは、古い版が先に入って
+# いる環境が更新されず黙って残ることを避けるため、下限未満なら @latest で入れ替え、
+# 入れたあとも下限未満なら失敗にする。入れ替えるときは、名前・今の版・下限を出す。
 install_if_missing() {
   local cmd="$1"
   local pkg="$2"
+  local min="${3:-}"
+  local have=""
   if command -v "$cmd" >/dev/null 2>&1; then
-    echo "[install-ai-tools] $cmd already installed, skipping"
+    if [[ -z "$min" ]]; then
+      echo "[install-ai-tools] $cmd already installed, skipping"
+      return 0
+    fi
+    have="$(ai_cli_version "$cmd")"
+    if ! ai_cli_version_is_old "$have" "$min"; then
+      echo "[install-ai-tools] $cmd ${have} already installed (>= $min), skipping"
+      return 0
+    fi
+    echo "[install-ai-tools] $cmd ${have:-（版を読めません）} は $min 未満です。入れ替えます ..."
+  else
+    echo "[install-ai-tools] installing $pkg ..."
+  fi
+
+  if [[ -z "$min" ]]; then
+    npm install -g "$pkg" || return 1
+    echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
     return 0
   fi
-  echo "[install-ai-tools] installing $pkg ..."
-  npm install -g "$pkg"
-  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd")"
+
+  # 呼び出し側が `|| ...` で包んでも set -e が効かなくなるので、失敗は明示で返す。
+  npm install -g "${pkg}@latest" || return 1
+  # 入れ替える前の場所をシェルが覚えていると、古い本体を読み直してしまう。
+  hash -r
+  have="$(ai_cli_version "$cmd")"
+  if ai_cli_version_is_old "$have" "$min"; then
+    echo "[install-ai-tools] error: 導入後も $cmd の版が $min 未満です（実際: ${have:-不明}、$(command -v "$cmd" || echo 'PATH に無い')）" >&2
+    echo "                   npm の導入先（$(npm prefix -g 2>/dev/null || echo '不明')/bin）より前に別の $cmd があるか、導入先が PATH に無い可能性があります。" >&2
+    return 1
+  fi
+  echo "[install-ai-tools] $cmd installed: $(command -v "$cmd") (${have})"
 }
 
 __AGY_FUNCTION_LINES__
@@ -4445,6 +4803,239 @@ echo "SECRETS_PASS"
 exit 0
 TMPL
       ;;
+    'scripts/check-git-config.sh')
+      cat <<'TMPL'
+#!/usr/bin/env bash
+# check-git-config.sh — エージェントに任意のコードを実行させうる git の設定を検出して知らせる
+#
+# 位置づけ:
+#   リポジトリ内の git の設定（.git/config と、それが includeIf などで読み込む先、および
+#   worktree の設定）は、clone したリポジトリや、エージェントが書き換えうる設定ファイルの
+#   一部である。ここへ core.fsmonitor などを仕込まれると、エージェントが git を呼んだ瞬間に
+#   任意のコードが実行される（サンドボックスも承認も通らない）。このスクリプトは、そのような
+#   キーが設定されていないかを**読み取りだけで**調べ、あれば知らせる。拒否はしない。
+#
+# 検出するキー（大文字小文字を区別しない）:
+#   core.fsmonitor / core.hooksPath / core.sshCommand / core.askPass / core.gitProxy / core.editor
+#   sequence.editor / credential.helper / credential.<URL>.helper
+#   gpg.program / gpg.<形式>.program
+#   diff.external / diff.<名前>.textconv / diff.<名前>.command
+#   filter.<名前>.clean / smudge / process
+#   merge.<名前>.driver
+#   remote.<名前>.uploadpack / remote.<名前>.receivepack
+#   （core.fsmonitor の値が真偽値・整数のときは、組み込みのデーモンの指定でコマンドではない
+#   ので検出しない）
+#
+# 範囲: local（--local。--includes で includeIf の先まで）と worktree（--worktree。
+#   extensions.worktreeConfig があるときだけ）。global と system は対象にしない。
+#
+# 安全に調べる: `git config --list`・`git rev-parse`・`git cat-file` だけを使う。fsmonitor を
+#   起動しうる git のコマンド（status / diff / ls-files など）は使わない。設定は NUL 区切り（-z）で
+#   読む。値には改行を含められるので、行で分けると 1 つの値を別々の設定として読み違える。
+#
+# 許可の一覧: リポジトリの根の `.git-config-allow` の、**コミット済み（HEAD）の中身**。作業ツリーの
+#   ファイルや、追跡していないファイルは読まない（差分にもレビューにも現れないまま、検査を
+#   黙らせられるため）。textconv などのフィルターを通らないよう `git cat-file blob` で読む。
+#   1 行が `キー=値` の完全一致
+#   （キーは大文字小文字を区別しない。値は完全一致）。`#` から始まる行と空行は無視する。
+#   husky が立てる core.hooksPath のように、正当に使っているものを黙らせるために使う。
+#   値のないキーは `キー=`（右辺が空）と書く。照合はキーと値だけで、どのファイルの設定かは
+#   見ない（取り込み先に同じキーと値を置かれても黙る。限界として README に書いている）。
+#
+# 使い方:
+#   bash scripts/check-git-config.sh          検出（キー・値・設定のある場所）を標準出力へ出す
+#   bash scripts/check-git-config.sh --hook   SessionStart のフック用。種類と件数だけを出し、何があっても 0 で終わる
+#   bash scripts/check-git-config.sh --summary 種類と件数だけを出し、終了コードは通常どおり（doctor.sh が使う）
+#
+# --hook / --summary の出力は、エージェントの会話の文脈に入りうる（SessionStart、エージェントが
+#   doctor.sh を実行したとき）。設定の値・<名前>・取り込み先の
+#   パスは、設定を仕込んだ側が自由に書ける文字列なので、**文脈へ出さない**（指示に見える文を
+#   値に仕込めば、フックの報告の体裁でエージェントへ届くため）。検出したキーの種類（決まった
+#   表記）と件数だけを出し、詳細は手で実行して確かめるよう案内する。判定できなかったことも、
+#   決まった文言で文脈へ出す（黙ると、問題が無い状態と区別できない）。
+#
+# 終了コード: 0 = 該当なし（またはすべて許可済み） / 1 = 検出 / 2 = 判定できない
+# bash と git だけで動く（macOS の bash 3.2 でも動く。tr などの外部コマンドも使わない）。
+#
+# 限界: 引数なしの実行は、値と取り出し元をそのまま出す（人が確かめるため）。エージェントに
+#   実行させると、その出力は文脈に入る。
+
+set -uo pipefail
+
+ALLOW_FILE_NAME=".git-config-allow"
+SUMMARY=0
+HOOK=0
+case "${1:-}" in
+  --hook) SUMMARY=1; HOOK=1 ;;
+  --summary) SUMMARY=1 ;;
+  "") ;;
+  *)
+    echo "usage: bash scripts/check-git-config.sh [--hook|--summary]" >&2
+    exit 2
+    ;;
+esac
+
+# キー（git config --list の表記。節名と変数名は小文字）から、検出の種類を決まった表記で
+# 返す。対象でなければ何も出さない。<名前> の部分は仕込んだ側が書ける文字列なので、
+# 種類の表記には含めない。
+kind_of() {
+  case "${1}" in
+    core.fsmonitor | core.hookspath | core.sshcommand | core.askpass | core.gitproxy | core.editor | \
+      sequence.editor | credential.helper | gpg.program | diff.external)
+      printf '%s' "${1}"
+      ;;
+    credential.*.helper) printf 'credential.<URL>.helper' ;;
+    gpg.*.program) printf 'gpg.<形式>.program' ;;
+    diff.*.textconv) printf 'diff.<名前>.textconv' ;;
+    diff.*.command) printf 'diff.<名前>.command' ;;
+    filter.*.clean) printf 'filter.<名前>.clean' ;;
+    filter.*.smudge) printf 'filter.<名前>.smudge' ;;
+    filter.*.process) printf 'filter.<名前>.process' ;;
+    merge.*.driver) printf 'merge.<名前>.driver' ;;
+    remote.*.uploadpack) printf 'remote.<名前>.uploadpack' ;;
+    remote.*.receivepack) printf 'remote.<名前>.receivepack' ;;
+  esac
+}
+
+# core.fsmonitor の値が、組み込みのデーモンの指定（真偽値・整数）か。git は整数も
+# 真偽値として読む。
+is_builtin_fsmonitor() {
+  local v="${1}" r=1
+  shopt -s nocasematch
+  case "$v" in true | false | yes | no | on | off | "") r=0 ;; esac
+  shopt -u nocasematch
+  [[ "$v" =~ ^-?[0-9]+$ ]] && r=0
+  return "$r"
+}
+
+# 許可の一覧（ALLOW_LINES。`キー=値` の改行区切り）に、キー（大文字小文字を区別しない）と
+# 値（完全一致）が載っているか。
+ALLOW_LINES=""
+is_allowed() {
+  local key="${1}" val="${2}" line akey aval r=1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    akey="${line%%=*}"
+    aval=""
+    [[ "$line" == *=* ]] && aval="${line#*=}"
+    [[ "$aval" == "$val" ]] || continue
+    shopt -s nocasematch
+    [[ "$akey" == "$key" ]] && r=0
+    shopt -u nocasematch
+    [[ "$r" -eq 0 ]] && break
+  done <<<"$ALLOW_LINES"
+  return "$r"
+}
+
+# 判定の本体。検出を標準出力へ出し（--hook / --summary では出さない）、終了コードを返す。
+# 検出した種類を KINDS（重複なし、「, 」区切り）に、件数を FOUND に残す。
+KINDS=""
+FOUND=0
+run_check() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "[check-git-config] git が見つかりません。判定できません。" >&2
+    return 2
+  fi
+  local root
+  if ! root="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z "$root" ]]; then
+    echo "[check-git-config] git のリポジトリではありません。判定できません。" >&2
+    return 2
+  fi
+  # 読めるかを先に確かめる（下の -z の読み取りはプロセス置換なので、失敗を拾えない）。
+  # 引数は下の読み取りとそろえる（--includes が無いと、取り込み先だけが壊れているときに
+  # 確認だけが通り、読み取りの失敗が黙って「該当なし」になる）。
+  if ! git config --local --list --includes >/dev/null 2>&1; then
+    echo "[check-git-config] git の設定を読めませんでした。判定できません。" >&2
+    return 2
+  fi
+
+  # 許可の一覧は、コミット済み（HEAD）の中身だけを読む。
+  ALLOW_LINES=""
+  if git cat-file -e "HEAD:${ALLOW_FILE_NAME}" 2>/dev/null; then
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      case "$line" in "" | "#"*) continue ;; esac
+      ALLOW_LINES="${ALLOW_LINES}${line}"$'\n'
+    done < <(git cat-file blob "HEAD:${ALLOW_FILE_NAME}" 2>/dev/null)
+  fi
+
+  local origin kv key val kind worktree=0 pass
+  for pass in local worktree; do
+    if [[ "$pass" == worktree ]]; then
+      # extensions.worktreeConfig があるときだけ、local と別のファイル（config.worktree）を
+      # 読む（値の真偽は git の読み方が広いので見ない）。無ければ --worktree は local と同じ
+      # ものを読み直すだけなので、起動の経路で git を余計に起こさない。
+      [[ "$worktree" -eq 1 ]] || break
+      if ! git config --worktree --list --includes >/dev/null 2>&1; then
+        echo "[check-git-config] worktree の git の設定を読めませんでした。判定できません。" >&2
+        return 2
+      fi
+    fi
+    # -z の形: <origin>NUL<key>LF<value>NUL（値の無いキーは <key>NUL）
+    while IFS= read -r -d '' origin && IFS= read -r -d '' kv; do
+      key="${kv%%$'\n'*}"
+      val=""
+      [[ "$kv" == *$'\n'* ]] && val="${kv#*$'\n'}"
+      [[ "$key" == extensions.worktreeconfig ]] && worktree=1
+      # git config --list は節名と変数名を小文字で出す（大文字小文字が残るのは
+      # diff.<名前> などの <名前> だけ）。そのため照合は $key のままで足りる。
+      kind="$(kind_of "$key")"
+      [[ -n "$kind" ]] || continue
+      if [[ "$kind" == core.fsmonitor ]] && is_builtin_fsmonitor "$val"; then
+        continue
+      fi
+      is_allowed "$key" "$val" && continue
+      # 重複は取り除かない。worktree の設定は local と別のファイルだけを読むので重ならず、
+      # 改行を含められる値で重複を判定すると、値に別の設定の記録を埋め込んで、その設定を
+      # 要約から消せてしまう。
+      if [[ "$FOUND" -eq 0 && "$SUMMARY" -eq 0 ]]; then
+        echo "[check-git-config] 任意のコードを実行させうる git の設定があります（エージェントが git を呼ぶと実行されうる）:"
+      fi
+      FOUND=$((FOUND + 1))
+      case ", ${KINDS}, " in *", ${kind}, "*) ;; *) KINDS="${KINDS:+$KINDS, }$kind" ;; esac
+      [[ "$SUMMARY" -eq 1 ]] || echo "  ${key}=${val}   (${origin})"
+    done < <(git config "--${pass}" --list --show-origin --includes -z 2>/dev/null)
+  done
+
+  if [[ "$FOUND" -gt 0 ]]; then
+    [[ "$SUMMARY" -eq 1 ]] || echo "[check-git-config] 心当たりが無ければ設定を確認してください。正当な設定は、リポジトリの根の ${ALLOW_FILE_NAME} へ『キー=値』の行で書いてコミットすると知らせなくなります。"
+    return 1
+  fi
+  return 0
+}
+
+if [[ "$SUMMARY" -eq 1 ]]; then
+  # 文脈へ出しうるのは、決まった文言と、検出した種類（決まった表記）と件数だけ。
+  # まだ git のリポジトリでない場所（生成直後など）は、検査する設定が無いので黙って 0 で通す。
+  # rev-parse は設定ファイルが壊れていても失敗するので、失敗だけで「リポジトリでない」と
+  # 決めない（壊れた設定を黙って通すことになる）。git の文言を英語に固定し、出力の 1 行目が
+  # `fatal: not a git repository` で始まるときだけを見分ける。含むかで見ると、エラー文に入る
+  # 取り込み先のファイル名へこの語句を仕込まれ、壊れた設定を「リポジトリでない」と取り違える。
+  if command -v git >/dev/null 2>&1; then
+    if ! probe="$(LC_ALL=C git rev-parse --git-dir 2>&1)" \
+      && [[ "${probe%%$'\n'*}" == "fatal: not a git repository"* ]]; then
+      exit 0
+    fi
+  fi
+  rc=0
+  run_check 2>/dev/null || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      echo "[check-git-config] 任意のコードを実行させうる git の設定が ${FOUND} 件あります（種類: ${KINDS}）。"
+      echo "[check-git-config] 値はここに出しません。利用者に bash scripts/check-git-config.sh で確かめてもらうまで、このリポジトリで git を呼ぶ操作は慎重に扱ってください。"
+      ;;
+    *)
+      echo "[check-git-config] git の設定を検査できませんでした。bash scripts/check-git-config.sh で確かめてください（危険な設定が無いとは言えません）。"
+      ;;
+  esac
+  [[ "$HOOK" -eq 1 ]] && exit 0
+  exit "$rc"
+fi
+run_check
+TMPL
+      ;;
     'scripts/check-control-chars.sh')
       cat <<'TMPL'
 #!/usr/bin/env bash
@@ -5446,6 +6037,38 @@ while IFS= read -r -d '' md; do
     excluded_count=$((excluded_count + 1))
     continue
   fi
+  # 共通規範から生成した Claude Code 用の規則（.claude/rules/ai-playbook*.md）は走査しない。
+  # 本文は正本 .ai-playbook/shared-ai-rules.md の行をそのまま写したもので、相対リンクは
+  # .ai-playbook/ からの相対のまま残っている（ここからの相対では解決できない）。同じリンクは
+  # 正本が持ち、正本は走査されるので、見落としは生まれない。生成物かどうかは、先頭に付く
+  # 断りの行で見分ける（名前だけでは、手で書いた同名の規則まで外れる）。
+  case "$md" in
+    .claude/rules/ai-playbook*.md)
+      # 外すのは、frontmatter（あれば）の直後の最初の空でない行が断りの接頭辞で始まり、かつ、
+      # 断りの後の本文の空でない各行が、断りに書かれた正本（リポジトリのルートから読む）に含まれる
+      # ときだけ（正本から写した行だけのとき）。手で壊れたリンクを足した生成物、正本が読めない
+      # 生成物は、通常どおり走査する。断りの行（「> 」で始まる連続した行）と frontmatter は、
+      # 生成器が足す行なので本文として数えない。
+      gen_src="$(sed -n 's/^> 生成物: 正本 `\([^`]*\)`.*/\1/p' "$md" | sed -n '1p')"
+      case "$gen_src" in
+        ""|/*|..|../*|*/../*|*/..) gen_src="" ;;
+      esac
+      if [ -n "$gen_src" ] && [ -f "$gen_src" ] && awk 'BEGIN { st = 0; bad = 0 }
+              FILENAME == ARGV[1] { src[$0] = 1; next }
+              FNR == 1 && $0 == "---" { fm = 1; next }
+              fm { if ($0 == "---") fm = 0; next }
+              st == 0 { if ($0 ~ /^[ \t\r]*$/) next
+                        if ($0 ~ /^> 生成物:/) { st = 1; next }
+                        bad = 1; exit }
+              st == 1 { if ($0 ~ /^> /) next
+                        st = 2; if ($0 ~ /^[ \t\r]*$/) next }
+              st == 2 { if ($0 !~ /^[ \t\r]*$/ && !($0 in src)) { bad = 1; exit } }
+              END { exit (st == 2 && !bad) ? 0 : 1 }' "$gen_src" "$md"; then
+        excluded_count=$((excluded_count + 1))
+        continue
+      fi
+      ;;
+  esac
   md_count=$((md_count + 1))
   case "$md" in
     */*) mdir="${md%/*}" ;;
@@ -7601,6 +8224,55 @@ resolve_review_range() {
   resolve_review_range_without_base
 }
 
+# レビューする範囲の変更ファイルのうち、エージェントの設定・フックに当たるものを調べて出力し、
+# 環境変数 SECOND_OPINION_AGENT_CONFIG_PATHS（改行区切り）へ入れて export する。
+#
+# 対象: .claude/ 配下、.mcp.json、.github/workflows/ 配下、.githooks/ 配下、.husky/ 配下、
+# .git-config-allow（check-git-config.sh の許可の一覧。ここへ書き足すと、危険な git の設定を
+# 検査から黙らせられるため）、.gitattributes（どの階層でも。filter / diff / merge のドライバを有効にする）、
+# .gitmodules、.devcontainer/ 配下（postCreateCommand など）、.vscode/ 配下（tasks.json など）、
+# .claude/settings.json が呼ぶフックの本体（confirm-merge-hook.sh / session-coord-hook.sh /
+# check-git-config.sh）。どれも、任意のコードの実行や権限に関わる。ビルドスクリプトと同じ重さでレビューする必要が
+# あるのに、差分の中では普通のファイルに見えて埋もれる。そこで一覧にして、利用者に見せ、
+# 第二意見の依頼文にも添える（second-opinion-review.sh が環境変数を読む）。
+#
+# **通過の判定と終了コードは変えない。** 知らせるだけで、拒否はしない。
+# 範囲は resolve_review_range が決めた REVIEW_BASE / REVIEW_RANGE に従い、どちらも無いときは
+# ステージ済み差分を見る。レビュー対象が無いとき（REVIEW_NO_TARGET）は空にする。
+# 呼び出しのたびに環境変数を必ず設定し直す（外から入った値を第二意見へ流さない）。
+resolve_agent_config_paths() {
+  local paths="" f
+  local -a args
+  export SECOND_OPINION_AGENT_CONFIG_PATHS=""
+  command -v git >/dev/null 2>&1 && [[ "$REVIEW_NO_TARGET" -eq 0 ]] || return 0
+  if [[ -n "$REVIEW_BASE" ]]; then
+    args=(--cached "$REVIEW_BASE")
+  elif [[ -n "$REVIEW_RANGE" ]]; then
+    args=("$REVIEW_RANGE")
+  else
+    args=(--cached)
+  fi
+  # NUL 区切りで読む（改行を含むファイル名でも 1 件として扱う）。一覧は改行区切りで渡す
+  # ので、名前の中の改行は ? に置き換える。
+  while IFS= read -r -d '' f; do
+    f="${f//$'\n'/?}"
+    case "$f" in
+      .claude/* | .mcp.json | .github/workflows/* | .githooks/* | .husky/* | .git-config-allow | \
+        .gitattributes | */.gitattributes | .gitmodules | .devcontainer/* | .vscode/* | \
+        scripts/confirm-merge-hook.sh | scripts/session-coord-hook.sh | scripts/check-git-config.sh)
+        paths="${paths:+$paths$'\n'}$f"
+        ;;
+    esac
+  # --no-renames: 改名を検出すると移動先しか出ず、対象の場所から外へ移した（消した）
+  # ことが一覧に出ない。移動元と移動先の両方を出す。
+  done < <(git -c core.quotepath=false diff --name-only -z --no-renames "${args[@]}" -- 2>/dev/null || true)
+  [[ -n "$paths" ]] || return 0
+  # 表示する前に制御文字を落とす。ファイル名は変更した側が付けられ、ESC や CR で
+  # この行を消したり上書きしたりできるため。
+  echo "[loop-gate] エージェントの設定・フックに触れる変更: $(printf '%s' "${paths//$'\n'/, }" | LC_ALL=C tr -d '[:cntrl:]')"
+  SECOND_OPINION_AGENT_CONFIG_PATHS="$paths"
+}
+
 # 第二意見の出力を記録へ残す。
 #
 # **実行失敗を「指摘あり」として記録しない。** second-opinion-review.sh は CLI の不在・
@@ -7697,6 +8369,7 @@ main() {
   if [[ "${LOOP_GATE_REVIEW_CMD-__UNSET__}" == "__UNSET__" ]]; then
     if [[ -f "$HERE/second-opinion-review.sh" ]]; then
       resolve_review_range
+      resolve_agent_config_paths
       local review_ok=0
       # 出力を捕まえる。**回し直しでは代われない**——第二意見は非決定的で、同じ差分
       # でも実行のたびに結果が変わる（review-workflow.md「第二意見の非決定性」）。
@@ -7750,6 +8423,10 @@ main() {
         exit 1
       fi
     else
+      # 第二意見を回さなくても、エージェントの設定・フックに触れる変更の一覧は出す。
+      # 一覧は利用者に見せるためのもので、第二意見へ渡すのは用途の 1 つにすぎない。
+      resolve_review_range
+      resolve_agent_config_paths
       echo "[loop-gate] SKIP (no reviewer present)"
     fi
   elif [[ -n "$LOOP_GATE_REVIEW_CMD" ]]; then
@@ -7781,6 +8458,7 @@ main() {
     #     「対象なし」と出力した（範囲を受けていない）: レビューされていないので
     #     GATE_FAIL にし、記録も作らない。通すと手元のゲートが偽の緑になる。
     resolve_review_range
+    resolve_agent_config_paths
     local cmd_capture cmd_ok=0 cmd_scope="staged" cmd_unreviewed=0 cmd_skip=0
     if [[ -n "$REVIEW_RANGE" ]]; then
       if [[ -n "$REVIEW_RANGE_REASON" ]]; then
@@ -7818,6 +8496,9 @@ main() {
   else
     # **記録を残さない。** レビューを明示的に止めた状態なので、記録が無いのが正しい。
     # push すれば確認側が赤を出す——**それは不具合ではなく、止めたことが見えている形である。**
+    # 第二意見を止めても、エージェントの設定・フックに触れる変更の一覧は出す（上と同じ理由）。
+    resolve_review_range
+    resolve_agent_config_paths
     echo "[loop-gate] SKIP (disabled by LOOP_GATE_REVIEW_CMD='')"
     echo "[loop-gate] 第二意見を止めたので記録も残しません。push すると確認側が赤を出します。"
   fi
@@ -11218,11 +11899,20 @@ TMPL
       # git 操作・ゲートの確認と登録）と Edit|Write（文書の確認）、PostToolUse の
       # Bash と PostToolUseFailure の Bash（実行のあいだだけの登録の解放。失敗した呼び出しは
       # PostToolUse ではなく PostToolUseFailure が来る）へ配る。
+      # SessionStart にはもう 1 つ、scripts/check-git-config.sh --hook（任意のコードを実行させうる
+      # git の設定の検出。失敗しても通し、検出の要約だけを文脈に出す）を並べる。
       #
       # 既存ファイルは衝突ポリシー（既定 skip）で温存される。既に settings.json を
       # 持つプロジェクトへ後から入れる場合は、この hooks 節を手で足すことになる。
+      #
+      # permissions は「締める側」のキー blockWritesOutsideWorkingDirectories だけを持つ。
+      # 許可リスト（allow など）は持たない。確認フックの hook にだけ onFailure=block を付ける
+      # （フックが失敗したとき通さず止める）。セッション協調フックは fail-open が規範なので付けない。
       cat <<'TMPL'
 {
+  "permissions": {
+    "blockWritesOutsideWorkingDirectories": true
+  },
   "hooks": {
     "SessionStart": [
       {
@@ -11230,6 +11920,10 @@ TMPL
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-coord-hook.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/check-git-config.sh\" --hook"
           }
         ]
       }
@@ -11240,7 +11934,8 @@ TMPL
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/confirm-merge-hook.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/confirm-merge-hook.sh\"",
+            "onFailure": "block"
           },
           {
             "type": "command",
@@ -11349,6 +12044,18 @@ ai_cli_spec() {
     gemini)  printf 'gemini @google/gemini-cli' ;;
     copilot) printf 'copilot @github/copilot' ;;
     *)       printf '' ;;
+  esac
+}
+
+# npm 配布の AI CLI の版の下限（install-ai-tools.sh の install_if_missing の第 3 引数）。
+# 下限より古いものは @latest で入れ替え、入れたあとも古ければ導入を失敗にする。
+# claude の値は doctor.sh の CLAUDE_MIN_VERSION と同じ（tests/test-install-ai-tools-versions.sh が照合する）。
+# 下限を持たないもの（copilot）は空を返す。codex は専用の関数が自分の下限を持つ。
+ai_cli_min_version() {
+  case "$1" in
+    claude) printf '2.1.314' ;;
+    gemini) printf '0.64.0' ;;
+    *)      printf '' ;;
   esac
 }
 
@@ -11891,21 +12598,22 @@ second_opinion_engine_fill() {
 # トークン分岐は行わない。未選択なら空。
 # .env.example の __SECOND_OPINION_ENGINE_LINES__。第二意見のエンジン選択。
 #
-# 空なら gemini で、gemini だけの構成では指定しなくても挙動は変わらない。したがってこの
-# 記入欄が要るのは antigravity / codex を選べる構成だけで、どちらかを --with-* で選んだ
-# ときだけ出す。常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
+# 空なら codex（既定は gemini から codex に変わった）。gemini / antigravity / codex のいずれかを
+# --with-* で選んだときだけ欄を出す（AI CLI を 1 つも選ばない構成では出さない）。gemini だけの
+# 構成も出すのは、空のままだと既定の codex（未導入）へ落ちて止まるため、gemini を記入しておく。
+# 常時出すと、それらを導入していない生成物に「選べないエンジン」の記入欄が残る。
 # 値は、選んだエンジンから一意に決まるときだけ記入済みにする（下記）。
 build_second_opinion_engine_block() {
   # $1 は resolve_second_opinion_engine_default の結果（キーの欄と同じ判断を使う）
-  has_with antigravity || has_with codex || { printf ''; return; }
+  has_with gemini || has_with antigravity || has_with codex || { printf ''; return; }
 
   # 値は、選んだエンジンから一意に決まるときだけ記入済みにする。
   # - gemini を選んだ構成（ほかと併用）では gemini。明示しておけば、.env を持つ作業ツリーでは
   #   reviewer の通知（既定へ落ちた知らせ）が出ず、.env を写し忘れた作業ツリーでだけ出る。
   # - gemini を選ばず、代わりのエンジンを 1 つだけ選んだ構成では、そのエンジン。空のままだと
-  #   既定の gemini（CLI もキーも無い）で回り、設定するまで使えないため。
+  #   既定の codex で回り、antigravity だけの構成では codex が無く、設定するまで使えないため。
   # - gemini を選ばず antigravity と codex の両方を選んだときは、一意に決まらないので空のまま
-  #   （既定の gemini へ落ちたことは reviewer の通知が知らせる）。
+  #   （既定の codex へ落ちたことは reviewer の通知が知らせる）。
   # - --second-opinion-engine の指定があれば、上のどれよりも優先してその値（検証済み）。
   local engine_default="$1" key_note="" key_line=""
   # キーの欄が無い構成では、読み手に見えないキーを指さない。
@@ -11914,10 +12622,19 @@ build_second_opinion_engine_block() {
     key_line=$'\n#\n# いずれも GEMINI_API_KEY は使わない。'
   fi
 
-  if has_with antigravity && has_with codex; then
+  if ! has_with antigravity && ! has_with codex; then
+    # gemini だけ（上の判定で、ここへ来るのは gemini を選んだ構成）。
     cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
-# 第二意見レビューのエンジン（gemini | antigravity | codex）。空なら gemini。
+# 第二意見レビューのエンジン。空なら第二意見レビューの既定のエンジンになるが、この構成では
+# それを導入しないため、導入した gemini を記入済みで出す。
+# 生成時に --second-opinion-engine で明示した場合は、その値になる。
+SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
+ENGTMPL
+  elif has_with antigravity && has_with codex; then
+    cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
+
+# 第二意見レビューのエンジン（gemini | antigravity | codex）。空なら codex。
 # gemini も選んで生成した構成では gemini を記入済みで出す。
 # 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
@@ -11936,7 +12653,7 @@ ENGTMPL
   elif has_with codex; then
     cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
-# 第二意見レビューのエンジン（gemini | codex）。空なら gemini。
+# 第二意見レビューのエンジン（gemini | codex）。空なら codex。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、codex だけなら codex）を記入済みで出す。
 # 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
@@ -11951,7 +12668,8 @@ ENGTMPL
   else
     cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
 
-# 第二意見レビューのエンジン（gemini | antigravity）。空なら gemini。
+# 第二意見レビューのエンジン（gemini | antigravity）。空なら第二意見レビューの既定のエンジン（この構成では
+# 導入していないため、使うエンジンを記入しておく）。
 # 生成時に選んだエンジン（gemini を選んでいれば gemini、antigravity だけなら antigravity）を記入済みで出す。
 # 生成時に --second-opinion-engine で明示した場合は、その値になる。
 #
@@ -11970,7 +12688,7 @@ ENGTMPL
 # 展開する build_codex_block）。呼び出しは導入の 1 つだけ（agy のテレメトリ無効化に
 # 相当するものは codex には無い）。
 build_ai_install_block() {
-  local tool spec cmd pkg out=""
+  local tool spec cmd pkg min out=""
   while IFS= read -r tool; do
     [[ -n "$tool" ]] || continue
     if [[ "$tool" == "antigravity" ]]; then
@@ -11985,7 +12703,12 @@ build_ai_install_block() {
     spec="$(ai_cli_spec "$tool")"
     cmd="${spec%% *}"
     pkg="${spec#* }"
-    out+="install_if_missing $cmd \"$pkg\""$'\n'
+    min="$(ai_cli_min_version "$tool")"
+    if [[ -n "$min" ]]; then
+      out+="install_if_missing $cmd \"$pkg\" \"$min\""$'\n'
+    else
+      out+="install_if_missing $cmd \"$pkg\""$'\n'
+    fi
   done < <(selected_ai_tools)
   # --claude-remote-control のときだけ、設定のマージを呼ぶ（関数は __CLAUDE_FUNCTION_LINES__）。
   # claude の導入行（上の loop）より後ろに置く。未指定なら 1 行も足さない。
@@ -12096,32 +12819,228 @@ build_agy_block() {
   has_with antigravity || { printf ''; return; }
   cat <<'AGYTMPL'
 # agy（Antigravity CLI）は npm 配布ではないため install_if_missing の同型に乗らない。
-# 配布元のインストーラを取得して実行し、~/.local/bin/agy へ置く。
+# 配布元のインストーラ（curl で取って bash へ渡す形）は実行せず、そのインストーラと
+# 同じ手順を自分で行う。マニフェストを取り、本体を落とし、SHA-512 を照合してから
+# ~/.local/bin/agy へ置く。照合が通らないものは、何も置かずに失敗にする。
+#
+# 配布元の URL とマニフェストの形（version・url・sha512 のキー）は、配布元の
+# インストーラを読んで確かめたもの。変われば、導入は理由を出して止まる。
 #
 # 認証は OAuth のみで、API キーには対応しない。導入だけでは使えず、初回に
 # 対話で `agy` を起動して Google アカウントへログインする必要がある。資格情報は
 # ~/.gemini/antigravity-cli/ 配下に置かれ、この devcontainer では ~/.gemini が
 # named volume（gemini-storage）なので rebuild しても消えない。
-install_agy_if_missing() {
-  if command -v agy >/dev/null 2>&1; then
-    echo "[install-ai-tools] agy already installed, skipping"
-    return 0
+AGY_MIN_VERSION="1.3.4"
+AGY_DOWNLOAD_BASE_URL="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
+
+# 配布元のインストーラと同じ判定で、プラットフォーム名を標準出力へ返す。
+# 配布元が用意する組（下の表）に無いものは、理由を標準エラーへ出して 1 を返す。
+agy_platform() {
+  local os arch platform
+  case "$(uname -s)" in
+    Darwin) os="darwin" ;;
+    Linux)
+      # Android は Bionic 版が要るが、この導入は対応しない（表に無い）。
+      if [[ "$(uname -o 2>/dev/null || true)" == "Android" ]]; then os="android"; else os="linux"; fi
+      ;;
+    *)
+      echo "[install-ai-tools] error: agy が対応しない OS です: $(uname -s)" >&2
+      return 1
+      ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *)
+      echo "[install-ai-tools] error: agy が対応しないアーキテクチャです: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  platform="${os}_${arch}"
+  if [[ "$os" == "linux" ]]; then
+    # musl の検出。パイプの後ろに grep -q を置かない（pipefail で誤って落ちる）。
+    # musl のローダーは、今のアーキテクチャのものだけを見る（別のアーキテクチャ用が
+    # 置いてあるだけの glibc の環境を、musl と取り違えないため）。
+    local loader
+    if [[ "$arch" == "amd64" ]]; then loader="/lib/libc.musl-x86_64.so.1"; else loader="/lib/libc.musl-aarch64.so.1"; fi
+    if [[ -f "$loader" ]]; then
+      platform="${platform}_musl"
+    else
+      case "$(ldd /bin/ls 2>&1 || true)" in
+        *musl*) platform="${platform}_musl" ;;
+      esac
+    fi
   fi
-  echo "[install-ai-tools] installing agy (Antigravity CLI) ..."
-  curl -fsSL https://antigravity.google/cli/install.sh | bash
-  # インストーラは ~/.local/bin へ置く。PATH に無ければ、導入直後の同一シェルからは
-  # 見えない。これは失敗ではないので、次に何をすればよいかを言うに留める。
+  case "$platform" in
+    linux_amd64|linux_arm64|linux_amd64_musl|linux_arm64_musl|darwin_amd64|darwin_arm64)
+      printf '%s' "$platform"
+      ;;
+    *)
+      echo "[install-ai-tools] error: agy の配布に無いプラットフォームです: $platform（対応: linux_amd64 / linux_arm64 / linux_amd64_musl / linux_arm64_musl / darwin_amd64 / darwin_arm64）" >&2
+      return 1
+      ;;
+  esac
+}
+
+# マニフェスト（JSON）の最上位の、文字列のキーの値を返す。JSON として読めない・
+# 最上位がオブジェクトでない・キーが無い・文字列でないときは、空を返して 1 を返す
+# （形が変わったマニフェストを、文字列の拾い読みで通さないため）。jq は
+# disable_agy_telemetry と同じく前提にする（呼び出し側が有無を確かめる）。
+agy_manifest_value() {
+  printf '%s' "$1" | jq -er --arg k "$2" \
+    'if type == "object" and (.[$k] | type) == "string" and .[$k] != "" then .[$k] else error("missing") end' 2>/dev/null
+}
+
+# ファイルの SHA-512（16 進、小文字）を返す。
+# どちらの道具も無ければ、理由を出して 1 を返す（「一致しない」と取り違えさせない）。
+agy_sha512() {
+  if command -v sha512sum >/dev/null 2>&1; then
+    sha512sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 512 "$1" | cut -d' ' -f1
+  else
+    echo "[install-ai-tools] error: SHA-512 を計算する道具（sha512sum か shasum）がありません" >&2
+    return 1
+  fi
+}
+
+# マニフェストを取り、本体を落として SHA-512 を照合し、~/.local/bin/agy へ置く。
+# どこかで失敗したら、理由を出して何も置かずに 1 を返す。一時ファイルは引数の
+# ディレクトリ（呼び出し側が mktemp -d で作り、終わったら消す）の配下に作る。
+# trap を使わないのは、スクリプトの EXIT の trap を上書きしないため。
+agy_install_from_manifest() {
+  local tmp="$1"
+  local platform manifest version url sha512 payload actual target_dir target staged
+  platform="$(agy_platform)" || return 1
+
+  # 転送先も HTTPS に限る（HTTP へ転送されると、平文のマニフェストで URL と SHA-512 を
+  # まとめて差し替えられ、照合が意味を失う）。本体の取得も同じ。
+  if ! manifest="$(curl -fsSL --proto '=https' --proto-redir '=https' "$AGY_DOWNLOAD_BASE_URL/manifests/$platform.json" 2>/dev/null)" || [[ -z "$manifest" ]]; then
+    echo "[install-ai-tools] error: agy のマニフェストを取得できません: $AGY_DOWNLOAD_BASE_URL/manifests/$platform.json" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[install-ai-tools] error: jq が無いため agy のマニフェストを読めません。jq を導入してから再実行してください" >&2
+    return 1
+  fi
+  version="$(agy_manifest_value "$manifest" version)" || version=""
+  url="$(agy_manifest_value "$manifest" url)" || url=""
+  sha512="$(agy_manifest_value "$manifest" sha512)" || sha512=""
+  if [[ -z "$version" || -z "$url" || -z "$sha512" ]]; then
+    echo "[install-ai-tools] error: agy のマニフェストの形が想定と違います（version・url・sha512 のキーを読めません）" >&2
+    return 1
+  fi
+  if ai_cli_version_is_old "$version" "$AGY_MIN_VERSION"; then
+    echo "[install-ai-tools] error: マニフェストの agy の版 $version が下限 $AGY_MIN_VERSION 未満（または読めない綴り）です" >&2
+    return 1
+  fi
+  case "$url" in
+    https://*) ;;
+    *)
+      echo "[install-ai-tools] error: agy のマニフェストの url が https ではありません: $url" >&2
+      return 1
+      ;;
+  esac
+
+  payload="$tmp/payload"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' -o "$payload" "$url"; then
+    echo "[install-ai-tools] error: agy の本体を取得できません: $url" >&2
+    return 1
+  fi
+  actual="$(agy_sha512 "$payload")" || return 1
+  if [[ "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" != "$(printf '%s' "$sha512" | tr 'A-F' 'a-f')" ]]; then
+    echo "[install-ai-tools] error: agy の本体の SHA-512 がマニフェストと一致しません。何も置かずに中止します" >&2
+    return 1
+  fi
+
+  staged="$payload"
+  case "$url" in
+    *.tar.gz*)
+      if ! tar -xzf "$payload" -C "$tmp" antigravity 2>/dev/null; then
+        echo "[install-ai-tools] error: agy のアーカイブから本体（antigravity）を取り出せません" >&2
+        return 1
+      fi
+      staged="$tmp/antigravity"
+      ;;
+  esac
+
+  # 置く前に、取り出した本体そのものの版を確かめる。SHA-512 はマニフェストとの一致しか
+  # 示さず、本体が動くことや下限以上であることは示さない。PATH に ~/.local/bin が
+  # 無い環境では、置いたあとに PATH から確かめることもできない。
+  chmod +x "$staged" 2>/dev/null || true
+  actual="$(ai_cli_version "$staged")"
+  if ai_cli_version_is_old "$actual" "$AGY_MIN_VERSION"; then
+    echo "[install-ai-tools] error: 取り出した agy の本体の版が $AGY_MIN_VERSION 未満か、読めません（実際: ${actual:-不明}）。何も置かずに中止します" >&2
+    return 1
+  fi
+
+  target_dir="$HOME/.local/bin"
+  target="$target_dir/agy"
+  if ! mkdir -p "$target_dir"; then
+    echo "[install-ai-tools] error: $target_dir を作れません" >&2
+    return 1
+  fi
+  # 置き先がディレクトリだと、mv はその中へ移して成功してしまう。
+  if [[ -d "$target" && ! -L "$target" ]]; then
+    echo "[install-ai-tools] error: $target がディレクトリのため、agy を置けません" >&2
+    return 1
+  fi
+  # 同じディレクトリへ一時の名前で置いてから mv で差し替える（動いている本体を
+  # 上書きして「text file busy」になることを避け、途中で切れても半端な本体を残さない）。
+  if ! cp "$staged" "$target.new.$$" || ! chmod +x "$target.new.$$" || ! mv -f "$target.new.$$" "$target"; then
+    rm -f "$target.new.$$"
+    echo "[install-ai-tools] error: agy を $target へ置けません" >&2
+    return 1
+  fi
+  if [[ "$platform" == darwin_* ]]; then
+    xattr -d com.apple.quarantine "$target" 2>/dev/null || true
+  fi
+  # 配布元のインストーラと同じく、PATH の設定などを agy 自身に任せる。配布元も
+  # この終了コードで止めないので、導入は失敗にしない。ただし黙って捨てず、知らせる。
+  if ! "$target" install; then
+    echo "[install-ai-tools] warning: 'agy install'（PATH の設定など）が非 0 で終わりました。~/.local/bin が PATH にあるかを確かめてください" >&2
+  fi
+}
+
+install_agy_if_missing() {
+  local have=""
+  if command -v agy >/dev/null 2>&1; then
+    have="$(ai_cli_version agy)"
+    if ! ai_cli_version_is_old "$have" "$AGY_MIN_VERSION"; then
+      echo "[install-ai-tools] agy ${have} already installed (>= $AGY_MIN_VERSION), skipping"
+      return 0
+    fi
+    echo "[install-ai-tools] agy ${have:-（版を読めません）} は $AGY_MIN_VERSION 未満です。入れ替えます ..."
+  else
+    echo "[install-ai-tools] installing agy (Antigravity CLI) ..."
+  fi
+  local tmp rc=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/agy-install.XXXXXX")" || {
+    echo "[install-ai-tools] error: 一時ディレクトリを作れません" >&2
+    return 1
+  }
+  agy_install_from_manifest "$tmp" || rc=$?
+  rm -rf "$tmp"
+  [[ "$rc" -eq 0 ]] || return 1
+  hash -r
+
+  # ~/.local/bin が PATH に無ければ、導入直後の同一シェルからは見えない。これは
+  # 失敗ではないので、次に何をすればよいかを言うに留める。
   #
   # ただし「PATH に無いだけ」と「そもそも置かれていない」を取り違えない。実体の
-  # 有無で分ける。curl 自体の失敗は set -e + pipefail が捕まえるが、インストーラが
-  # 0 で終わりながらバイナリを置かない経路はそれをすり抜ける。取り違えると、導入に
-  # 失敗しているのに成功として先へ進む。
+  # 有無で分ける。取り違えると、導入に失敗しているのに成功として先へ進む。
   if command -v agy >/dev/null 2>&1; then
-    echo "[install-ai-tools] agy installed: $(command -v agy)"
-  elif [[ -x "$HOME/.local/bin/agy" ]]; then
+    have="$(ai_cli_version agy)"
+    if ai_cli_version_is_old "$have" "$AGY_MIN_VERSION"; then
+      echo "[install-ai-tools] error: 導入後も PATH 上の agy の版が $AGY_MIN_VERSION 未満です（実際: ${have:-不明}、$(command -v agy)）" >&2
+      echo "                   ~/.local/bin より前にある古い agy が優先されています。" >&2
+      return 1
+    fi
+    echo "[install-ai-tools] agy installed: $(command -v agy) (${have})"
+  elif [[ -f "$HOME/.local/bin/agy" && -x "$HOME/.local/bin/agy" ]]; then
     echo "[install-ai-tools] agy installed to ~/.local/bin (PATH に無いため現シェルからは見えません)"
   else
-    echo "[install-ai-tools] error: インストーラは完了しましたが agy が見つかりません" >&2
+    echo "[install-ai-tools] error: 導入は完了しましたが agy が見つかりません" >&2
     echo "                   ~/.local/bin/agy が存在しません。導入は失敗しています。" >&2
     return 1
   fi
@@ -12205,12 +13124,12 @@ AGYTMPL
 build_codex_block() {
   has_with codex || { printf ''; return; }
   cat <<'CODEXTMPL'
-# codex（Codex CLI）は npm 配布だが、install_if_missing の同型には乗らない。
+# codex（Codex CLI）は npm 配布で、install_if_missing に版の下限を渡して導入する。
 #
 # 版が要件になる。第二意見レビューの既定モデル gpt-6-sol は、ある版から CLI の
-# 一覧に出るようになった綴りで、それより古い CLI は引けない。install_if_missing は
+# 一覧に出るようになった綴りで、それより古い CLI は引けない。下限が無いと、
 # 「PATH に codex が在れば飛ばす」ので、古い版が先に入っている環境は更新されず、
-# レビューのたびに失敗する。だから在るときも版を見る。
+# レビューのたびに失敗する。だから在るときも版を見る（版の比較は共通の関数）。
 #
 # 認証は ChatGPT アカウントの OAuth（または API キー）で、導入だけでは使えない。
 # 初回に対話で `codex login` を通す必要がある。資格情報は ~/.codex/auth.json に
@@ -12218,49 +13137,11 @@ build_codex_block() {
 # rebuild しても消えない。
 CODEX_MIN_VERSION="0.156.0"
 
-# 版の比較。`sort -V` は BSD 系に無い版があるので使わない。3 つの数へ分けて
-# 桁ごとに比べる。
-#
-# 読めない綴りは「古い」として扱う（fail-closed）。入れ替えは冪等で副作用が
-# 小さい一方、読めないまま通すと、要件を満たさない CLI で回り続けることになる。
-codex_version_is_old() {
-  local have="$1" want="$2"
-  awk -v have="$have" -v want="$want" '
-    function num(s, part) { split(s, a, "."); return a[part] + 0 }
-    BEGIN {
-      if (have !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { exit 0 }   # 読めない → 古い扱い
-      for (i = 1; i <= 3; i++) {
-        h = num(have, i); w = num(want, i)
-        if (h > w) { exit 1 }
-        if (h < w) { exit 0 }
-      }
-      exit 1
-    }'
-}
-
 install_codex_if_missing() {
-  local have=""
-  if command -v codex >/dev/null 2>&1; then
-    # `codex --version` は "codex-cli <版>" の形。数だけを取る。
-    have="$(codex --version 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
-    if ! codex_version_is_old "$have" "$CODEX_MIN_VERSION"; then
-      echo "[install-ai-tools] codex ${have} already installed (>= $CODEX_MIN_VERSION), skipping"
-      return 0
-    fi
-    echo "[install-ai-tools] codex ${have:-（版を読めません）} は $CODEX_MIN_VERSION 未満です。入れ替えます ..."
-  else
-    echo "[install-ai-tools] installing @openai/codex ..."
-  fi
-
-  npm install -g "@openai/codex@latest"
-
-  have="$(codex --version 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
-  if codex_version_is_old "$have" "$CODEX_MIN_VERSION"; then
-    echo "[install-ai-tools] error: 導入後も codex の版が $CODEX_MIN_VERSION 未満です（実際: ${have:-不明}）" >&2
+  if ! install_if_missing codex "@openai/codex" "$CODEX_MIN_VERSION"; then
     echo "                   第二意見の既定のモデル gpt-6-sol を引けません。" >&2
     return 1
   fi
-  echo "[install-ai-tools] codex installed: $(command -v codex) (${have})"
   echo "[install-ai-tools] codex は認証が別です。初回は対話で 'codex login' を通してください。"
 }
 CODEXTMPL
@@ -12900,6 +13781,96 @@ resolve_playbook_source_or_die() {
     echo "       何も書き込んでいません。" >&2
     exit 1
   fi
+  # 規則の生成に使う正本の印が正しいかと、規則を置けるかも、書き込みの前に確かめる
+  # （印の誤りで、規範を書いたあとに生成だけ止まる状態を作らない）。
+  claude_rules_load
+}
+
+# --with-claude のとき、共通規範（shared-ai-rules.md）を Claude Code 用の規則に分けて
+# 生成し、CLAUDE.md からは全文の取り込みを外す構成にするか。規範が次の 2 つを持つときだけ
+# 真にする（持たない古い規範では従来どおり、全文を CLAUDE.md から取り込む。この機能の
+# ために、要求する規範の版を上げない）。
+#   - 正本 shared-ai-rules.md
+#   - 取り込みを project-ai-rules.md だけにした雛形 templates/claude-entry-imports-rules.md
+# 生成を行う条件（規範を配置する構成の --with-claude）と、CLAUDE.md を組み立てる条件を
+# 同じ判定にする。片方だけ真だと、全文の取り込みが外れたのに規則が無い（規範が載らない）、
+# または規則があるのに全文も載る（二重）状態になる。
+#
+# さらに、DCB が作っていない既存のファイルが規則の置き先にあって規則を置けない
+# （CLAUDE_RULES_CONFLICT が空でない）ときも偽にする。規則を置けないのに CLAUDE.md だけ
+# 全文の取り込みを外すと、常時の部分が載らなくなるため、その場合は規則を置かず、CLAUDE.md も
+# 従来の雛形のままにする（警告は claude_rules_load が出す）。
+claude_rules_enabled() {
+  should_install_playbook || return 1
+  has_with claude || return 1
+  [[ -z "$CLAUDE_RULES_CONFLICT" ]] || return 1
+  [[ -f "$PLAYBOOK_DIR/$CLAUDE_RULES_SOURCE_NAME" && -f "$PLAYBOOK_DIR/templates/claude-entry-imports-rules.md" ]]
+}
+
+# 生成する規則のファイル名（改行区切り）と、置けない既存ファイルの相対パス（改行区切り）を、
+# 書き込みの前に 1 回だけ求めて変数に持つ。claude_rules_rel_paths などが何度も呼ばれても、
+# 正本を読み直さない。resolve_playbook_source_or_die が呼ぶ。印の誤りがあれば、何も書かずに止める。
+#
+# 置けない既存ファイル: 置き先に既にあり、DCB が生成した中身ではないもの。
+#   - 新しく生成するとき: 中身が、これから生成する中身と違い、ORIGIN に hash: の記録も無い
+#     （衝突の扱い skip / overwrite / prompt のどれでも同じ。同じ中身なら、再実行で何も変わらない
+#     ので衝突としない）。
+#   - --upgrade: ORIGIN に hash: の記録が無い（DCB が作っていない。置こうとしても .dcb-new になる）。
+CLAUDE_RULES_NAMES=""
+CLAUDE_RULES_CONFLICT=""
+claude_rules_load() {
+  local src="$PLAYBOOK_DIR/$CLAUDE_RULES_SOURCE_NAME" tmp name rel dest origin
+  CLAUDE_RULES_NAMES=""
+  CLAUDE_RULES_CONFLICT=""
+  should_install_playbook || return 0
+  has_with claude || return 0
+  [[ -f "$src" && -f "$PLAYBOOK_DIR/templates/claude-entry-imports-rules.md" ]] || return 0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/dcb-claude-rules-check.XXXXXX")" || {
+    echo "error: 一時ディレクトリを作れません（Claude Code 用の規則の検査）。" >&2
+    exit 1
+  }
+  if ! CLAUDE_RULES_NAMES="$(dcb_render_claude_rules "$src" "$tmp")"; then
+    rm -rf "$tmp"
+    echo "       正本 $CLAUDE_RULES_SOURCE_NAME の claude-rules の印を直してください。何も書き込んでいません。" >&2
+    exit 1
+  fi
+  origin="$OUTPUT_DIR/$ORIGIN_REL_PATH"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    rel=".claude/rules/$name"
+    dest="$OUTPUT_DIR/$rel"
+    [[ -e "$dest" || -L "$dest" ]] || continue
+    if [[ "$UPGRADE" == "true" ]]; then
+      [[ -n "$(dcb_origin_get "$origin" "hash:$rel" 2>/dev/null || true)" ]] && continue
+    else
+      # 衝突の扱い（skip / overwrite / prompt）には依らない。overwrite でも prompt でも、DCB が
+      # 作っていない規則を巻き込むと、規則だけ置かれない（断られる）ことが起きうるため、
+      # 同じに扱う。DCB が作った記録があれば衝突としない。
+      [[ -n "$(dcb_origin_get "$origin" "hash:$rel" 2>/dev/null || true)" ]] && continue
+      [[ ! -L "$dest" ]] && diff -q "$tmp/$name" "$dest" >/dev/null 2>&1 && continue
+    fi
+    CLAUDE_RULES_CONFLICT="$CLAUDE_RULES_CONFLICT$rel"$'\n'
+  done <<< "$CLAUDE_RULES_NAMES"
+  rm -rf "$tmp"
+  if [[ -n "$CLAUDE_RULES_CONFLICT" ]]; then
+    echo "warning: DCB が作っていない既存のファイルがあるため、Claude Code 用の規則（.claude/rules/ai-playbook*.md）を置きません。CLAUDE.md も共通規範の全文を取り込む従来の形のままにします（規則だけ置かないと、常時の部分が載らなくなるため）。" >&2
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] || echo "  $rel" >&2
+    done <<< "$CLAUDE_RULES_CONFLICT"
+    echo "         規則を使うには、これらのファイルを移すか消してから、もう一度実行してください。" >&2
+  fi
+}
+
+# 生成する規則の相対パス（出力先から）。正本の印で決まるため、規範の版で増減する。
+# dry-run の計画表示・由来記録・--upgrade の突き合わせが、playbook_installed_rel_paths
+# 経由でこの一覧を共通の抽出元として使う。
+claude_rules_rel_paths() {
+  local f
+  claude_rules_enabled || return 0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    printf '.claude/rules/%s\n' "$f"
+  done <<< "$CLAUDE_RULES_NAMES"
 }
 
 # install_playbook_rules が .ai-playbook/** 以外に配置する相対パスの一覧
@@ -12941,6 +13912,7 @@ playbook_installed_rel_paths() {
         '.claude/skills/peers/SKILL.md' \
         '.claude/agents/explorer.md' \
         '.claude/agents/implementer.md'
+      claude_rules_rel_paths
     fi
   fi
 }
@@ -12991,6 +13963,11 @@ install_playbook_rules() {
   # 案内だけを出す（この雛形のために要求する規範の版を上げない）。
   tpl="$(require_playbook_template entry.md)"
   local imports="$PLAYBOOK_DIR/templates/claude-entry-imports.md" claude_entry
+  # --with-claude で規則へ分けるときは、共通規範の全文の取り込みを外した雛形に替える
+  # （全文の取り込みを残すと、規則と二重に載る）。--with-claude なしは従来のまま。
+  if claude_rules_enabled; then
+    imports="$PLAYBOOK_DIR/templates/claude-entry-imports-rules.md"
+  fi
   if [[ -f "$imports" ]]; then
     claude_entry="$(mktemp "${TMPDIR:-/tmp}/dcb-claude-entry.XXXXXX")" || {
       echo "error: 一時ファイルを作れません（CLAUDE.md の組み立て）。" >&2
@@ -13002,6 +13979,13 @@ install_playbook_rules() {
   else
     echo "note: 規範に templates/claude-entry-imports.md が無いため、CLAUDE.md に規範の取り込みの節を足しません（ai-playbook v0.8.0 以降で足します）。" >&2
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/CLAUDE.md"
+  fi
+  # 規則を置くのに、CLAUDE.md が共通規範の全文を取り込んだままのとき（既存の CLAUDE.md を
+  # 温存した、または --upgrade で手を入れた CLAUDE.md の隣に .dcb-new を置いた）は、全文と規則が
+  # 二重に載る。知らせる。
+  if claude_rules_enabled && [[ "$DRY_RUN" != "true" && -f "$OUTPUT_DIR/CLAUDE.md" ]] \
+     && grep -x -F -- "@$PLAYBOOK_REL_ROOT/$CLAUDE_RULES_SOURCE_NAME" "$OUTPUT_DIR/CLAUDE.md" >/dev/null; then
+    echo "warning: $OUTPUT_DIR/CLAUDE.md が共通規範の全文を取り込んだままです。Claude Code 用の規則（.claude/rules/ai-playbook*.md）と二重に載ります。CLAUDE.md の @$PLAYBOOK_REL_ROOT/$CLAUDE_RULES_SOURCE_NAME の行を外してください（新しい版は CLAUDE.md.dcb-new に置かれることがあります）。" >&2
   fi
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/AGENTS.md"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/.github/copilot-instructions.md"
@@ -13107,6 +14091,27 @@ install_playbook_rules() {
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/agents/explorer.md"
     tpl="$(require_playbook_template claude-agent-implementer.md)"
     apply_file_with_policy "$tpl" "$OUTPUT_DIR/.claude/agents/implementer.md"
+  fi
+
+  # 共通規範を、常に効かせる部分と要る場面で載る部分の規則に分けて置く。生成の仕方と
+  # 行の扱いは dcb_claude_rules_awk の説明のとおり。置き方はほかの .claude/ の生成物と同じ
+  # （apply_file_with_policy）なので、既存の同名ファイルは上書きせず、--upgrade では手を
+  # 入れていなければ作り直し、入れていれば .dcb-new を置く。
+  if claude_rules_enabled; then
+    local rules_tmp rule_file
+    rules_tmp="$(mktemp -d "${TMPDIR:-/tmp}/dcb-claude-rules.XXXXXX")" || {
+      echo "error: 一時ディレクトリを作れません（Claude Code 用の規則の生成）。" >&2
+      exit 1
+    }
+    if ! dcb_render_claude_rules "$PLAYBOOK_DIR/$CLAUDE_RULES_SOURCE_NAME" "$rules_tmp" >/dev/null; then
+      rm -rf "$rules_tmp"
+      echo "error: Claude Code 用の規則を生成できませんでした。" >&2
+      exit 1
+    fi
+    for rule_file in "$rules_tmp"/*.md; do
+      apply_file_with_policy "$rule_file" "$OUTPUT_DIR/.claude/rules/$(basename "$rule_file")"
+    done
+    rm -rf "$rules_tmp"
   fi
 
   # 導入した規範のソースを on-disk に記録する。これがないと、生成後の環境から

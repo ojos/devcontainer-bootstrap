@@ -6,6 +6,35 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.24.0
+
+### Summary
+- **生成する `scripts/install-ai-tools.sh` が、claude・gemini にも版の下限を持たせた**（ojos/ai-packages-dev#684）。下限より古いものが既に入っていれば npm の `@latest` で入れ替え（CLI の名前・今の版・下限を出す）、入れたあとも下限未満なら非 0 で止まる。下限は claude 2.1.314（`doctor.sh` の `CLAUDE_MIN_VERSION` と同じ値。テストで照合する）、gemini 0.64.0。codex（0.156.0）が持っていた版の比較を共通の関数（`ai_cli_version_is_old`・`ai_cli_version`・`install_if_missing` の第 3 引数）に一般化し、3 つで共有する。
+- **agy の導入が、配布元のインストーラ（取得して実行する形）をやめ、本体の SHA-512 を自分で照合してから置く形になった**（ojos/ai-packages-dev#684）。プラットフォームを配布元のインストーラと同じ判定で決め（linux の amd64・arm64 とそれぞれの musl 版、darwin。表に無いものは理由を出して非 0）、マニフェストを取り、本体を落として SHA-512 を照合し、`~/.local/bin/agy` へ置いて `agy install` を呼ぶ。マニフェストは `jq` で JSON として読み、置く前に本体の `--version` も確かめる。照合が通らない・マニフェストを読めない・キーが欠けている・マニフェストや本体の版が下限 1.3.4 未満のときは、理由を出して何も置かずに非 0。既にある agy が下限未満なら同じ手順で入れ替え、下限以上なら何もしない。雛形に、遠くのスクリプトを実行する行は残らない。
+- **第二意見の既定のエンジンが gemini から codex に変わったのに合わせ、生成する `.env.example` のエンジンの欄の説明を直した**（ojos/ai-packages-dev#682）。「空なら gemini」を「空なら codex」に改めた（antigravity だけの構成では、codex を導入しないので、使うエンジンを記入しておくよう述べる）。**`--with-gemini` だけの構成でも `SECOND_OPINION_ENGINE` の欄を出し、`gemini` を記入するようにした。** これまでは antigravity か codex を選んだときだけ欄を出していたため、gemini だけで生成したプロジェクトは既定の変更の影響をそのまま受けた。`--second-opinion-engine` も、`--with-gemini` だけの構成で受け付ける。`second-opinion-review.sh` の既定の変更そのものは ai-playbook v0.13.0 が持つ。
+- **エージェントに任意のコードを実行させうる git の設定を検出する `scripts/check-git-config.sh` を足した**（ojos/ai-packages-dev#671）。`core.fsmonitor`・`core.hooksPath`・`core.sshCommand`・`credential.helper`・`gpg.program`・`diff.external`・diff / filter / merge のドライバ・`remote.<名前>.uploadpack` など、git の普段の操作でコマンドを実行させうるキーを、local と worktree の設定（取り込んだ先を含む）から読み取りだけで検出する。SessionStart のフックと doctor では、仕込まれた値が会話の文脈に入らないよう、キーの種類と件数だけを出す。設定は NUL 区切りで読む（改行を含む値を読み違えない）。git を呼んだ瞬間にコマンドを実行させる攻撃（サンドボックスも承認も通らない）への備え。`--with-claude` で生成する `.claude/settings.json` の SessionStart と、`doctor.sh`（WARN）から呼ぶ。拒否はしない。正当な設定は根の `.git-config-allow` に `キー=値` で書いてコミットすると黙る（読むのはコミット済みの中身だけ）。
+- **`loop-gate.sh` が、エージェントの設定・フックに触れる変更を一覧に出す**（ojos/ai-packages-dev#671）。`.claude/`・`.mcp.json`・`.github/workflows/`・`.githooks/`・`.husky/`・`.git-config-allow`・`.gitattributes`（どの階層も）・`.gitmodules`・`.devcontainer/`・`.vscode/`・フックの本体のスクリプトに当たるパスを（改名は移動元も）出力し、環境変数 `SECOND_OPINION_AGENT_CONFIG_PATHS` で第二意見へ渡す。判定と終了コードは変えない。
+- **生成する `.claude/settings.json` に、権限を締める側の設定を 2 つ足した**（ojos/ai-packages-dev#672）。`permissions.blockWritesOutsideWorkingDirectories: true`（作業ディレクトリの外への書き込みを止める）と、確認フック（`confirm-merge-hook.sh`）の hook への `"onFailure": "block"`（フックが失敗したとき通さず止める）。セッション協調フックには付けない（台帳は fail-open が規範）。許可リストは引き続き持たない。
+- **`doctor.sh` が Claude Code の版を検査する**（ojos/ai-packages-dev#672）。対象の `.claude/settings.json` がこの設定を持ち、`claude` が PATH にあるときだけ、`claude --version` を下限 2.1.314 と比べ、古ければ WARN（`blockWritesOutsideWorkingDirectories` が、エラーも警告も出ずに黙って無視される）。版を読めないときも WARN。設定を持たない対象と、`claude` が無い環境では検査しない。
+- **`--with-claude` のとき、共通規範を常時の規則と条件付きの規則に分けて生成し、`CLAUDE.md` から全文の取り込みを外した**（ojos/ai-packages-dev#678）。今までは `CLAUDE.md` が `@.ai-playbook/shared-ai-rules.md` で全文（約 50KB）を毎セッションの文脈へ載せていた。正本の見出しの印（`<!-- claude-rules: name=<題> paths=<glob>,<glob> -->`。ai-playbook v0.13.0 が付ける）に従い、印の無い範囲を `.claude/rules/ai-playbook.md`（`paths:` なし＝起動時に必ず載る）へ、印の範囲を `.claude/rules/ai-playbook-<題>.md`（`paths:` 付き。一致するファイルに触れたときだけ載る。`@` の取り込みは入れない）へ生成する。正本の行は印の行を除いて変えずに写し、各ファイルの先頭に、生成物である旨と相対リンクの基準を述べる断りを足す。`CLAUDE.md` は ai-playbook の `templates/claude-entry-imports-rules.md`（`@.github/project-ai-rules.md` だけを取り込む版）を使う。`--with-claude` なしの `CLAUDE.md` と `AGENTS.md`・`copilot-instructions.md` は変えない。生成物は ORIGIN のハッシュに乗り、`--upgrade` では手を入れていなければ作り直し、手を入れていれば `.dcb-new` を置く。DCB が作っていない同名のファイルは上書きしない。
+- **生成の処理だけを行う入口 `--render-claude-rules <正本> <出力ディレクトリ>` を足した**（ojos/ai-packages-dev#678）。`CLAUDE.md` を手で書くプロジェクトが、規則を正本から作り直すために使う。印の書式の誤りや、同じ題で `paths` が食い違うときは、何も書かずに非 0 で止まる。出力先に、生成する名前と同名の手書きの規則（生成物の断りが無いファイル）・シンボリックリンク・ファイルでないもの・読めないものがあるときも、上書きせず、その名前を出して何も書かずに非 0 で止まる（ojos/ai-packages-dev#680）。
+- **`scripts/check-doc-links.sh` が、生成した規則（`.claude/rules/ai-playbook*.md`）を走査しない**（ojos/ai-packages-dev#678）。生成した規則の本文は正本の行そのままで、相対リンクは `.ai-playbook/` からの相対のまま残るため、そこからの相対では解決できない。同じリンクは正本が持ち、正本は走査される。生成物かどうかは先頭の断りの行で見分け、断りの無い同名の規則は手で書いたものとして走査する。集計の「除外」の件数に数える。
+- **この版が要求する ai-playbook は変わらない**。ai-playbook が `templates/claude-entry-imports-rules.md` を持たない古い版では、分割をせず従来どおり全文を取り込む。分割を使うには、ai-playbook v0.13.0 以降（`templates/claude-entry-imports-rules.md` と印を持つ版）を指定する。勧める ai-playbook は v0.13.0。
+
+### 移行
+- `scripts/install-ai-tools.sh` は `bootstrap.sh --upgrade` で追従する（手を入れていなければ置き換わる）。次にコンテナを作る（または `bash scripts/install-ai-tools.sh` を再実行する）とき、下限より古い claude・gemini・agy が入れ替わる。agy の導入先は従来どおり `~/.local/bin/agy`。
+- **第二意見のエンジンを指定していない（`.env` の `SECOND_OPINION_ENGINE` が空か無い）プロジェクトだけが対象です。** `.env` で明示した値はそのまま使われます。**以前の DCB で `--with-gemini` だけを選んで生成したプロジェクトは、欄が無いので対象です。** ai-playbook の新しい版を取り込むと codex を使おうとし、使えなければ案内を出して止まります。gemini を使い続けるには、`.env` に `SECOND_OPINION_ENGINE=gemini` を書きます（この版の `--upgrade` で `.env.example` に欄が入りますが、`.env` へは写されないので、手で書き足します）。
+- 既にある `.claude/settings.json` は、衝突の扱い（既定は温存）に従って書き換えない。SessionStart の配線が欲しければ、`bash "$CLAUDE_PROJECT_DIR/scripts/check-git-config.sh" --hook` を手で足す。
+  `permissions.blockWritesOutsideWorkingDirectories: true` と、確認フックの hook への `"onFailure": "block"` も、同様に手で足す。
+- husky などで `core.hooksPath` を使っているプロジェクトは、`doctor.sh` が WARN を出すようになる。`.git-config-allow` に `core.hooksPath=<値>` を書いてコミットすると黙る。
+- 第二意見の依頼文へ一覧を添えるのは、ai-playbook v0.13.0 の雛形の `second-opinion-review.sh` から。古い雛形と組み合わせても、一覧は loop-gate の出力に出る（依頼文に添えられないだけ）。
+- **`--upgrade` で手を入れた `CLAUDE.md` は古いまま残る。** 新しい版は隣の `CLAUDE.md.dcb-new` に置かれる。古い `CLAUDE.md` は `@.ai-playbook/shared-ai-rules.md` で全文を取り込み続けるので、新しく生成された `.claude/rules/ai-playbook*.md` と二重に載る（規範の全文と、同じ内容の規則が両方文脈に入る）。取り込み方: `CLAUDE.md` の `@.ai-playbook/shared-ai-rules.md` の行と、それを説明する文を外し（`CLAUDE.md.dcb-new` の「規範の取り込み（Claude Code）」の節に差し替える）、`CLAUDE.md.dcb-new` を消してから `bash bootstrap.sh --accept CLAUDE.md` で取り込み済みにする。`@.github/project-ai-rules.md` の行は残す。
+- 既存の出力先は `scripts/check-doc-links.sh` を `--upgrade` で更新して追従する（手を入れていなければ置き換わる）。
+- **正本から題が消えた・変わったとき、古い `.claude/rules/ai-playbook-<題>.md` は残る。** `--upgrade` は生成しなくなったファイルを消さず、「no longer generated (not deleted)」と報告するだけにしている。残すと、その `paths:` に一致するファイルに触れるたびに載り続ける。報告に出た規則は、手を入れていなければ手で消す。
+- DCB が作っていない同名の `.claude/rules/ai-playbook*.md` が既にあるときは、規則を置かず、`CLAUDE.md` も従来の形（全文を取り込む）のままにして警告する。
+- 手を入れていない `CLAUDE.md` は、`--upgrade` で自動的に新しい形へ更新される。
+- `.claude/rules/ai-playbook*.md` は正本から生成するものなので、編集は正本（`shared-ai-rules.md`）へ行う。手を入れた規則は、次の `--upgrade` で上書きされず、`.dcb-new` が置かれる。
+
 ## v0.23.6
 
 ### Summary
