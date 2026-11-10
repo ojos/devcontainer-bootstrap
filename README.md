@@ -72,12 +72,12 @@ ai-playbook・devcontainer-bootstrap（DCB）・devcontainer-host（devhost）�
 - https://github.com/ojos/devcontainer-bootstrap
 
 最新安定リリース:
-- `v0.24.0`
+- `v0.25.0`
 
 取得したスクリプトは実行前に必ず検証します。取得と実行は一時ディレクトリで行い、生成先は `--output-dir` で指定します。スクリプトの置き場所と生成先は独立しているため、実行後は `trap` で作業ディレクトリごと破棄でき、手元に取得物や後片付けが残りません。
 
 ```bash
-TAG=v0.24.0
+TAG=v0.25.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -120,14 +120,14 @@ AI 共通ルールも配置する場合は、ルールの取得元を指定し�
 if command -v sha256sum >/dev/null 2>&1; then sha256c="sha256sum"; else sha256c="shasum -a 256"; fi
 ( cd "$d" && grep ' bootstrap.sh$' SHA256SUMS | $sha256c -c - ) &&
 bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
-  --languages node,go --with-claude --playbook-version v0.13.0
+  --languages node,go --with-claude --playbook-version v0.14.0
 ```
 
 `--playbook-version` は既定ソース `ojos/ai-playbook` のタグ tarball への糖衣で、長い archive URL を打たずに済みます。ソースを指定した時点で配置されるため `--with-playbook` は不要です。別 owner・任意の URL・ローカルディレクトリから取得する場合は、従来どおり `--playbook-from` を使います（`--playbook-version` とは排他）。
 
 **ai-playbook v0.13.0 から、第二意見の既定のエンジンは gemini から codex に変わります。** エンジンを指定していない（`.env` の `SECOND_OPINION_ENGINE` が空か無い）プロジェクトは、その版を取り込むと codex を使おうとし、使えなければ案内を出して止まります。gemini を使い続けるなら、`.env` に `SECOND_OPINION_ENGINE=gemini` を書きます（この版の DCB は、`--with-gemini` を選んだ構成で `gemini` を記入して生成します）。
 
-**`--with-claude` と組み合わせるときは、ai-playbook v0.9.0 以降を指定します。** v0.19.0 から、`--with-claude` は規範パッケージの雛形 `templates/claude-skill-peers.md`（`/peers` スキル）を必須にします。それより前の版を指定すると、`template not found` で書き込む前に停止します。`--with-claude` を使わない場合は、v0.5.0 以降で動きます。**ただし、ゲートのワークフローから定期実行をなくした形（課金枠を減らし続けない形）と、実行先の変数 `ACTIONS_RUNS_ON` の形を雛形のワークフローにも反映するには、v0.10.0 以降を指定します**（それより前の版では、`bootstrap.sh` が書く `identity-guard.yml` / `verify.yml` だけが変数の形になり、規範の雛形のワークフローは 20 分ごとの定期実行と `ubuntu-latest` の固定のまま残ります）。**規範を配置する構成では、v0.11.0 以降を指定します。** v0.21.0 から、生成する `scripts/loop-gate.sh` は、ステージ済みの差分があるとき、規範の雛形の `second-opinion-review.sh` に `--base` を渡します。`--base` は ai-playbook v0.11.0 の雛形で足したもので、それより前の版の雛形は `unknown option` で終わるため、`loop-gate.sh` が `GATE_FAIL` になります。新しく生成するときと `--upgrade` では v0.13.0 を勧めます（v0.24.0 は v0.11.0 でも動きますが、v0.12.0 以降の雛形は、エンジンを指定せずに既定の gemini へ落ちたときに知らせます。v0.12.1 は、第二意見が issue 本文のコード例の中の `acceptance:` を本物として採る不具合を直しています。v0.12.2 は、別のリポジトリの番号を素の `#N` と書いたときに、第二意見が同じ番号の別物と取り違えうることを、規範と第二意見のプロンプトに書いています。v0.13.0 は、第二意見の既定のエンジンを codex に変え、`--with-claude` の規則の分割に要る印と雛形を持ちます）。
+**規範を配置する構成（`--with-claude` を含む）では、ai-playbook v0.14.0 以降を指定します。** v0.25.0 から、規範の雛形 `templates/second-opinion-repro-schema.json` を `scripts/` へ配置するためです。それより前の版を指定すると、雛形の欠けで書き込む前に停止します。`--upgrade` で、由来記録（ORIGIN）に残った古い版をそのまま引き継ぐときも同じなので、`--playbook-version v0.14.0` を足して DCB と一緒に上げます（`scripts/update-check.sh` の追従では、ai-playbook の新しい版にも y と答えます）。v0.14.0 は、第二意見に再現・反証・再実行の段階を持ち、配布のままのファイルへの指摘を判定に数えません。版ごとの変更は ai-playbook のリリースノートにあります。
 
 > **破壊的変更（`--mode` 廃止）**: 従来の `--mode <minimal|standard|full>` は廃止しました。装備は
 > `--with-*` フラグで明示選択します。移行対応表は [mode オプションからの移行](#mode-オプションからの移行) を参照してください。
@@ -137,7 +137,7 @@ bash "$d/bootstrap.sh" --project-name myapp --output-dir "$PWD/myapp" \
 上の手順は `bootstrap.sh` だけを取得します。生成後の自己診断（[Doctor 自己診断](#doctor-自己診断)）を実行するときに、同じ要領で `doctor.sh` を取得します。`doctor.sh` も診断対象を `--target-dir` で受け取るため、一時ディレクトリから実行できます。
 
 ```bash
-TAG=v0.24.0
+TAG=v0.25.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 
 d="$(mktemp -d "${TMPDIR:-/tmp}/dcb.XXXXXX")" || exit 1
@@ -178,7 +178,7 @@ grep -E ' (bootstrap|doctor)\.sh$' SHA256SUMS | $sha256c -c -
 照合と展開は `&&` でつなぎ、照合に失敗したら展開しません（行を分けると、失敗しても次の行が走ります）。
 
 ```bash
-TAG=v0.24.0
+TAG=v0.25.0
 BASE="https://github.com/ojos/devcontainer-bootstrap/releases/download/${TAG}"
 curl -sSL "${BASE}/RELEASE-MANIFEST.json" -o RELEASE-MANIFEST.json
 curl -sSL "${BASE}/PACKAGE_ARCHIVE.tar.gz" -o PACKAGE_ARCHIVE.tar.gz
@@ -540,6 +540,19 @@ AI エージェントの反復（実装 → 検証 → 修正 → …）を、**
 - `loop-gate.sh` は push / PR 前に **3 段を直列**で通します。**1. commit identity の検証**（`scripts/verify-commit-identity.sh`）→ **2. verify**（受け入れ検証。手前で機密混入検査を含む）→ **3. 任意の第二意見レビュー**の順です。identity を最初に置くのは、判定が最も安く（実測数 ms）、許可外の identity が混じったコミットを他の段の結果を待たずに検知するためです（許可外 identity の検知が CI＝push 後まで遅れていた穴を塞ぐ。詳細は下記「Git identity ガード」参照）。判定ロジックは `loop-gate.sh` へ書き写さず `verify-commit-identity.sh` 側に置きます（判定を二重管理しない）。
   - **移行時の注意:** `verify-commit-identity.sh` は fail-closed です。環境変数 `ALLOWED_AUTHOR_EMAILS` も `.env` の `GIT_IDENTITY_EMAIL` も設定していないプロジェクトでは、`loop-gate.sh` を再生成した時点で**ローカルゲートが緑から赤に変わります**。これは検査が成立しない状態を合格にしない、意図した挙動です。`bash scripts/setup-git-identity.sh` で `.env` の `GIT_IDENTITY_EMAIL` を適用するか、`ALLOWED_AUTHOR_EMAILS` を設定してください（下記「[利用側の設定手順（許可 author email）](#利用側の設定手順許可-author-email)」参照）。
 - `loop-gate.sh` の第二意見は、`scripts/second-opinion-review.sh` が存在すれば直列化し、無ければ優雅にスキップします。`LOOP_GATE_REVIEW_CMD` で任意のレビューコマンドへ差し替え、空文字で無効化できます。
+- **第二意見: 配布のままのファイルへの指摘。** DCB が配置し配布のままのファイルへの指摘は、利用側のゲートを落とさないよう、判定に数えません（このリストが条件の正本です）。差分は外さずそのまま渡し、依頼文にも一覧を添えません（添え書きはモデルの報告を控えさせるため）。除くのは機械の側だけです。JSON スキーマ方式（`antigravity` / `codex`）で、指摘の `file` が一覧のパスを指すものを、ゲート対象の 4 種類でも落とす件数に数えません。`file` は、候補を (a) 先頭の `./` だけを落とした形、(b) (a) から末尾の `:行番号` を落とした形、(c) (b) から先頭の `a/` か `b/`（unified diff の見出しの接頭辞）を落とした形の順に作り、最初に「実在するパス」（差分に現れたパスと、レビューする版で追跡しているパス）と一致したもので決めます。どれとも一致しなければ (c) で比べます。決まったパスが一覧にあるときだけ判定外にするので、実在する利用側の `a/x` や `x:12` は取り違えません。絶対パスはリポジトリの根を前に持つものだけ、根を落として比べます。出力では `[配布物・判定外]` と区別して残し、run ごとの行に「配布物への指摘 N 件は判定外」を出します（最後の要約の行は変わりません）。run ごとの「落とす N 件」と多数決は、除いた後の数で行います。数える jq が失敗したときは、0 件と読まず実行失敗として落とします。`loop-gate.sh`・記録・`second-opinion-gate.yml` は変わりません。
+  - **一覧に入る条件**（差分に現れたパスのうち。`git diff --raw -z --no-renames` で NUL 区切りのまま読むので、改名は削除 + 追加として扱われ、安全側に倒れます）:
+    1. レビューする版の `.devcontainer/ORIGIN` に `hash:<パス>=<sha256>` があり、`owned:<パス>=1` が無い（重複は先頭の記録）。
+    2. 状態が追加か、モード・種別が変わらない変更。
+    3. 中身の sha256 が記録と一致する。DCB は現物（作業ツリーのバイト列）からハッシュを書くので、索引の版は、作業ツリーと索引に正規化を通した差が無ければ作業ツリーのバイト列、あれば索引の blob をハッシュします（`core.autocrlf=true` の CRLF の現物でも合います）。版から中身を読めなければ除きません。
+    4. 次のどちらか。(a) `hash:` の値が前の版と同じ。(b) 前後の**両方**の版の ORIGIN に `version=`（DCB の版を記録する行）があり、値が違う（DCB への追従）。前の版の ORIGIN が読めない、または `version=` の行を消しただけのときは (b) としません。手でファイルを変えて `hash:` だけ書き換えても、`version=` が変わらなければ入りません。
+  - **版の決め方:** レビューする版（後）は、`--base` とステージ済みなら索引、`--range A..B` / `A...B` なら B（空なら HEAD）、単独のリビジョンなら作業ツリー。前は、ステージ済みなら HEAD、`--base` ならその rev、`A..B` なら A、`A...B` なら merge-base、単独のリビジョンならそれ自身。
+  - **限界:**
+    1. `gemini` は判定トークン方式で、指摘の場所を判定に使えないため、効きません（一覧も作りません）。
+    2. `version=` の行ごと書き換える意図的な改ざんは防げません（事故を減らす仕組みで、悪意の防止ではありません）。
+    3. 配布のままのファイルを指す指摘は、利用側の設定とのかみ合わせの不具合でも判定外になります。
+    4. `--range` の経路では、後の版が作業ツリーではなく範囲の終端のコミットなので、正規化した blob をハッシュします。作業ツリーを CRLF で持つ環境（`core.autocrlf=true` など）では、DCB が現物から書いたハッシュと合わず除かれません。devcontainer の中では通常起きません。
+    5. 上流のリポジトリには ORIGIN が無いので、上流自身のレビューには効きません。
 - 差し替えたコマンド（`LOOP_GATE_REVIEW_CMD`）へは、解決した範囲を環境変数 `LOOP_GATE_REVIEW_RANGE` で渡します（ステージ済み差分があるとき・対象が無いときは空）。範囲を受けない差し替えコマンドは、commit 済みのブランチで空のステージ済み差分を見て「対象なし」で終わるため、`loop-gate.sh` は、レビュー対象が実在するのにその出力（`[second-opinion] no diff to review`）を見たときは `GATE_FAIL` にし、記録も残しません。レビュー対象が本当に無いと解決したときは、差し替えたコマンドを実行せず、記録なしで通過します。**限界として、loop-gate が「レビューしていない」と判定できるのは、差し替えたコマンドが `[second-opinion] no diff to review` を出力したときだけです。** 範囲を使わず、この文言も出さない任意のコマンド（例: `true`）は、何もレビューしていなくても `GATE_PASS` と記録が出ます。差し替えるコマンドは、範囲を `LOOP_GATE_REVIEW_RANGE` で受け取るか、自分で範囲を決めて自分で記録を残してください。レビューする範囲がエージェントの設定・フックに触れるときは、そのパスの一覧を出力し、環境変数 `SECOND_OPINION_AGENT_CONFIG_PATHS`（改行区切り）で第二意見へ渡します（差し替えたコマンドにも届きます。対象と理由は「[危険な git の設定の検査](#危険な-git-の設定の検査)」）。同梱の reviewer のエンジンだけを変えるなら `LOOP_GATE_REVIEW_CMD='bash scripts/second-opinion-review.sh --engine <名前> ${LOOP_GATE_REVIEW_RANGE:+--range "$LOOP_GATE_REVIEW_RANGE"}'` と書きます。`SECOND_OPINION_ENGINE` の前置は、`.env` が環境変数を上書きするため使えません。
 - 第二意見へ渡す**差分の範囲**は、既定の対象を **PR 全体**にして決めます。第二意見のエンジンは差分をプロンプトへ埋め込み、差分の外を読まない形を基本にします。修正を重ねた後の小さな差分（ステージ済みだけ、上流からだけ）を渡すと、差分に現れない既存のコードについて誤った前提を立てて落ちるためです。起点は**既定ブランチとの分岐点（merge-base）**にします。既定ブランチは `origin/HEAD` → `origin/main` → `origin/master` の順で解決します。
   - **ステージ済み差分があるとき**: `--base <起点>` を渡し、起点から索引までを対象にします（コミット済みの分とステージ済みの分の両方が入ります）。記録の scope は `base:<起点>+staged` です。
@@ -567,6 +580,18 @@ bash scripts/verify.sh
 # push / PR 前のローカル事前ゲート（受け入れ検証 + 任意の第二意見）
 bash scripts/loop-gate.sh
 ```
+
+### 第二意見の再現の段階
+
+エンジンが `codex` のとき、`scripts/second-opinion-review.sh` は、多数決でゲート対象の指摘が残ったチャンクで、指摘ごとに（上限つき）codex をサンドボックスで起こし、再現テストを書かせて実行させ、結果（再現した／再現しなかった／確かめられなかった）を出力へ足します。再現したかどうかは codex の申告ではなく、codex が書いたテスト（`.second-opinion-repro/` の下）だけをまっさらな写しへ移してスクリプト自身が同じサンドボックスで実行した終了コード（0 = 再現した、1 = 再現しなかった、それ以外 = 確かめられなかった）で決めます。同じ file・line・category の指摘は 1 件にまとめて再現し、まとめた指摘の件数と中身は出力に残します。**判定（終了コード）は変えません。** 再現した指摘も、再現しなかった指摘（「反証されていない」）も、確かめられなかった指摘も、従来どおり落とします。足すのは証拠だけで、判定が緩くなることはありません。
+
+- 作業ツリー: レビューした状態（`--range A..B` は B の木、`--range` が単一の rev なら作業ツリーの追跡ファイル、ステージ済み・`--base` は索引の内容）を一時ディレクトリへ作り、`git init` して 1 コミットにします。指摘ごとにまっさらな写しを使います。
+- サンドボックス: codex の権限プロファイルで、作業ツリーの中だけ書ける・最小限の読み取り・ネットワークなしに絞ります（`--sandbox workspace-write` は /tmp への書き込みとディスク全体の読み取りが残るため使いません）。環境変数は許可リストだけを渡します。最初の再現の前に `codex sandbox` で起こせるかを 1 回確かめ、起こせなければ、その旨を出して段階を飛ばし、従来の判定に戻ります。
+- codex 以外のエンジンでは段階を行わず、その旨を 1 行出して従来どおりに判定します。
+- 環境変数（`.env` でも指定できます）: `SECOND_OPINION_REPRO=off` で段階ごと止めます（出力は従来と同じ。値は空・`on`・`off` だけを受け、`0` や `false` などは実行前に止めます）。`SECOND_OPINION_REPRO_MAX`（既定 5。1 以上の整数で 6 桁まで）は 1 回の実行全体（チャンクをまたいで共有）で再現する指摘の上限で、超えた分は「上限で見送った（反証されていない）」と数えます。`SECOND_OPINION_REPRO_TIMEOUT`（既定 300。1 以上の整数・秒で 6 桁まで）は 1 件あたりの時間の上限です（codex の回とスクリプトの再実行のそれぞれに掛けます）。不正な値は実行前に止めます。
+- 費用: 指摘 1 件につき codex を 1 回起こします。起こした回数は、段階の最後の要約の行に出ます。
+- 再現したテストの保存と再実行: 再現の段階で「再現した」テストは、追跡しない記録の場所（`git rev-parse --git-path second-opinion` の下）へ保存されます。生成する `scripts/loop-gate.sh` は、第二意見より前に `second-opinion-review.sh --rerun-saved` で同じ範囲の状態の上で再実行し（今の枝で保存したものだけ）、まだ再現すれば（終了コード 3）`GATE_FAIL` にします。再実行がほかの理由で失敗したときは、警告だけ出して第二意見へ進みます。再現しなくなったテストには「直った」の印が付き、リポジトリのテストへ移す案内が出ます。確かめられなかったとき・codex のサンドボックスを起こせないときは落としません。`LOOP_GATE_REVIEW_CMD` で差し替え・無効化したときと、`--rerun-saved` を持たない古い版の `second-opinion-review.sh` では呼びません。
+- 反証の段階: 再現しなかった指摘を、別ベンダーのモデル（`gemini` / `antigravity`）に反証させます。そのチャンクの指摘が**すべて**、再現せず反証されたときだけ通し（完了の行は `LGTM (… all findings refuted by <エンジン>)`）、1 件でも反証されなければ従来どおり落とします。エンジンは `.env` の `SECOND_OPINION_REFUTE_ENGINE`（codex を含む構成の `.env.example` に空の欄があります。空なら gemini → antigravity の順に探します）で選び、`SECOND_OPINION_REFUTE_MODEL` でモデルを選べます（空なら、antigravity では `gemini-3.8-flash-high`、gemini では CLI の既定）。`claude` で始まるエンジンは実行前に止め、モデルは `gemini-` で始まる名前だけを受けます（実装やレビューと同じベンダーのモデルを、別名でも選ばないため）。反証のエンジンにはツールを使わせません（agy は、利用者の設定の `permissions` に `deny`・`ask`・空の `allow` 以外の規則があれば使いません）。`SECOND_OPINION_REFUTE=off` か、エンジンが見つからないときは、反証せずに落とします。
 
 ### 受け入れ条件の二層（ローカル層 / 外部層）
 
@@ -744,7 +769,7 @@ gcloud auth login             # --with-gcp のとき（gcloud-storage）
 常に導入する feature（既定）:
 - `common-utils` / `docker-outside-of-docker`（buildx + compose-switch を標準装備）/ `ripgrep` / `shellcheck` / `tmux` / `github-cli`
 
-`shellcheck` は `--with-*` ではなく常時導入です。生成物が配る `scripts/*` は選択言語や装備フラグに依らず必ずシェルスクリプトであるため、`scripts/acceptance.sh` を編集して受け入れ条件に `shellcheck scripts/*.sh` を加える判断を、各プロジェクトが導入手順から始めずに済むようにしています。配布するスクリプトは素の状態で `shellcheck -S warning` を通ります（`tests/test-generated-shellcheck.sh` が生成物に対して検査しています）。
+`shellcheck` は `--with-*` ではなく常時導入です。生成物が配る `scripts/*` は選択言語や装備フラグに依らず必ずシェルスクリプトであるため、`scripts/acceptance.sh` を編集して受け入れ条件に `shellcheck scripts/*.sh` を加える判断を、各プロジェクトが導入手順から始めずに済むようにしています。配布するスクリプトは素の状態で `shellcheck`（既定の重大度）を通ります（`tests/test-generated-shellcheck.sh` が生成物に対して検査しています）。
 
 条件付き feature:
 - `node` / `go` / `python` / `php` / `rust` / `ruby`（`--languages` に含む場合。`python` は uv を `toolsToInstall` に同梱）
@@ -980,7 +1005,7 @@ bash scripts/check-git-config.sh --summary # 種類と件数だけを出す。�
 bash scripts/check-git-config.sh --hook   # SessionStart のフック用。検出したキーの種類と件数だけを出し、常に 0
 ```
 
-- **検出するキー**: `core.fsmonitor`（値が真偽値・整数のときは組み込みのデーモンの指定なので除く）、`core.hooksPath`、`core.sshCommand`、`core.askPass`、`core.gitProxy`、`core.editor`、`sequence.editor`、`credential.helper`、`credential.<URL>.helper`、`gpg.program`、`gpg.<形式>.program`、`diff.external`、`diff.<名前>.textconv`、`diff.<名前>.command`、`filter.<名前>.clean` / `smudge` / `process`、`merge.<名前>.driver`、`remote.<名前>.uploadpack` / `receivepack`。どれも、git の普段の操作（diff・commit・fetch・push など）でコマンドを実行させうるものです。キーの大文字小文字は区別しません。
+- **検出するキー**: `core.fsmonitor`（値が確実に真偽値と言える形のときは組み込みのデーモンの指定なので除く）、`core.hooksPath`、`core.sshCommand`、`core.askPass`、`core.gitProxy`、`core.editor`、`core.pager`、`pager.<コマンド>`（値が確実に真偽値と言える形のときは除く）、`core.alternateRefsCommand`、`interactive.diffFilter`、`sequence.editor`、`credential.helper`、`credential.<URL>.helper`、`gpg.program`、`gpg.<形式>.program`、`gpg.ssh.defaultKeyCommand`、`diff.external`、`diff.<名前>.textconv`、`diff.<名前>.command`、`filter.<名前>.clean` / `smudge` / `process`、`merge.<名前>.driver`、`mergetool.<名前>.cmd` / `path`、`difftool.<名前>.cmd` / `path`、`trailer.<名前>.cmd`、`submodule.<名前>.update`（値が「!」で始まるものだけ）、`protocol.ext.allow`（`never` 以外）、`protocol.allow`（`never` 以外）、`sendemail.sendmailcmd` / `tocmd` / `cccmd` / `headercmd` と `sendemail.smtpserver`（値に `/` を含むもの＝プログラムのパスだけ）、およびそれぞれの `sendemail.<識別名>.*` の形、`trailer.<名前>.command`、`alias.<名前>`（値が「!」で始まるものだけ）、`man.<名前>.cmd` / `path`、`browser.<名前>.cmd` / `path`、`instaweb.httpd`、`remote.<名前>.uploadpack` / `receivepack`。どれも、git の普段の操作（diff・commit・fetch・push など）でコマンドを実行させうるものです。キーの大文字小文字は区別しません。値で除く「確実に真偽値と言える形」は、true / false / yes / no / on / off / 空と、先頭に 0 を付けない 9 桁までの 10 進の整数だけです。git が真偽値として読む形（`1k`・`0x10` など）でも、これに当たらなければ検出します。git が整数として読めない値（`08` など）はコマンドとして実行されるため、見逃さない側へ倒しています。
 - **見る範囲**: リポジトリの local と worktree の設定（`includeIf` などで取り込んだ先を含む。worktree の設定は `extensions.worktreeConfig` があるときだけ読む）。global と system は見ません。利用者が自分で入れた設定を毎回知らせることになるためです。
 - **フック（`--hook`）と doctor（`--summary`）は、設定の値・`<名前>`・取り込み先のパスを出しません。** フックの出力はそのままエージェントの会話の文脈に入り、doctor の出力もエージェントが読むことがあります。これらは設定を仕込んだ側が自由に書ける文字列で、指示に見える文を値に仕込めば、フックの報告の体裁でエージェントへ届くためです。検出したキーの種類（`diff.<名前>.textconv` のような決まった表記）と件数だけを出し、詳細は手で `bash scripts/check-git-config.sh` を実行して確かめるよう案内します。設定を読めなかったときも、黙らずに「検査できませんでした」と出します（問題が無い状態と区別するため）。まだ git のリポジトリでない場所では何も出しません。
 - **検査は設定の読み取りだけで行います。** `git status` や `git diff` のように fsmonitor を起動しうるコマンドは使いません。検査そのものが、仕込まれたコマンドを実行してしまわないためです。設定は NUL 区切りで読みます（値には改行を含められ、行で分けると 1 つの値を別々の設定として読み違えるため）。bash と git だけで動きます。
@@ -1095,6 +1120,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 - `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md`
 - `scripts/second-opinion-review.sh`（第二意見レビュー。`scripts/loop-gate.sh` が存在を検出して自動で直列化します。上記「ループコーディング支援」参照）
 - `scripts/second-opinion-schema.json`（JSON スキーマ方式で判定するエンジン（antigravity / codex）が読む回答の形。`second-opinion-review.sh` と対で配置します）
+- `scripts/second-opinion-repro-schema.json`（再現の段階（エンジンが codex のときだけ）で codex が返す回答の形。`second-opinion-review.sh` と対で配置します。再現の段階は判定を変えません。詳細は下記「[第二意見の再現の段階](#第二意見の再現の段階)」）
 - `scripts/second-opinion-record.sh` / `scripts/second-opinion-gate-exempt.sh` / `.github/workflows/second-opinion-gate.yml`（第二意見が回されたことの記録と確認側。`--with-copilot-review` の有無に関わらず配置します。上記「ループコーディング支援」参照）
 - `.github/workflows/copilot-review.yml` / `.github/workflows/review-gate.yml` / `scripts/review-usable.sh` / `scripts/check-review-usable.sh`（`--with-copilot-review` を併せて選択した場合のみ。4 本で 1 組。下記参照）
 - `.claude/skills/intake/SKILL.md`（`--with-claude` を併せて指定した場合のみ。intake 起点スキル）
@@ -1119,7 +1145,7 @@ OAuth トークン（`CLAUDE_CODE_OAUTH_TOKEN`）を `remoteEnv` へ注入する
 ```
 # devcontainer-bootstrap が記録した生成物の由来。
 # doctor.sh はこの記録と現物を突き合わせて乖離を診断する。手で編集しないこと。
-version=v0.24.0
+version=v0.25.0
 flags=aws,claude
 inputs-format=1
 input:project-name=myapp
@@ -1409,7 +1435,7 @@ github/gitignore のテンプレートは言語・OS・エディタの生成物�
 
 - **確認:** 接続時（`postAttachCommand` の `scripts/on-attach.sh`）に、ORIGIN の版を GitHub の最新の安定版（DCB は `releases/latest`。プレリリースを除く。ai-playbook は Release を作らずタグだけを打つため、タグの一覧（`/repos/<owner>/ai-playbook/tags`。100 件ずつ。100 件未満のページが来るまで、上限 10 ページ）のうち `vX.Y.Z` の形（プレリリースの形を除く）の最大。認証なし）と比べ、新しければ通知を 1 行だけ出します。聞きません。`on-attach.sh` は端末の入力を受けられないためです。
 - **聞く:** 対話のシェル（`on-attach.sh` が `~/.bashrc` / `~/.zshrc` へ注入します。端末が付いている対話のシェルで、今いるディレクトリがそのプロジェクトの中のときだけ。差し込みの印はプロジェクトごとです）で「追従しますか？ [y/N]」と聞きます。今の版と最新の版を示し、**「移行」の節がある版を 2 つ以上飛び越えるときは `[注意]` で目立たせます**（最新のタグの配布先の `CHANGELOG.md`（`raw.githubusercontent.com`）を読み、(今の版, 最新] の「## vX.Y.Z」の節のうち「### 移行」を持つ版を数えます。リリースの本文は「Release vX.Y.Z」の 1 行でリリースノートを含まないためです。読めなければ、リリースノートを読む案内に留めます）。問いかけの文には、**追従する作業ツリーのパスと、何が起きるか**を問いかけの文に含めます（既定ブランチの上なら「作業用のブランチ <名前> を切って追従します」、それ以外なら「今のブランチ <名前> の上で追従します」。名前は実際に切るブランチと同じ関数で決めます。`origin/HEAD` が無いときの扱いも同じです。専用の worktree は作らないので、プライマリの作業ツリーで y と答えると、そのブランチが動きます）。手で呼ぶ `upgrade` も、追従を始める前に同じ内容を 1 行出します。 複数の端末が同時に開いても、聞く・追従するのは 1 つの端末だけです（`flock`。無い環境ではロックのディレクトリ）。
-- **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方（`git restore .` と `git clean -fd`）を案内します。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。既定ブランチは `origin/HEAD` で判定します。`origin/HEAD` が無いときは推定せず、main / master のどちらかの上にいれば切ります（リモートへは問い合わせません）。問いかけで表示した版だけが、N の記録と y の追従の対象です（待っているあいだにキャッシュが更新されても、読み直しません）。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 未コミットの変更があるときは、差分が混ざるので追従せずに止めます。照合に通らないときは何も実行しません。
+- **y のとき:** 新しい版の `bootstrap.sh` と `SHA256SUMS`（リリースの資産）を取得し、**ハッシュを照合してから**、ORIGIN を引き継ぐ `--upgrade` を流します。ai-playbook に新しい版があれば、取得元の種類のまま渡します（`tag` は `--playbook-version`、リリースのタグの tarball の url は、フォークの owner を保ったままの `--playbook-from`）。**y で上げるのは、表示した部品だけです**（N と答えた版は上げません。DCB を上げないときは、今の版の `bootstrap.sh` で追従し、生成物の DCB の版を下げません）。失敗したとき、何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻します。途中で書かれたファイルがあれば、自動では戻さず（作業ツリー全体を戻すと、ほかの端末での編集まで消しうるため）、作業用のブランチに留まって戻し方を案内します。追跡しているファイルの変更は `git restore .` で戻せます。未追跡のファイルは、`--upgrade` を流す直前の一覧に無いもの（追従で新しくできたもの）だけを示します。案内は、追従先へ `cd` してから、その一覧だけを `rm --` で消す形です（対話シェルが今いるディレクトリに依らず、空白を含むパスも引用します）。`git clean -fd` は、追従の前からあった未追跡のファイルまで消すため勧めません。規範の取得元が `adjacent` / `local` / 記録のない url のときは、取得した `bootstrap.sh` からは再現できないので追従せず、手元の `bootstrap.sh` で `--upgrade` する案内に留めます。既定ブランチの上なら先に作業用のブランチ（`chore/update-dcb-<版>`）を切ります。既定ブランチは `origin/HEAD` で判定します。`origin/HEAD` が無いときは推定せず、main / master のどちらかの上にいれば切ります（リモートへは問い合わせません）。問いかけで表示した版だけが、N の記録と y の追従の対象です（待っているあいだにキャッシュが更新されても、読み直しません）。差分を作業ツリーに残して止まり、変わったファイルと次の手順（差分を読む → `scripts/verify.sh` → コミット → PR）を出します。**コミット・push・PR はしません。** 追跡しているファイルに未コミットの変更（ステージ済み・未ステージ）があるときは、差分が混ざるので追従せずに止めます。未追跡のファイルは、それだけでは止めません。取得と照合のあと、ブランチを切る前に、照合した `bootstrap.sh` を `--upgrade --dry-run`（何も書きません。未追跡のファイルが無くても 1 回流します。規範の引数も追従と同じに渡します）で走らせ、出力の `plan:` の行から**書き込みを伴う行**（`create` / `update` / `keep ... -> <パス>.dcb-new` / `remove`、`.gitignore` と ORIGIN の書き換え）のパスを集めます。`up-to-date` と `update` は `<パス>.dcb-new` を消すので、それも対象です。書き込まない行（`up-to-date` のパス・`absent`・`template unchanged` など）は数えません。控えた未追跡ファイル（名前は NUL 区切りで読みます）と同じ名前があるときだけ、重なったパスを示して止めます。`plan:` の行は、既知の形ごとに先頭の種類と末尾の注記を落としてパスを読むので、パスに ` (` や ` -> ` が含まれていても切りません（`.dcb-new` の形は、末尾が同じパスの `.dcb-new` であることを確かめます）。未追跡の一覧は、dry-run の直前と `--upgrade` の直前の 2 回読み、`--upgrade` の直前の一覧でも、dry-run の結果を使い回して重なりをもう一度照合します（取得や dry-run を待つあいだに増えたファイルを漏らさないため）。集合の差・積は、`%q` で 1 行にした名前を awk の連想配列で取ります。`misc/` などに作業物を未追跡で置いていても、追従と関係が無ければ進み、そのファイルは変わりません。次のときは、書く予定のパスを知れないので、安全側に倒し、未追跡のファイルがあれば止めます（dry-run の標準エラーの末尾の数行を示します）: dry-run が失敗した（未追跡のファイルが無ければ止めず、`--upgrade` の直前に増えていたら止めます）、出力に終わりの印が無い、知らない形の `plan:` の行が 1 行でもある、パスが 1 件も取れない、`git ls-files` が失敗して未追跡の一覧を読めない。書き込み先の祖先（`a/b/c` なら `a/b` と `a`）が未追跡の一覧にあるとき（未追跡のシンボリックリンクは 1 つのエントリとして出ます）と、作業ツリーの中でシンボリックリンクになっているとき（追跡しているかを問いません）も、リンクをたどって作業ツリーの外へ書きうるので止めます。普通の未追跡ディレクトリ自体は一覧に出ないので、止めません。ignore に一致する未追跡のファイル（`CLAUDE.md.dcb-new` など）は、未追跡の一覧（`--exclude-standard`）には出ないので、書き込み先（と祖先）それぞれについて、作業ツリーに通常のファイルかリンクとして在り、かつ追跡していないかを直接確かめます（一覧全体を取り直さないので、`node_modules/` のように大量にあっても重くなりません）。**限界:** 作業ツリーのパスや生成先のパスに改行を含む場合は、dry-run の出力を行で読めないため、読めない行として安全側で止まります（DCB は決まった名前しか生成しないので、直しません）。dry-run に時間の上限は付けません（`timeout` が無い環境があるため）。dry-run は、規範の取得元によっては規範をもう一度取得するので、取得に時間がかかるときは、その分だけ待ちます。`--upgrade` の実行中に別の端末が作った未追跡ファイルは、追従が作ったものと区別できないので、失敗の案内の一覧に含まれうります（案内は、消す前に一覧を確かめるよう求めます）。書式の追随は、本物の `bootstrap.sh` の出力を判定の関数に読ませる試験が担います。照合に通らないときは何も実行しません。
 - **N のとき:** その版のあいだは聞きません（通知も出しません）。さらに新しい版が出れば、また聞きます。
 - **手で追従する:** `bash scripts/update-check.sh upgrade`（最新を問い合わせて、y と同じ処理をします）。
 - **間引きと失敗:** 問い合わせは 1 日 1 回です。**取得をすべて終えた日だけ**数えます。どの部品の取得がどんな理由（通信ができない・HTTP のエラー・API の制限・形の不一致・`CHANGELOG.md` の取得の失敗）で失敗しても、その日の印を書かず、次の接続で取り直します（成功した部品は差し替え、失敗した部品の前の日のキャッシュは消します。更新は更新用のロック（`refresh-lock`）を取って行い、取れなければ（別の接続が更新中なら）更新を飛ばして、通知だけキャッシュから出します。問いかけのロックとは別なので、更新のあいだも問いかけは出ます）。`upgrade` は、今回の問い合わせで取得できた部品だけを対象にします（取得できなかった部品は、同じ日のキャッシュがあっても追従せず、そう報告します。どちらも取得できなければ失敗で終わります）。オフラインのマシンでは接続のたびに問い合わせます（最大 2 秒）。オフライン・API の失敗・制限は黙って通し（短いタイムアウト）、起動を止めません。端末が付いていないシェル（AI エージェント・CI・スクリプト）では何も聞かず、何も出しません。

@@ -6,6 +6,24 @@
 >
 > 同じ理由で、issue 参照は `ojos/ai-packages-dev#NNN` の形で書いてください。裸の `#NNN` は GitHub のオートリンクが**配布先リポジトリの issue** として解決するため、配布後は存在しない issue や無関係な issue を指します。
 
+## v0.25.0
+
+### Summary
+- **`scripts/check-git-config.sh` が、ページャーなどの設定を検出するようになった**（ojos/ai-packages-dev#694）。`core.pager` と `pager.<コマンド>`（git が端末でページャーを使う操作で実行する）が漏れていた。同じ種類（git が外部コマンドとして実行する設定）の漏れも足した: `core.alternateRefsCommand`・`interactive.diffFilter`・`gpg.ssh.defaultKeyCommand`・`mergetool.<名前>.cmd` / `path`・`difftool.<名前>.cmd` / `path`・`trailer.<名前>.cmd`・`submodule.<名前>.update`（値が「!」で始まるものだけ）・`protocol.ext.allow` と `protocol.allow`（`never` 以外）・`sendemail` の `sendmailcmd` / `tocmd` / `cccmd` / `headercmd` と `smtpserver`（プログラムのパスのときだけ。識別名つきの形を含む）・`trailer.<名前>.command`・`alias.<名前>`（値が「!」で始まるものだけ）・`man.<名前>.cmd` / `path`・`browser.<名前>.cmd` / `path`・`instaweb.httpd`。`core.fsmonitor` と `pager.<コマンド>` で値を真偽値として除くのは、確実に真偽値と言える形（true / false / yes / no / on / off / 空と、先頭に 0 を付けない 9 桁までの 10 進の整数）だけにした。`08` のように git が整数として読めない値はコマンドとして実行されるため、見逃さない側へ倒した（`1k`・`0x10` のように git が真偽値として読む形も検出する）。
+- **生成する `scripts/*.sh` が、shellcheck の既定の重大度（info まで）で通る**（ojos/ai-packages-dev#697）。`scripts/check-doc-links.sh` の生成物判定の行が SC2016（info）を出し、`scripts/` を重大度の指定なしで shellcheck する配布先の受け入れ検証を落としていた。この行には理由を添えて抑止を付けた。生成物の検査（開発リポジトリの試験）も `-S warning` から既定の重大度へ揃え、`--with-codex` の構成も検査に含めた。`second-opinion-review.sh`（ai-playbook の雛形）の `load-project-env.sh` の読み込みは、配布先で辿れない SC1091（info）を避けるため、ほかの生成物と同じ書き方（`source=/dev/null`）にした。
+- **`scripts/check-doc-links.sh` が、生成した規則の断り書きに続けて足した「> 」の行も本文として照合する**（ojos/ai-packages-dev#698）。これまでは断り書きの後の「> 」で始まる行を条件なしに読み飛ばしていたため、そこに壊れたリンクを足しても、生成物として除外されて検出できなかった。読み飛ばすのは、生成器が出す断り書きの 1・2 行目（文面全体が一致するもの）と、書式が生成器どおりでリンクを含まない「親の見出し」の行だけにした。行末の CR は落としてから照合する（CRLF の作業ツリーでも生成物を除外する）。
+- **`--upgrade` が実行中のスクリプトを置き換えても、そのスクリプトが壊れなくなった**（ojos/ai-packages-dev#696）。生成する `scripts/update-check.sh` の upgrade は、`bootstrap.sh --upgrade` を通じて自分自身を置き換える。これまでは同じ場所への上書きだったので、bash が古い位置のまま新しい中身を読み続け、終了時に `command not found` や `unbound variable` が出ていた。`*.sh` の置き換えを「同じディレクトリの一時ファイルに書き、モードを合わせて rename する」形にしたので、走っている bash は古い中身を読み続ける。置き換えるのは新しい `bootstrap.sh` なので、この版より古い `update-check.sh` からの追従にも効く。rename では所有者・グループ・ACL・ハードリンクが保たれないので、`*.sh` 以外は従来どおり同じ場所へ上書きする。親ディレクトリに書けないなどで rename できないときは、警告を出して従来の上書きに戻る。`update-check.sh` の末尾は `main "$@"; exit $?` の 1 行にした（防御）。
+- **規範を配置する構成で、`scripts/second-opinion-repro-schema.json` を `scripts/second-opinion-schema.json` と並べて配置する**（ojos/ai-packages-dev#691）。第二意見の再現の段階（エンジンが codex のとき。判定は変えない）が読む回答の形で、`second-opinion-review.sh` と対。由来記録（ORIGIN）にも載る。
+- **この版は、`templates/second-opinion-repro-schema.json` を持つ ai-playbook v0.14.0 以降を要求する。** 持たない古い規範を指定すると、書き込みの前に雛形の欠けで止まる。
+- **生成する `scripts/update-check.sh` の upgrade が、追従と関係の無い未追跡ファイルでは止まらなくなった**（ojos/ai-packages-dev#704）。これまでは未追跡のファイルが 1 つでもあれば「未コミットの変更」として止まっていたため、作業物を未追跡で置いている利用者は、別の作業ツリーを作って追従していた。追跡しているファイルの変更では従来どおり止める。未追跡のファイルは、取得して照合した `bootstrap.sh` の `--upgrade --dry-run` が示す書き込み先（`.dcb-new` を含む）と重なるときだけ、そのパスを示して止める。dry-run が失敗した・読めない・知らない形の行を含むときは、未追跡のファイルがあるだけで止める（安全側）。追従が失敗したときの案内は、`--upgrade` の直前に無かった（追従で新しくできた）ファイルだけを、ルートへ `cd` したうえで `rm` する形にした。`git clean -fd` は勧めない。
+- **生成する `scripts/loop-gate.sh` が、第二意見より前に、保存した再現テストを再実行する**（ojos/ai-packages-dev#693）。`second-opinion-review.sh --rerun-saved` を第二意見と同じ範囲で呼び、まだ再現すれば（終了コード 3）`GATE_FAIL`。ほかの失敗は警告だけ出して進む。再実行の出力は第二意見の記録の末尾にも残す。`--rerun-saved` を持たない古い版の `second-opinion-review.sh` では呼ばない。`LOOP_GATE_REVIEW_CMD` で差し替え・無効化したときも呼ばない。
+- **codex を含む構成の `.env.example` に、`SECOND_OPINION_REFUTE_ENGINE` の空の欄を足した**（ojos/ai-packages-dev#692）。第二意見の反証の段階（ai-playbook v0.14.0。再現しなかった指摘を別ベンダーのモデルに反証させる）のエンジンを選ぶ欄で、空なら gemini → antigravity の順に探す。codex を含まない構成には出さない。
+
+### 移行
+- **規範を配置する構成では、ai-playbook v0.14.0 も一緒に上げる。** `bootstrap.sh --upgrade` に `--playbook-version v0.14.0` を足す（指定しなければ、ORIGIN に記録した古い版を引き継ぎ、雛形の欠けで書き込む前に止まる）。`scripts/update-check.sh` の追従では、ai-playbook の新しい版にも y と答える（DCB だけを上げると同じく止まる）。止まったときは何も書かれていない。
+- 再現の段階は codex のとき既定で有効になり、指摘ごとに codex を 1 回起こす。止めるには `.env` に `SECOND_OPINION_REPRO=off`。反証の段階で判定が変わること（ゲートが通りうる）は ai-playbook v0.14.0 のリリースノートを見る。
+- 上の版の要求のほかに、生成物の破壊的変更はない。
+
 ## v0.24.0
 
 ### Summary

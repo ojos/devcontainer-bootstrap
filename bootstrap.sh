@@ -104,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.24.0"
+DCB_VERSION="v0.25.0"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -369,8 +369,11 @@ dcb_file_sha256() {
 # ファイルへ、正本の順序で写す。各ファイルの先頭（frontmatter の後）には、生成物で
 # ある旨と相対リンクの基準（.ai-playbook/ からの相対）を述べる断りの行を足す。条件付きの
 # 規則には、親の見出しを示す行も足す。断りの行は CLAUDE_RULES_NOTICE_PREFIX で始め、本文との
-# 間を空行で区切る（生成物の見分けは、この接頭辞だけで行う。scripts/check-doc-links.sh、
-# tests/test-claude-rules.sh と DCB のテストが使う）。
+# 間を空行で区切る（生成物の見分けは、この接頭辞で始まる先頭行から始める。tests/test-claude-rules.sh
+# と DCB のテストが使う）。scripts/check-doc-links.sh は、断りの 1・2 行目の文面全体と、親の見出しの
+# 行の書式（「> 親の見出し: 「」で始まり「」の一部」で終わる）まで照合する。文面を変えるときは
+# check-doc-links.sh の照合も直す。食い違いは tests/test-check-doc-links.sh の「作り直したままの
+# 生成物がすべて除外される」テストが捕まえる。
 # 空行は正本のとおり写す。ただし各ファイルの末尾の空行だけは落とす（節の終わりの
 # 空行が末尾に残ると、ファイルの末尾が空行で終わり git diff --check に掛かるため）。
 # このため照合は、空行以外の行を厳密に（ちょうど 1 回・順序どおり）、空行は
@@ -2934,6 +2937,9 @@ release_git_claim() {
 
 # refresh_cache の作業用のファイル。中断（Ctrl-C・接続の打ち切り）でも片づける。
 RC_TMP="" RC_STAGE=""
+# trap から呼ぶ（直接は呼ばない）。末尾を main "$@"; exit $? にしてから、shellcheck が
+# 呼び出し元を見つけられず SC2329（info）を出すため抑える。
+# shellcheck disable=SC2329
 cleanup_exit() {
   local d
   release_git_claim
@@ -3110,6 +3116,169 @@ follow_blocker() {
   fi
 }
 
+# 未追跡のファイル（.gitignore で除いたものを除く）の一覧を、$1 のファイルへ書く。名前は改行などを含みうるので、
+# git ls-files -z の NUL 区切りで読み、%q で 1 行にして書く（同じ名前は同じ行になるので、集合の差・積は行で取れる）。
+# git が失敗したら、空の一覧として扱わず 1 を返す（呼ぶ側が追従を止める）。
+list_untracked() {
+  local out="$1" raw="$1.raw" f
+  git -C "$ROOT" ls-files -z --others --exclude-standard > "$raw" 2>/dev/null || { rm -f "$raw"; return 1; }
+  while IFS= read -r -d '' f; do
+    printf '%q\n' "$f"
+  done < "$raw" > "$out" || { rm -f "$raw"; return 1; }
+  rm -f "$raw"
+  return 0
+}
+
+# 集合の差（$2 のうち $1 に無い行）と積（$2 のうち $1 にある行）。awk の連想配列で、一度の走査で取る。
+# $1 が空のファイルでも正しく動くよう、NR == FNR ではなく FILENAME で見分ける。
+lines_not_in() { awk 'FILENAME == ARGV[1] { a[$0] = 1; next } !($0 in a)' "$1" "$2"; }
+lines_in_both() { awk 'FILENAME == ARGV[1] { a[$0] = 1; next } ($0 in a)' "$1" "$2"; }
+
+# 書き込む（または消す）パス $2（ROOT からの相対）と、その祖先（a/b/c なら a/b と a）を、$1 へ %q で 1 行ずつ足す。
+# 祖先は、未追跡のシンボリックリンク（git ls-files --others が 1 エントリとして出す）を拾うため。
+# 祖先は、作業ツリーの中でリンクになっていないかを確かめる元として、$1.anc へもそのまま 1 行ずつ足す。
+# パスと祖先の全部は、存在を直接確かめる元として、$1.raw へもそのまま 1 行ずつ足す。
+plan_emit() {
+  local out="$1" d="$2"
+  printf '%q\n' "$d" >> "$out"
+  printf '%s\n' "$d" >> "$out.raw"
+  while [[ "$d" == */* ]]; do
+    d="${d%/*}"
+    printf '%q\n' "$d" >> "$out"
+    printf '%s\n' "$d" >> "$out.anc"
+    printf '%s\n' "$d" >> "$out.raw"
+  done
+}
+
+# --upgrade --dry-run の出力（$1）から、追従が書き込む（または消す）パスを集めて、$2 へ書く（%q で 1 行ずつ）。
+# 数えるのは書き込みを伴う行だけ: create / update / keep ... -> <P>.dcb-new / remove と、.gitignore・ORIGIN の
+# 書き換え。up-to-date と update は <P>.dcb-new を消すので、<P>.dcb-new も入れる。書き込まない行（up-to-date の P・
+# absent・modified / owned / accepted (template unchanged)・keep (... no longer generated)・テンプレート名の行）は数えない。
+# 行の読み方は、bootstrap.sh が出す既知の形ごとに厳密に決める。先頭（種類と理由）と末尾の注記は既知の文字列として落とし、
+# 残りをパスとする（パスに " (" や " -> " があっても切らない）。.dcb-new の形は、末尾が " -> $ROOT/<同じパス>.dcb-new" で
+# あることを確かめてから読む。どれにも当てはまらない行が 1 行でもあれば、読めない行を標準エラーへ出して 1 を返す
+# （呼ぶ側が安全側で止める）。パスは $ROOT/ から始まる（--output-dir "$ROOT" で流すため）。
+parse_plan_paths() {
+  local in="$1" out="$2" line body rest p tail reason bad=0 n=0 known
+  : > "$out"; : > "$out.anc"; : > "$out.raw"
+  while IFS= read -r line; do
+    case "$line" in
+      "plan: "*) ;;
+      *) continue ;;
+    esac
+    body="${line#plan: }"
+    known=""
+    case "$body" in
+      "github/gitignore templates = "*) known="yes" ;;
+      "create $ROOT/"*)
+        plan_emit "$out" "${body#"create $ROOT/"}"; n=$((n + 1)); known="yes" ;;
+      "update $ROOT/"*)
+        p="${body#"update $ROOT/"}"
+        plan_emit "$out" "$p"; plan_emit "$out" "$p.dcb-new"; n=$((n + 1)); known="yes" ;;
+      "update (baseline match) $ROOT/"*)
+        p="${body#"update (baseline match) $ROOT/"}"
+        plan_emit "$out" "$p"; plan_emit "$out" "$p.dcb-new"; n=$((n + 1)); known="yes" ;;
+      "up-to-date $ROOT/"*)
+        plan_emit "$out" "${body#"up-to-date $ROOT/"}.dcb-new"; n=$((n + 1)); known="yes" ;;
+      "remove $ROOT/"*)
+        plan_emit "$out" "${body#"remove $ROOT/"}"; n=$((n + 1)); known="yes" ;;
+      "absent (recorded as intentionally absent) $ROOT/"*) known="yes" ;;
+      "modified (template unchanged) $ROOT/"* | "owned (template unchanged) $ROOT/"* | "accepted (template unchanged) $ROOT/"*) known="yes" ;;
+      "keep (modified, no longer generated) $ROOT/"*) known="yes" ;;
+      "keep ("*)
+        # keep (<理由>) <P> -> <P>.dcb-new
+        for reason in "symlink or not a regular file" "modified, .dcb-new left" "modified" "no record"; do
+          case "$body" in
+            "keep ($reason) $ROOT/"*)
+              rest="${body#"keep ($reason) $ROOT/"}"
+              p="${rest%" -> $ROOT/"*}"
+              tail="${rest#"$p -> $ROOT/"}"
+              if [[ "$rest" != "$p" && "$tail" == "$p.dcb-new" ]]; then
+                plan_emit "$out" "$p.dcb-new"; n=$((n + 1)); known="yes"
+              fi
+              break
+              ;;
+          esac
+        done
+        ;;
+      "$ROOT/"*" (managed section update)")
+        p="${body#"$ROOT"/}"
+        plan_emit "$out" "${p% (managed section update)}"; n=$((n + 1)); known="yes" ;;
+      "$ROOT/"*" (rewritten from the new version)")
+        p="${body#"$ROOT"/}"
+        plan_emit "$out" "${p% (rewritten from the new version)}"; n=$((n + 1)); known="yes" ;;
+    esac
+    if [[ -z "$known" ]]; then
+      echo "読めない plan: の行: $line" >&2
+      bad=1
+    fi
+  done < "$in"
+  [[ $bad -eq 0 && $n -gt 0 ]]
+}
+
+# 未追跡の一覧（$1）が、追従が書く予定のパス（$2。parse_plan_paths の出力）と重なるかを確かめる。重ならなければ 0。
+# 重なるなら、重なったパスを示して 1。
+report_untracked_overlap() {
+  local overlap anc links="" rp extra=""
+  overlap="$(lines_in_both "$2" "$1")"
+  # 未追跡の一覧は --exclude-standard で ignore 対象を除くので、ignore に一致する未追跡のファイル（例: CLAUDE.md.dcb-new）は
+  # 一覧の照合では漏れる。一覧全体（node_modules/ のように数万件ありうる）を取り直さず、逆向きにも確かめる:
+  # 書き込み先（と祖先）それぞれについて、作業ツリーに通常のファイルかリンクとして在り、かつ追跡していなければ重なりとする。
+  # ディレクトリは対象にしない（中のファイルだけが問題で、ディレクトリ自体は書き換えない）。
+  if [[ -s "$2.raw" ]]; then
+    while IFS= read -r rp; do
+      if [[ -L "$ROOT/$rp" || -f "$ROOT/$rp" ]] && ! git -C "$ROOT" ls-files --error-unmatch -- ":(literal)$rp" >/dev/null 2>&1; then
+        extra="$extra$(printf '%q' "$rp")"$'\n'
+      fi
+    done < <(sort -u "$2.raw")
+  fi
+  if [[ -n "$extra" ]]; then
+    overlap="$(printf '%s\n%s' "$overlap" "$extra" | sed '/^$/d' | sort -u)"
+  fi
+  # 書き込み先の祖先が、作業ツリーの中でシンボリックリンクなら（追跡しているかを問わず）、追従はリンクをたどって
+  # 作業ツリーの外へ書きうる。
+  if [[ -s "$2.anc" ]]; then
+    while IFS= read -r anc; do
+      [[ -L "$ROOT/$anc" ]] && links="$links$anc"$'\n'
+    done < <(sort -u "$2.anc")
+  fi
+  if [[ -n "$links" ]]; then
+    echo "$LOG_PREFIX 追従が書く予定のパスの祖先が、作業ツリーの中でシンボリックリンクになっているため、追従しません（リンクをたどって作業ツリーの外へ書きうるため）。リンク:" >&2
+    printf '%s' "$links" | sed 's/^/  /' >&2
+    echo "$LOG_PREFIX リンクを外すか、コミットか退避をしてからやり直してください。" >&2
+    return 1
+  fi
+  [[ -n "$overlap" ]] || return 0
+  echo "$LOG_PREFIX 追従が書く予定のパス（またはその祖先）と同じ名前の未追跡のファイルがあるため、追従しません（上書きや .dcb-new の置き換えで失うため）。重なったパス:" >&2
+  printf '%s\n' "$overlap" | sed 's/^/  /' >&2
+  echo "$LOG_PREFIX コミットか退避をしてからやり直してください。" >&2
+  return 1
+}
+
+# 取得して照合した bootstrap.sh（$1）を --upgrade --dry-run で走らせ（何も書かない）、書く予定のパスを $2/plan.paths へ
+# 集める。残りの引数は、追従に渡す規範の引数。標準エラーは $2/dry.err へ取る。失敗したときは、止めるときに示す文面（末尾の数行を含む）を
+# $2/dry.fail へ書く（未追跡のファイルが無ければ止めないので、ここでは出さない）。
+# 時間の上限は付けない（timeout が無い環境があるため）。dry-run は、規範の取得元によっては規範をもう一度取得しうる。
+# 失敗した・終わりの印が無い・読めない行がある・パスが 1 つも取れないときは、書く予定のパスを知れないので 1 を返す。
+run_dry_run_plan() {
+  local bs="$1" work="$2" rc
+  shift 2
+  bash "$bs" --upgrade --dry-run --output-dir "$ROOT" "$@" > "$work/dry.out" 2> "$work/dry.err"
+  rc=$?
+  if [[ $rc -eq 0 ]] && grep -Fxq "[bootstrap] dry-run: no files were written" "$work/dry.out" \
+    && parse_plan_paths "$work/dry.out" "$work/plan.paths" 2>> "$work/dry.err"; then
+    return 0
+  fi
+  {
+    echo "$LOG_PREFIX 追従が書く予定のパスを、--upgrade --dry-run の出力から読めませんでした（終了コード $rc）。追従と重なるかを判定できないため、安全側に倒し、未追跡のファイルがあるので追従しません（コミットか退避をしてからやり直してください）。"
+    if [[ -s "$work/dry.err" ]]; then
+      echo "$LOG_PREFIX dry-run の標準エラーの末尾:"
+      tail -n 5 "$work/dry.err" | sed 's/^/  /'
+    fi
+  } > "$work/dry.fail"
+  return 1
+}
+
 # 追従する。$1 は追従する部品（"dcb" "playbook" の空白区切り。聞いて y と答えたもの）。
 # 失敗は 1（何も実行していないか、止めた理由を出している）。
 # DCB を上げないとき（N と答えた・すでに最新・最新より新しい）は、今の版の bootstrap.sh を使い、
@@ -3119,7 +3288,7 @@ follow_blocker() {
 # prompt 以外（手で呼ぶ upgrade）は、キャッシュの最新を読む。
 do_upgrade() {
   local want="$1" shown_dcb="${2:-}" shown_pb="${3:-}" from_prompt="${4:-}" dir latest_dcb="" latest_pb="" want_dcb="" want_pb="" use_tag blocker
-  local work base wantbranch expected actual rc branch_hint changed
+  local work base wantbranch expected actual rc branch_hint changed written rmcmd f q in_tree dry_ok new_untracked new_unknown
   local -a pbargs
   pbargs=()
   dir="$(cache_dir)"
@@ -3158,13 +3327,17 @@ do_upgrade() {
   # 取得（最大 60 秒ずつ）の前に、台帳で他のセッションの git の登録を確かめる（あれば何も変えずに止める）。
   # 以降の失敗の経路では、登録を解放してから戻る。
   ledger_guard || return 1
-  # 差分を読めるよう、作業ツリーが汚れているときは止める（追従の差分と混ざるため）。登録のあとで確かめる。
+  # 差分を読めるよう、追跡しているファイルに変更があるときは止める（追従の差分と混ざるため）。登録のあとで確かめる。
   # 先に確かめると、確かめてから登録するまでに別のセッションが書き込んで解放したとき、汚れたまま進む（#666）。
-  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-    && [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
-    echo "$LOG_PREFIX 作業ツリーに未コミットの変更があるため、追従しません（差分が混ざるため）。コミットか退避をしてからやり直してください。" >&2
-    release_git_claim
-    return 1
+  # 未追跡のファイルは、ここでは止めない。追従が書く予定のパスと重なるときだけ止める（下の dry-run）。
+  in_tree=""
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    in_tree="yes"
+    if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+      echo "$LOG_PREFIX 作業ツリーに未コミットの変更があるため、追従しません（差分が混ざるため）。コミットか退避をしてからやり直してください。" >&2
+      release_git_claim
+      return 1
+    fi
   fi
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/dcb-update-upgrade.XXXXXX" 2>/dev/null)" || { release_git_claim; return 1; }
@@ -3185,6 +3358,32 @@ do_upgrade() {
   fi
   echo "$LOG_PREFIX bootstrap.sh $use_tag を取得し、SHA256SUMS と照合しました。"
 
+  # 取得と照合のあと、ブランチを切る前に、dry-run を常に 1 回流す（git の作業ツリーのとき）。追従が書く予定のパスと、
+  # 未追跡のファイルが重ならないかを確かめるため。一覧は、取得を待ったあとの今のもの。dry-run が読めなかったときは、
+  # 未追跡のファイルがある場合だけ止める（無ければ従来どおり進め、--upgrade の直前の一覧で、あればそこで止める）。
+  dry_ok=""
+  if [[ -n "$in_tree" ]]; then
+    if ! list_untracked "$work/untracked.dry"; then
+      echo "$LOG_PREFIX 未追跡のファイルの一覧を git から読めませんでした。安全側に倒し、追従しません。" >&2
+      release_git_claim
+      rm -rf "$work"
+      return 1
+    fi
+    if run_dry_run_plan "$work/bootstrap.sh" "$work" ${pbargs[@]+"${pbargs[@]}"}; then
+      dry_ok="yes"
+      if ! report_untracked_overlap "$work/untracked.dry" "$work/plan.paths"; then
+        release_git_claim
+        rm -rf "$work"
+        return 1
+      fi
+    elif [[ -s "$work/untracked.dry" ]]; then
+      cat "$work/dry.fail" >&2
+      release_git_claim
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+
   # 名前には、追従する部品の版だけを入れる（追従しない部品の最新版を入れると、問いかけで示した名前と食い違う）。
   wantbranch="$(follow_branch_name "${want_dcb:+$latest_dcb}" "${want_pb:+$latest_pb}")"
   # 問いかけを経ない（手で呼ぶ upgrade）ときは、追従を始める前に何が起きるかを 1 行出す。
@@ -3195,23 +3394,77 @@ do_upgrade() {
     return 1
   fi
 
+  # --upgrade の直前の未追跡の一覧を控える。dry-run からここまでに増えたものも、重なりの判定から漏らさない
+  # （dry-run は、ブランチを切る前に流した 1 回の結果を使い回す）。失敗のときの「新しくできたファイル」は、
+  # この一覧との差にする（取得を待つあいだに別の端末で作ったファイルを、消す対象として案内しない）。
+  if [[ -n "$in_tree" ]]; then
+    if ! list_untracked "$work/untracked.pre"; then
+      echo "$LOG_PREFIX 未追跡のファイルの一覧を git から読めませんでした。安全側に倒し、追従しません。" >&2
+      restore_branch
+      release_git_claim
+      rm -rf "$work"
+      return 1
+    fi
+    if [[ -z "$dry_ok" ]]; then
+      if [[ -s "$work/untracked.pre" ]]; then
+        cat "$work/dry.fail" >&2
+        restore_branch
+        release_git_claim
+        rm -rf "$work"
+        return 1
+      fi
+    elif ! report_untracked_overlap "$work/untracked.pre" "$work/plan.paths"; then
+      restore_branch
+      release_git_claim
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+
   echo "$LOG_PREFIX bootstrap.sh --upgrade を実行します。"
   bash "$work/bootstrap.sh" --upgrade --output-dir "$ROOT" ${pbargs[@]+"${pbargs[@]}"}
   rc=$?
+  # 追従で新しくできた未追跡のファイル（--upgrade の直前の一覧に無いもの）。一覧を読めなければ new_unknown にする。
+  new_untracked=""
+  new_unknown=""
+  if [[ -n "$in_tree" ]]; then
+    if list_untracked "$work/untracked.post"; then
+      new_untracked="$(lines_not_in "$work/untracked.pre" "$work/untracked.post")"
+    else
+      new_unknown="yes"
+    fi
+  fi
   rm -rf "$work"
   if [[ $rc -ne 0 && $rc -ne 2 ]]; then
     echo "$LOG_PREFIX --upgrade が失敗しました（終了コード $rc）。出力を確かめてください。" >&2
     # 途中で書かれたファイルを自動では戻さない（作業ツリー全体を戻すと、追従のあいだに別の端末で編集したものまで消しうるため）。
     # 何も書かれていなければ、切った作業用のブランチを消して元のブランチへ戻す。書かれていれば、作業用のブランチに留まり
     # （既定ブランチの作業ツリーを汚さない）、戻し方を案内する。
-    if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      && [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+    # --upgrade の直前からあった未追跡ファイルは数えない（直前の一覧に無いものだけが、追従で書かれたもの）。
+    written=""
+    if [[ -n "$in_tree" ]]; then
+      if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" || -n "$new_untracked" || -n "$new_unknown" ]]; then written="yes"; fi
+    fi
+    if [[ -n "$written" ]]; then
       if [[ -n "$BRANCH_MADE" ]]; then
         echo "$LOG_PREFIX 途中で書かれたファイルがあるため、作業用のブランチ $BRANCH_MADE に留まります（$BRANCH_ORIG には戻していません）。" >&2
       else
         echo "$LOG_PREFIX 途中で書かれたファイルが、今のブランチの作業ツリーに残っています。" >&2
       fi
-      echo "$LOG_PREFIX 差分を読んで、要らなければ git restore . と git clean -fd（消す前に git clean -nd で確かめる）で戻してください。" >&2
+      echo "$LOG_PREFIX 差分を読んで、要らなければ、追跡しているファイルの変更は git restore . で戻してください。" >&2
+      if [[ -n "$new_unknown" ]]; then
+        echo "$LOG_PREFIX 追従で新しくできた未追跡のファイルを特定できませんでした。git status で確かめ、追従の前からあったものを消さないようにしてください。" >&2
+      elif [[ -n "$new_untracked" ]]; then
+        echo "$LOG_PREFIX 追従で新しくできた未追跡のファイル（追従の前からあった未追跡のファイルは含みません。git clean は、それらまで消すため使わないでください）:" >&2
+        printf '%s\n' "$new_untracked" | sed -n '1,40p' | sed 's/^/  /' >&2
+        [[ "$(printf '%s\n' "$new_untracked" | wc -l | tr -d ' ')" -le 40 ]] || echo "  （ほかにもあります。git status で確かめてください）" >&2
+        # 一覧の各行は %q で引用してあり、追従先からの相対パス。今いるディレクトリに依らないよう、先に cd する。
+        printf -v q '%q' "$ROOT"
+        rmcmd="cd -- $q && rm --"
+        while IFS= read -r f; do rmcmd="$rmcmd $f"; done < <(printf '%s\n' "$new_untracked" | sed -n '1,40p')
+        echo "$LOG_PREFIX 追従のあいだに別の端末で作ったファイルも含まれうるので、消す前に一覧を確かめてください。" >&2
+        echo "$LOG_PREFIX 要らなければ、上の一覧だけを消してください（消す前に内容を確かめる）: $rmcmd" >&2
+      fi
       BRANCH_MADE=""
     else
       restore_branch
@@ -3223,7 +3476,9 @@ do_upgrade() {
   branch_hint=""
   [[ -z "$BRANCH_MADE" ]] || branch_hint="（作業用のブランチ $BRANCH_MADE に切り替え済みです）"
   if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    changed="$(git -C "$ROOT" status --short 2>/dev/null | sed -n '1,40p')"
+    # --upgrade の直前からあった未追跡のファイルは出さない（追従で変わったものだけを示す）。
+    changed="$({ git -C "$ROOT" status --short --untracked-files=no 2>/dev/null
+      [[ -z "$new_untracked" ]] || printf '%s\n' "$new_untracked" | sed 's/^/?? /'; } | sed -n '1,40p')"
     echo "$LOG_PREFIX 追従の差分を作業ツリーに残しました。コミット・push・PR はしていません$branch_hint。"
     echo "変わったファイル:"
     if [[ -n "$changed" ]]; then printf '%s\n' "$changed" | sed 's/^/  /'; else echo "  （変わったファイルはありません）"; fi
@@ -3364,7 +3619,11 @@ main() {
   esac
 }
 
-main "$@"
+# upgrade が走らせる bootstrap.sh --upgrade は、このファイルを一時ファイルへ書いて rename で
+# 置き換える（走っている bash は古い inode を読み続けるので壊れない）。これが主な対策。
+# 末尾の exit は防御で、戻った後にファイルを読み進めず main の戻り値で終わらせる
+# （上流の issue 696）。
+main "$@"; exit $?
 TMPL
       ;;
     'scripts/setup-git-identity.sh')
@@ -4817,14 +5076,23 @@ TMPL
 #
 # 検出するキー（大文字小文字を区別しない）:
 #   core.fsmonitor / core.hooksPath / core.sshCommand / core.askPass / core.gitProxy / core.editor
+#   core.pager / pager.<コマンド> / core.alternateRefsCommand / interactive.diffFilter
 #   sequence.editor / credential.helper / credential.<URL>.helper
-#   gpg.program / gpg.<形式>.program
+#   gpg.program / gpg.<形式>.program / gpg.ssh.defaultKeyCommand
 #   diff.external / diff.<名前>.textconv / diff.<名前>.command
 #   filter.<名前>.clean / smudge / process
 #   merge.<名前>.driver
+#   mergetool.<名前>.cmd / mergetool.<名前>.path / difftool.<名前>.cmd / difftool.<名前>.path
+#   trailer.<名前>.cmd / trailer.<名前>.command / submodule.<名前>.update / alias.<名前>
+#   man.<名前>.cmd / man.<名前>.path / browser.<名前>.cmd / browser.<名前>.path / instaweb.httpd
+#   protocol.ext.allow / protocol.allow
+#   sendemail.sendmailcmd / tocmd / cccmd / headercmd / smtpserver と、それぞれの
+#   sendemail.<識別名>.* の形
 #   remote.<名前>.uploadpack / remote.<名前>.receivepack
-#   （core.fsmonitor の値が真偽値・整数のときは、組み込みのデーモンの指定でコマンドではない
-#   ので検出しない）
+#   （値で除くもの: core.fsmonitor と pager.<コマンド> は、値が確実に真偽値と言える形の
+#   ときはコマンドではないので検出しない。submodule.<名前>.update と alias.<名前> は値が
+#   「!」で始まるものだけ、sendemail の smtpserver は値に「/」を含むもの（プログラムの
+#   パス）だけ、protocol.ext.allow と protocol.allow は never 以外のときだけ検出する）
 #
 # 範囲: local（--local。--includes で includeIf の先まで）と worktree（--worktree。
 #   extensions.worktreeConfig があるときだけ）。global と system は対象にしない。
@@ -4881,9 +5149,32 @@ esac
 kind_of() {
   case "${1}" in
     core.fsmonitor | core.hookspath | core.sshcommand | core.askpass | core.gitproxy | core.editor | \
+      core.pager | core.alternaterefscommand | gpg.ssh.defaultkeycommand | interactive.difffilter | \
       sequence.editor | credential.helper | gpg.program | diff.external)
       printf '%s' "${1}"
       ;;
+    pager.*) printf 'pager.<コマンド>' ;;
+    mergetool.*.path) printf 'mergetool.<名前>.path' ;;
+    difftool.*.path) printf 'difftool.<名前>.path' ;;
+    submodule.*.update) printf 'submodule.<名前>.update' ;;
+    protocol.ext.allow | protocol.allow | sendemail.sendmailcmd | sendemail.tocmd | sendemail.cccmd)
+      printf '%s' "${1}"
+      ;;
+    sendemail.headercmd | sendemail.smtpserver | instaweb.httpd) printf '%s' "${1}" ;;
+    sendemail.*.headercmd) printf 'sendemail.<識別名>.headercmd' ;;
+    sendemail.*.smtpserver) printf 'sendemail.<識別名>.smtpserver' ;;
+    trailer.*.command) printf 'trailer.<名前>.command' ;;
+    man.*.cmd) printf 'man.<名前>.cmd' ;;
+    man.*.path) printf 'man.<名前>.path' ;;
+    browser.*.cmd) printf 'browser.<名前>.cmd' ;;
+    browser.*.path) printf 'browser.<名前>.path' ;;
+    alias.*) printf 'alias.<名前>' ;;
+    sendemail.*.sendmailcmd) printf 'sendemail.<識別名>.sendmailcmd' ;;
+    sendemail.*.tocmd) printf 'sendemail.<識別名>.tocmd' ;;
+    sendemail.*.cccmd) printf 'sendemail.<識別名>.cccmd' ;;
+    mergetool.*.cmd) printf 'mergetool.<名前>.cmd' ;;
+    difftool.*.cmd) printf 'difftool.<名前>.cmd' ;;
+    trailer.*.cmd) printf 'trailer.<名前>.cmd' ;;
     credential.*.helper) printf 'credential.<URL>.helper' ;;
     gpg.*.program) printf 'gpg.<形式>.program' ;;
     diff.*.textconv) printf 'diff.<名前>.textconv' ;;
@@ -4897,14 +5188,18 @@ kind_of() {
   esac
 }
 
-# core.fsmonitor の値が、組み込みのデーモンの指定（真偽値・整数）か。git は整数も
-# 真偽値として読む。
-is_builtin_fsmonitor() {
+# 値が、確実に git の真偽値と言える形か（コマンドではない値）。true / false / yes / no /
+# on / off / 空（大文字小文字を区別しない）と、先頭に 0 を付けない 10 進の整数（符号は - だけ、
+# 9 桁まで。git は真偽値の整数を int で読むので、範囲を超える値はコマンドになる）だけを
+# 真偽値とみなす。git の整数の読み方（先頭の空白・+・k / m / g・16 進・
+# 8 進）には寄せない。08 のように git が整数として読めない値はコマンドとして実行される
+# ため、読み方を真似て外すと見逃しになる。狭く取った分の誤検出（余計な警告）は許す。
+is_git_bool() {
   local v="${1}" r=1
   shopt -s nocasematch
   case "$v" in true | false | yes | no | on | off | "") r=0 ;; esac
   shopt -u nocasematch
-  [[ "$v" =~ ^-?[0-9]+$ ]] && r=0
+  [[ "$v" =~ ^-?(0|[1-9][0-9]{0,8})$ ]] && r=0
   return "$r"
 }
 
@@ -4982,9 +5277,14 @@ run_check() {
       # diff.<名前> などの <名前> だけ）。そのため照合は $key のままで足りる。
       kind="$(kind_of "$key")"
       [[ -n "$kind" ]] || continue
-      if [[ "$kind" == core.fsmonitor ]] && is_builtin_fsmonitor "$val"; then
-        continue
-      fi
+      # 値で対象外になるもの（コマンドを実行させない値）。
+      case "$kind" in
+        core.fsmonitor | 'pager.<コマンド>') is_git_bool "$val" && continue ;;
+        'submodule.<名前>.update' | 'alias.<名前>') [[ "$val" == '!'* ]] || continue ;;
+        sendemail.smtpserver | 'sendemail.<識別名>.smtpserver') [[ "$val" == */* ]] || continue ;;
+        protocol.ext.allow) [[ "$val" == never ]] && continue ;;
+        protocol.allow) [[ "$val" == never ]] && continue ;;
+      esac
       is_allowed "$key" "$val" && continue
       # 重複は取り除かない。worktree の設定は local と別のファイルだけを読むので重ならず、
       # 改行を含められる値で重複を判定すると、値に別の設定の記録を埋め込んで、その設定を
@@ -6044,26 +6344,54 @@ while IFS= read -r -d '' md; do
   # 断りの行で見分ける（名前だけでは、手で書いた同名の規則まで外れる）。
   case "$md" in
     .claude/rules/ai-playbook*.md)
-      # 外すのは、frontmatter（あれば）の直後の最初の空でない行が断りの接頭辞で始まり、かつ、
+      # 外すのは、frontmatter（あれば）の直後が、生成器が出す断りの行そのままで、かつ、
       # 断りの後の本文の空でない各行が、断りに書かれた正本（リポジトリのルートから読む）に含まれる
       # ときだけ（正本から写した行だけのとき）。手で壊れたリンクを足した生成物、正本が読めない
-      # 生成物は、通常どおり走査する。断りの行（「> 」で始まる連続した行）と frontmatter は、
-      # 生成器が足す行なので本文として数えない。
+      # 生成物は、通常どおり走査する。
+      # 断りの行は「文面を固定して」照合する（読み飛ばす行数を固定するだけでは、断りの位置に
+      # 差し込んだ行も通ってしまうため）。1 行目と 2 行目は生成器の文面と完全に一致する行、
+      # 3 行目（親の見出し）は、あれば「> 親の見出し: 「」で始まり「」の一部」で終わり、リンクの書式
+      # （「](」「<http」「[...]:」の参照定義）を含まない行だけを読み飛ばす。これ以外の「> 」の行は
+      # 本文として正本と照合する。照合の前に、各行の行末の CR を落とす（CRLF の生成物も除外するため）。
+      # ここの文面は生成器（bootstrap.sh の --render-claude-rules）の写しで、変えるときは
+      # 生成器と、この照合の両方を直す。食い違うと、生成器の出力が除外されなくなり、
+      # 試験（作り直したままの生成物がすべて除外される）が落ちる。
+      # バッククォートは正規表現の中の文字そのもの（コマンド置換ではない）。単引用符の中なので意図どおり。
+      # shellcheck disable=SC2016
       gen_src="$(sed -n 's/^> 生成物: 正本 `\([^`]*\)`.*/\1/p' "$md" | sed -n '1p')"
       case "$gen_src" in
         ""|/*|..|../*|*/../*|*/..) gen_src="" ;;
       esac
-      if [ -n "$gen_src" ] && [ -f "$gen_src" ] && awk 'BEGIN { st = 0; bad = 0 }
-              FILENAME == ARGV[1] { src[$0] = 1; next }
+      # shellcheck disable=SC2016
+      if [ -n "$gen_src" ] && [ -f "$gen_src" ] && GSRC="$gen_src" awk 'BEGIN { st = 0; bad = 0
+                n1 = "> 生成物: 正本 `" ENVIRON["GSRC"] "` から生成したものです。編集は正本へ行ってください（ここを直しても、作り直しで消えます）。"
+                n2 = "> 本文の相対リンクは、このファイルからではなく `.ai-playbook/` からの相対です。"
+                pl = "> 親の見出し: 「"; ps = "」の一部" }
+              { sub(/\r$/, "") }
+              FILENAME == ARGV[1] { src[$0] = 1
+                                    if ($0 ~ /^#/) { h = $0; sub(/^#+[ \t]*/, "", h); sub(/[ \t]+$/, "", h); hd[h] = 1 }
+                                    next }
               FNR == 1 && $0 == "---" { fm = 1; next }
               fm { if ($0 == "---") fm = 0; next }
               st == 0 { if ($0 ~ /^[ \t\r]*$/) next
-                        if ($0 ~ /^> 生成物:/) { st = 1; next }
+                        if ($0 == n1) { st = 1; next }
                         bad = 1; exit }
-              st == 1 { if ($0 ~ /^> /) next
-                        st = 2; if ($0 ~ /^[ \t\r]*$/) next }
-              st == 2 { if ($0 !~ /^[ \t\r]*$/ && !($0 in src)) { bad = 1; exit } }
-              END { exit (st == 2 && !bad) ? 0 : 1 }' "$gen_src" "$md"; then
+              st == 1 { if ($0 == n2) { st = 2; next }
+                        bad = 1; exit }
+              st == 2 { st = 3
+                        if (substr($0, 1, length(pl)) == pl && length($0) >= length(pl) + length(ps) \
+                            && substr($0, length($0) - length(ps) + 1) == ps) {
+                          if (index($0, "](") == 0 && index($0, "<http") == 0 && $0 !~ /\[[^]]*\]:/) next
+                          # リンクの書式を含むときは、見出しがそのまま正本の見出しと一致する場合に限る
+                          # （正本の見出しにリンクがあると、生成器の出した行もリンクの書式を含むため）。
+                          r = substr($0, length(pl) + 1, length($0) - length(pl) - length(ps))
+                          m = split(r, parts, "」「")
+                          ok = 1
+                          for (k = 1; k <= m; k++) if (!(parts[k] in hd)) ok = 0
+                          if (ok) next
+                        } }
+              st == 3 { if ($0 !~ /^[ \t\r]*$/ && !($0 in src)) { bad = 1; exit } }
+              END { exit (st == 3 && !bad) ? 0 : 1 }' "$gen_src" "$md"; then
         excluded_count=$((excluded_count + 1))
         continue
       fi
@@ -8065,6 +8393,16 @@ TMPL
 #   ステージ済みが空のまま reviewer の既定へ流すと、空の差分を見て「対象なし」で
 #   通る偽の緑になるので、commit 済み範囲を必ず明示して渡す。
 #
+# 保存した再現テストの再実行:
+#   第二意見の再現の段階が「再現した」テストを保存していれば（second-opinion-review.sh が
+#   --rerun-saved を持つ版のときだけ）、第二意見より前に、同じ範囲の状態の上で再実行する。
+#   まだ再現すれば（終了コード 3）GATE_FAIL（前のゲートで実行して確かめた欠陥が、まだ直っていない）。
+#   ほかの失敗（再実行できなかった）は警告だけ出して進む（再実行を足す前の判定に戻る）。
+#   再現しなくなったテストには「直った」の印が付き、リポジトリのテストへ移す案内が出る。
+#   再実行の出力は、第二意見の記録の末尾にも残す（先頭に置くと、記録がエンジン名と回数を
+#   拾う最初の `(engine=` に、モデルが書いたテストの出力が先に来うるため）。
+#   既定の reviewer の経路だけで行う（LOOP_GATE_REVIEW_CMD で差し替え・無効化したときは行わない）。
+#
 # 第二意見の記録:
 #   第二意見は手元でしか走らず、受け入れ検証のように CI が再実行して確かめられない。
 #   回したことを記録に残し、確認側（second-opinion-gate.yml）が push 後の別の契機で
@@ -8370,15 +8708,37 @@ main() {
     if [[ -f "$HERE/second-opinion-review.sh" ]]; then
       resolve_review_range
       resolve_agent_config_paths
-      local review_ok=0
+      local review_ok=0 rerun_rc=0 so_capture so_scope="" rerun_capture
+      so_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
+      rerun_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-rerun.XXXXXX")"
+      # 保存した再現テストを、第二意見より前に再実行する（冒頭「保存した再現テストの再実行」）。
+      # 古い版の reviewer は --rerun-saved を持たないので、持つときだけ呼ぶ（版のずれで止めない）。
+      # 落とすのは「まだ再現する」（終了コード 3）のときだけ。ほかの失敗は再実行できなかったと
+      # みなし、警告して進む（設定の誤りなどは、続く第二意見の実行でも同じく表に出る）。
+      if [[ "$REVIEW_NO_TARGET" -ne 1 ]] && grep -q -- '--rerun-saved' "$HERE/second-opinion-review.sh"; then
+        local -a rerun_args=()
+        if [[ -n "$REVIEW_BASE" ]]; then
+          rerun_args=(--base "$REVIEW_BASE")
+        elif [[ -n "$REVIEW_RANGE" ]]; then
+          rerun_args=(--range "$REVIEW_RANGE")
+        fi
+        bash "$HERE/second-opinion-review.sh" --rerun-saved ${rerun_args[@]+"${rerun_args[@]}"} 2>&1 \
+          | tee "$rerun_capture" || rerun_rc=$?
+        if [[ "$rerun_rc" -eq 3 ]]; then
+          rm -f "$so_capture" "$rerun_capture"
+          echo "[loop-gate] saved reproduction tests still reproduce" >&2
+          echo "GATE_FAIL"
+          exit 1
+        elif [[ "$rerun_rc" -ne 0 ]]; then
+          echo "[loop-gate] WARN: 保存した再現テストを再実行できませんでした（終了コード $rerun_rc。判定は変えずに進みます）" >&2
+        fi
+      fi
       # 出力を捕まえる。**回し直しでは代われない**——第二意見は非決定的で、同じ差分
       # でも実行のたびに結果が変わる（review-workflow.md「第二意見の非決定性」）。
       # 記録に残すべきは**push を通したその実行**なので、ここで捕まえるしかない。
       #
       # `tee` で通すので、利用者に見える出力は変わらない。`pipefail` が効いているため、
       # レビュー側の終了コードは `tee` に隠れない。
-      local so_capture so_scope=""
-      so_capture="$(mktemp "${TMPDIR:-/tmp}/loop-gate-second-opinion.XXXXXX")"
       if [[ -n "$REVIEW_BASE" ]]; then
         # ステージ済みがあるときは、起点から索引までを渡す（コミット済みとステージ済みの両方）。
         if [[ -n "$REVIEW_RANGE_REASON" ]]; then
@@ -8414,8 +8774,12 @@ main() {
 
       # 記録は**判定の前に**残す。指摘が出た実行も記録に値する（何が出たのかが
       # 残らないと、直したのか黙って落としたのかを後から確かめられない）。
+      # 再実行の出力は、第二意見の出力の後ろに足してから記録する（冒頭「保存した再現テストの再実行」）。
+      if [[ -s "$rerun_capture" && -s "$so_capture" ]]; then
+        cat "$rerun_capture" >> "$so_capture"
+      fi
       record_second_opinion "$so_capture" "$so_scope" "$review_ok"
-      rm -f "$so_capture"
+      rm -f "$so_capture" "$rerun_capture"
 
       if [[ "$review_ok" -ne 0 ]]; then
         echo "[loop-gate] second opinion reported findings" >&2
@@ -12649,6 +13013,13 @@ SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 # （scripts/second-opinion-review.sh が持つ）。gemini / antigravity は空のままで
 # 各 CLI の既定。
 SECOND_OPINION_MODEL=
+
+# 第二意見の反証のエンジン（gemini | antigravity。空なら使えるものを gemini → antigravity の
+# 順に探す）。エンジンが codex のとき、再現の段階で再現しなかった指摘を別ベンダーのモデルに
+# 反証させ、指摘がすべて反証されたときだけ通す。claude は実装と同じベンダーのため選べない
+# （SECOND_OPINION_REFUTE_MODEL も gemini- で始まる名前だけを受ける）。見つからなければ反証せず、
+# 再現しなかった指摘は落とす。止めるには SECOND_OPINION_REFUTE=off。
+SECOND_OPINION_REFUTE_ENGINE=
 ENGTMPL
   elif has_with codex; then
     cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
@@ -12664,6 +13035,13 @@ SECOND_OPINION_ENGINE=__ENGINE_DEFAULT__
 # 第二意見のモデル（空なら各エンジンの既定）。codex の既定は gpt-6-sol
 # （scripts/second-opinion-review.sh が持つ）。gemini は空のままで CLI の既定。
 SECOND_OPINION_MODEL=
+
+# 第二意見の反証のエンジン（gemini | antigravity。空なら使えるものを gemini → antigravity の
+# 順に探す）。エンジンが codex のとき、再現の段階で再現しなかった指摘を別ベンダーのモデルに
+# 反証させ、指摘がすべて反証されたときだけ通す。claude は実装と同じベンダーのため選べない
+# （SECOND_OPINION_REFUTE_MODEL も gemini- で始まる名前だけを受ける）。見つからなければ反証せず、
+# 再現しなかった指摘は落とす。止めるには SECOND_OPINION_REFUTE=off。
+SECOND_OPINION_REFUTE_ENGINE=
 ENGTMPL
   else
     cat <<'ENGTMPL' | second_opinion_engine_fill "$engine_default" "$key_line" "$key_note"
@@ -13718,6 +14096,7 @@ required_playbook_templates() {
     'entry.md' \
     'second-opinion-review.sh' \
     'second-opinion-schema.json' \
+    'second-opinion-repro-schema.json' \
     'second-opinion-record.sh' \
     'second-opinion-gate-exempt.sh' \
     'second-opinion-gate.yml'
@@ -13895,6 +14274,7 @@ playbook_installed_rel_paths() {
       '.github/copilot-instructions.md' \
       'scripts/second-opinion-review.sh' \
       'scripts/second-opinion-schema.json' \
+      'scripts/second-opinion-repro-schema.json' \
       'scripts/second-opinion-record.sh' \
       'scripts/second-opinion-gate-exempt.sh' \
       '.github/workflows/second-opinion-gate.yml'
@@ -14001,6 +14381,11 @@ install_playbook_rules() {
   # 落ちる経路だけが残る。実行属性は不要（JSON であり実行対象ではない）。
   tpl="$(require_playbook_template second-opinion-schema.json)"
   apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-schema.json"
+
+  # 再現の段階（codex のときだけ）が読む回答の形。second-opinion-review.sh と対で配置する。
+  # 片方だけ置くと、再現の段階が「スキーマが見つかりません」で飛ばされる経路だけが残る。
+  tpl="$(require_playbook_template second-opinion-repro-schema.json)"
+  apply_file_with_policy "$tpl" "$OUTPUT_DIR/scripts/second-opinion-repro-schema.json"
 
   # 第二意見を配置するときは、回したことの記録と、回し忘れを確認する側もあわせて
   # 配置する。片方だけ置くと「第二意見はあるが、回したか誰も確かめていない」状態が
@@ -14276,6 +14661,67 @@ upgrade_baseline_matches() {
   [[ "$(dcb_file_sha256 "$cur")" == "$curh" ]]
 }
 
+# 既存の通常ファイル $2 を $1 の中身で置き換える。呼び出し側がシンボリックリンクと通常ファイル
+# 以外を先に除いている。
+#
+# *.sh（走っているかもしれないスクリプト。update-check.sh --upgrade が自分自身を置き換える）は、
+# 同じディレクトリの一時ファイルへ書き、モードを元に揃えて mv（rename）で差し替える。その場で
+# 上書きすると、走っている bash が開いている同じ inode の中身が変わり、古いオフセットで新しい
+# 中身を読み続けて壊れる（上流の issue 696）。rename なら走っている bash は古い inode を
+# 読み続ける。代わりに所有者・グループ・ACL・ハードリンクを保てない。
+# 親に書けない等で rename できないときは警告して、従来の上書きへ戻す。
+# 限界:
+#   - 上書きへ戻ったときは、実行中の古い版のスクリプトで元の不具合が起こりうる（親ディレクトリ
+#     に書けず、ファイルには書けるときだけ。末尾の exit が残る防御）。
+#   - mv の直前に置き換え先がディレクトリへのリンクに差し替わる競合は、dcb_place_file と同じく
+#     mv の後の確かめ直しでしか検出しない。
+# 中断: trap は mktemp より前に設定する（作ってから設定するまでの隙間で中断されても残さない）。
+# INT / TERM は一時ファイルを消し、元の trap を戻してから exit 130 / 143 で終わる。シグナルの
+# 送り直しはしない（呼び出し元が何もせず戻る trap を持っていても、置き換えが続かないように）。
+# exit なので呼び出し元の EXIT の片づけは走るが、呼び出し元の INT / TERM の trap は走らない。
+# 中断の要求に従って止まることを優先した。EXIT は消すだけで終了コードを変えない。
+#
+# *.sh 以外は従来どおり cat で中身だけ同じ場所へ差し替える（mv / cp だとモード・所有者・
+# ハードリンクが変わりうるため）。
+# 中身だけ同じ場所へ上書きする。失敗したらエラーを出して止める（従来は set -e で止まっていた）。
+upgrade_overwrite_in_place() {
+  if ! cat "$1" > "$2"; then
+    echo "error: $2 へ書けません。止めます。" >&2
+    exit 1
+  fi
+}
+
+upgrade_replace_file() {
+  local src="$1" dest="$2" mode tmp="" old_trap
+  if [[ "$dest" != *.sh ]]; then
+    upgrade_overwrite_in_place "$src" "$dest"
+    return 0
+  fi
+  mode="$(file_mode_octal "$dest")"
+  : "${mode:=755}"
+  old_trap="$(trap -p EXIT INT TERM)"
+  # 単引用符: $tmp と $old_trap は、trap が走る時点（この関数の中）の値で読む。
+  trap 'rm -f -- "${tmp:-}"' EXIT
+  trap 'rm -f -- "${tmp:-}"; trap - EXIT INT TERM; eval "${old_trap:-}"; exit 130' INT
+  trap 'rm -f -- "${tmp:-}"; trap - EXIT INT TERM; eval "${old_trap:-}"; exit 143' TERM
+  if tmp="$(mktemp "$dest.dcb-tmp.XXXXXX" 2>/dev/null)" \
+    && cat "$src" > "$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dest" 2>/dev/null; then
+    trap - EXIT INT TERM
+    [[ -z "$old_trap" ]] || eval "$old_trap"
+    # mv のあいだに dest がリンクへ置き換えられていないかを確かめ直す（dcb_place_file と同じ）。
+    if [[ -L "$dest" || ! -f "$dest" ]]; then
+      echo "error: $dest が書き込み中にリンクへ置き換えられました。止めます。" >&2
+      exit 1
+    fi
+    return 0
+  fi
+  rm -f -- "$tmp"
+  trap - EXIT INT TERM
+  [[ -z "$old_trap" ]] || eval "$old_trap"
+  echo "warn: $dest を rename で置き換えられないため、その場で上書きします（走っている間に置き換わる場合の防御は、スクリプト末尾の exit だけになります）。" >&2
+  upgrade_overwrite_in_place "$src" "$dest"
+}
+
 upgrade_apply_file() {
   local dest="$1" src="$2" rel newh curh rec acc mode verb baseline_match="false"
   rel="${dest#"$OUTPUT_DIR"/}"
@@ -14360,8 +14806,7 @@ upgrade_apply_file() {
       echo "plan: update$note $dest"
       return 0
     fi
-    # cat で中身だけ差し替える（mv / cp だとモード・所有者が変わりうる）。
-    cat "$src" > "$dest"
+    upgrade_replace_file "$src" "$dest"
     rm -f "$dest.dcb-new"
     if [[ "$baseline_match" == "true" ]]; then
       echo "write: $dest (upgraded, baseline match)"
