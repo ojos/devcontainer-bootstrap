@@ -104,7 +104,7 @@ PLAYBOOK_TMP_ROOT=""
 # doctor.sh の 2 箇所間の一致を、tests/test-dcb-version-anchors.sh が
 # RUNBOOK の記載件数と scripts/release-packages.sh の照合件数の一致を、
 # それぞれ機械照合する。
-DCB_VERSION="v0.25.0"
+DCB_VERSION="v0.25.1"
 
 # 生成物の由来記録の置き場。.ai-playbook/VERSION と同じ「取り込み側が生成する
 # 機械可読 key=value の記録」の流儀に揃える。.ai-playbook/
@@ -3129,6 +3129,45 @@ list_untracked() {
   return 0
 }
 
+# ignore に一致する未追跡の *.dcb-new の一覧を、$1 のファイルへ書く（%q で 1 行ずつ）。list_untracked の一覧
+# （--exclude-standard）には出ないものを、計画が無いときに --upgrade の前後で比べるために使う。
+# --directory で、丸ごと ignore に一致するディレクトリ（node_modules/ など）の中へは降りない（重くしないため。
+# 追従はそうした場所へ書かない）。そのディレクトリ自体の行（末尾が /）は数えない。
+# git が失敗したら 1 を返す（呼ぶ側が、新しくできたファイルを特定できない扱いにする）。
+list_ignored_dcb_new() {
+  local out="$1" raw="$1.raw" f
+  git -C "$ROOT" ls-files -z --others --ignored --exclude-standard --directory -- ':(glob)**/*.dcb-new' > "$raw" 2>/dev/null || { rm -f "$raw"; return 1; }
+  while IFS= read -r -d '' f; do
+    [[ "$f" == */ ]] || printf '%q\n' "$f"
+  done < "$raw" > "$out" || { rm -f "$raw"; return 1; }
+  rm -f "$raw"
+  return 0
+}
+
+# パス $1（ROOT からの相対）が、作業ツリーに通常のファイルかリンクとして在り、かつ追跡していなければ 0。
+# ignore に一致するかは問わない。ディレクトリは対象にしない（中のファイルだけが問題で、ディレクトリ自体は書き換えない）。
+untracked_present() {
+  [[ -L "$ROOT/$1" || -f "$ROOT/$1" ]] && ! git -C "$ROOT" ls-files --error-unmatch -- ":(literal)$1" >/dev/null 2>&1
+}
+
+# 追従で新しくできた、ignore に一致する未追跡のファイル（list_untracked の一覧には出ないもの）を、%q で 1 行ずつ出す。
+# $1 = 計画（parse_plan_paths の出力。読めなかったときは空）、$2 = --upgrade の前の list_ignored_dcb_new の一覧。
+# 計画があるときは、書き込み先（祖先を含まない）のうち、作業ツリーに通常のファイルかリンクとして在り、追跡していないもの。
+# 書き込み先と同じ名前の未追跡のファイル（ignore に一致するものを含む）は --upgrade の前に止めているので、今在るものは
+# 追従が書いたもの。計画が無いときは、ignore に一致する *.dcb-new の一覧を前後で比べる。読めなければ 1 を返す。
+ignored_written() {
+  local plan="$1" pre="$2" rp
+  if [[ -n "$plan" && -s "$plan.leaf" ]]; then
+    while IFS= read -r rp; do
+      if untracked_present "$rp"; then printf '%q\n' "$rp"; fi
+    done < <(sort -u "$plan.leaf")
+    return 0
+  fi
+  [[ -f "$pre" ]] || return 1
+  list_ignored_dcb_new "$pre.post" || return 1
+  lines_not_in "$pre" "$pre.post"
+}
+
 # 集合の差（$2 のうち $1 に無い行）と積（$2 のうち $1 にある行）。awk の連想配列で、一度の走査で取る。
 # $1 が空のファイルでも正しく動くよう、NR == FNR ではなく FILENAME で見分ける。
 lines_not_in() { awk 'FILENAME == ARGV[1] { a[$0] = 1; next } !($0 in a)' "$1" "$2"; }
@@ -3138,10 +3177,12 @@ lines_in_both() { awk 'FILENAME == ARGV[1] { a[$0] = 1; next } ($0 in a)' "$1" "
 # 祖先は、未追跡のシンボリックリンク（git ls-files --others が 1 エントリとして出す）を拾うため。
 # 祖先は、作業ツリーの中でリンクになっていないかを確かめる元として、$1.anc へもそのまま 1 行ずつ足す。
 # パスと祖先の全部は、存在を直接確かめる元として、$1.raw へもそのまま 1 行ずつ足す。
+# パス（祖先を含まない）だけは、$1.leaf へもそのまま 1 行ずつ足す（失敗したときに、追従が書いたファイルを確かめる元）。
 plan_emit() {
   local out="$1" d="$2"
   printf '%q\n' "$d" >> "$out"
   printf '%s\n' "$d" >> "$out.raw"
+  printf '%s\n' "$d" >> "$out.leaf"
   while [[ "$d" == */* ]]; do
     d="${d%/*}"
     printf '%q\n' "$d" >> "$out"
@@ -3160,7 +3201,7 @@ plan_emit() {
 # （呼ぶ側が安全側で止める）。パスは $ROOT/ から始まる（--output-dir "$ROOT" で流すため）。
 parse_plan_paths() {
   local in="$1" out="$2" line body rest p tail reason bad=0 n=0 known
-  : > "$out"; : > "$out.anc"; : > "$out.raw"
+  : > "$out"; : > "$out.anc"; : > "$out.raw"; : > "$out.leaf"
   while IFS= read -r line; do
     case "$line" in
       "plan: "*) ;;
@@ -3223,11 +3264,10 @@ report_untracked_overlap() {
   overlap="$(lines_in_both "$2" "$1")"
   # 未追跡の一覧は --exclude-standard で ignore 対象を除くので、ignore に一致する未追跡のファイル（例: CLAUDE.md.dcb-new）は
   # 一覧の照合では漏れる。一覧全体（node_modules/ のように数万件ありうる）を取り直さず、逆向きにも確かめる:
-  # 書き込み先（と祖先）それぞれについて、作業ツリーに通常のファイルかリンクとして在り、かつ追跡していなければ重なりとする。
-  # ディレクトリは対象にしない（中のファイルだけが問題で、ディレクトリ自体は書き換えない）。
+  # 書き込み先（と祖先）それぞれについて、untracked_present なら重なりとする。
   if [[ -s "$2.raw" ]]; then
     while IFS= read -r rp; do
-      if [[ -L "$ROOT/$rp" || -f "$ROOT/$rp" ]] && ! git -C "$ROOT" ls-files --error-unmatch -- ":(literal)$rp" >/dev/null 2>&1; then
+      if untracked_present "$rp"; then
         extra="$extra$(printf '%q' "$rp")"$'\n'
       fi
     done < <(sort -u "$2.raw")
@@ -3288,7 +3328,7 @@ run_dry_run_plan() {
 # prompt 以外（手で呼ぶ upgrade）は、キャッシュの最新を読む。
 do_upgrade() {
   local want="$1" shown_dcb="${2:-}" shown_pb="${3:-}" from_prompt="${4:-}" dir latest_dcb="" latest_pb="" want_dcb="" want_pb="" use_tag blocker
-  local work base wantbranch expected actual rc branch_hint changed written rmcmd f q in_tree dry_ok new_untracked new_unknown
+  local work base wantbranch expected actual rc branch_hint changed written rmcmd f q in_tree dry_ok new_untracked new_unknown ign
   local -a pbargs
   pbargs=()
   dir="$(cache_dir)"
@@ -3413,6 +3453,9 @@ do_upgrade() {
         rm -rf "$work"
         return 1
       fi
+      # 計画が無いので、失敗したときに追従が書いた ignore に一致する .dcb-new を見分けられるよう、前の一覧を控える
+      # （読めなければ控えない。失敗したときは、新しくできたファイルを特定できない扱いになる）。
+      list_ignored_dcb_new "$work/ignored.pre" || rm -f "$work/ignored.pre"
     elif ! report_untracked_overlap "$work/untracked.pre" "$work/plan.paths"; then
       restore_branch
       release_git_claim
@@ -3425,6 +3468,8 @@ do_upgrade() {
   bash "$work/bootstrap.sh" --upgrade --output-dir "$ROOT" ${pbargs[@]+"${pbargs[@]}"}
   rc=$?
   # 追従で新しくできた未追跡のファイル（--upgrade の直前の一覧に無いもの）。一覧を読めなければ new_unknown にする。
+  # 失敗したときは、ignore に一致するもの（.env.* に一致する .env.example.dcb-new など）も足す。足さないと、それだけが
+  # 書かれた状態で失敗したとき「何も書かれていない」と判断して元のブランチへ戻り、ファイルが案内なしに残る。
   new_untracked=""
   new_unknown=""
   if [[ -n "$in_tree" ]]; then
@@ -3432,6 +3477,18 @@ do_upgrade() {
       new_untracked="$(lines_not_in "$work/untracked.pre" "$work/untracked.post")"
     else
       new_unknown="yes"
+    fi
+    if [[ $rc -ne 0 && $rc -ne 2 ]]; then
+      if ign="$(ignored_written "${dry_ok:+$work/plan.paths}" "$work/ignored.pre")"; then
+        # 並びを変えずに、まだ無いものだけを後ろへ足す（案内は先頭の 40 行で切るため）。
+        if [[ -n "$ign" ]]; then
+          printf '%s\n' "$new_untracked" | sed '/^$/d' > "$work/new.lst"
+          printf '%s\n' "$ign" > "$work/ign.lst"
+          new_untracked="$(cat "$work/new.lst"; lines_not_in "$work/new.lst" "$work/ign.lst")"
+        fi
+      else
+        new_unknown="yes"
+      fi
     fi
   fi
   rm -rf "$work"
@@ -11529,6 +11586,40 @@ EOF
   return 0
 }
 
+# パスのファイルの、存在する最も近い祖先のディレクトリを出す（相対のパスは cwd から読む）。
+# まだ無いファイル・ディレクトリでも、台帳を呼ぶ場所と、リポジトリの外かの判定に使える。
+# 結果は EXISTING_DIR に入れる（コマンド置換で受けると、ディレクトリ名の末尾の改行が削られ、別の
+# 場所を指すため。dirname の結果も、末尾に目印を付けて取り出す）。
+EXISTING_DIR=""
+existing_dir_of() { # パス
+  local d="$1"
+  [[ "$d" == /* ]] || d="${cwd:-$PWD}/$d"
+  d="$(dirname "$d"; printf .)"; d="${d%.}"; d="${d%$'\n'}"
+  while [[ ! -d "$d" ]]; do d="$(dirname "$d"; printf .)"; d="${d%.}"; d="${d%$'\n'}"; done
+  EXISTING_DIR="$d"
+}
+
+# ディレクトリが git の作業ツリーの外だと git が答えるか。外と確かに言えるとき（作業ツリーの外＝
+# .git の中・bare のリポジトリ、または「not a git repository」）だけ 0 を返す。それ以外の失敗
+# （所有者の確かめ・git が無いなど）は外と決めつけず、従来どおり台帳を呼んで、読めなければ警告を
+# 出させる。判定はファイルの場所だけで行うため、GIT_ で始まる環境変数（GIT_DIR・
+# GIT_CEILING_DIRECTORIES・GIT_TRACE など）はすべて外して git を呼び、標準出力（判定）と
+# 標準エラー（診断）を分けて受け取る。一時ファイルは使わない（作れない環境でも判定できるよう、
+# 失敗したときだけ、診断を受け取るためにもう一度呼ぶ）。
+outside_work_tree() { # ディレクトリ
+  local out err v
+  local -a unset_args=()
+  for v in $(compgen -e); do
+    case "$v" in GIT_*) unset_args+=(-u "$v") ;; esac
+  done
+  if out="$(env ${unset_args[@]+"${unset_args[@]}"} LC_ALL=C git -C "$1" rev-parse --is-inside-work-tree 2>/dev/null)"; then
+    [[ "$out" == "false" ]]
+  else
+    err="$(env ${unset_args[@]+"${unset_args[@]}"} LC_ALL=C git -C "$1" rev-parse --is-inside-work-tree 2>&1 >/dev/null)"
+    [[ "$err" == *"not a git repository"* ]]
+  fi
+}
+
 pre_edit() {
   local path dir
   path="$fpath"
@@ -11538,6 +11629,13 @@ pre_edit() {
     add_warn "$UNSAFE_WARN"
     return 0
   fi
+  # 台帳は、ファイルの存在する最も近い祖先のディレクトリから呼ぶ（まだ無いディレクトリから呼ぶと、
+  # セッションの cwd へ戻り、別のリポジトリの台帳を見てしまうため）。
+  existing_dir_of "$path"
+  dir="$EXISTING_DIR"
+  # 作業ツリーの外のファイル（/tmp・.git の中など）は、台帳が守る共有の文書ではない。台帳を呼ぶと置き場所が
+  # 決まらず、意味の無い警告が毎回出て、台帳が本当に壊れたときの警告と見分けられなくなる（#727）。
+  ! outside_work_tree "$dir" || return 0
   refresh_ledger "$dir"
   run_ledger "$dir" check doc "$path"
   if [[ "$LEDGER_VERDICT" == "LEDGER_WARN" ]]; then
